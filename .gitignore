@@ -27,3 +27,6 @@ e2e/output/
 
 # Claude Code 작업 폴더
 .claude/worktrees/
+
+# 서버 DB 파일
+server/data/
