@@ -81,6 +81,18 @@ class Uploader(
     var loaded = false
         private set
 
+    /**
+     * 암호화 키를 쓸 수 없어(일시 오류로 unwrap 실패, DEK 저장 실패) 이번 실행은 디스크를 읽지도 쓰지도 않고 메모리 큐로만 동작한다.
+     * 기존 파일은 그대로 두고 다음 실행에서 다시 읽는다.
+     */
+    @Volatile
+    var memoryOnly = false
+        private set
+
+    /** 진행 중인 Create의 localId. 그 사이 상한 정리가 그 트립을 지웠는지([creatingDropped]) 알아 등록을 남기려는 것이다. lock으로 보호한다. */
+    private var creatingLocalId: String? = null
+    private var creatingDropped = false
+
     /** 복호화·해석에 실패해 건너뛴 줄 수(큐·server-ids). 이번 실행 동안 누적이 아니라 로드 때 센 값이다. */
     @Volatile
     var corruptLines = 0
@@ -107,27 +119,30 @@ class Uploader(
                 cipherSetup()
             } catch (t: Throwable) {
                 Log.w(TAG, "암호화 준비 예외, 임시 키로 진행: ${t.javaClass.simpleName}")
-                CipherSetup(AesGcmCipher.fromBytes(ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }), 0, false)
+                CipherSetup(AesGcmCipher.fromBytes(ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }), 0, false, true)
             }
+            memoryOnly = !setup.persistent
             discardedLines = setup.discardedLines
             queue = TripQueue(queueFile, setup.cipher)
             ids = EncryptedLines(idsFile, setup.cipher)
             deadLetters = EncryptedLines(deadLetterFile, setup.cipher)
             var corrupt = 0
-            val fileEntries: MutableList<QueueEntry> = try {
+            val fileEntries: MutableList<QueueEntry> = if (memoryOnly) {
+                ArrayList() // 임시 키로는 기존 파일을 읽을 수 없고, 읽은 줄을 '손상'으로 세어 다시 쓰면 안 되므로 건드리지 않는다
+            } else try {
                 queue.load().also { corrupt += it.corrupt }.entries
             } catch (t: Exception) {
                 Log.w(TAG, "큐 파일 읽기 실패: ${t.javaClass.simpleName}")
                 saveFailureCount.incrementAndGet()
                 ArrayList()
             }
-            val regs = try {
+            val regs = if (memoryOnly) LinkedHashMap() else try {
                 loadRegistrations().also { corrupt += it.second }.first
             } catch (t: Exception) {
                 Log.w(TAG, "server-ids 읽기 실패: ${t.javaClass.simpleName}")
                 LinkedHashMap()
             }
-            synchronized(deadLock) { deadCount = try { deadLetters.countLines() } catch (t: Exception) { 0 } }
+            synchronized(deadLock) { deadCount = if (memoryOnly) 0 else try { deadLetters.countLines() } catch (t: Exception) { 0 } }
             corruptLines = corrupt
             if (corrupt > 0) Log.w(TAG, "복호화·해석 실패로 건너뛴 줄: ${corrupt}줄(큐·server-ids)")
 
@@ -135,7 +150,7 @@ class Uploader(
             var done = false
             while (!done) {
                 val batch = synchronized(lock) { early.toList() }
-                val lines = batch.mapNotNull { e -> try { queue.encode(e) } catch (t: Exception) { null } }
+                val lines = if (memoryOnly) emptyList() else batch.mapNotNull { e -> try { queue.encode(e) } catch (t: Exception) { null } }
                 var removedVictims = false
                 synchronized(lock) {
                     if (early.size != batch.size) return@synchronized
@@ -155,6 +170,8 @@ class Uploader(
                         saveFailureCount.incrementAndGet()
                     }
                     early.clear()
+                    // 저장된 Alias(보내기 전에 종료된 경우 포함)를 아직 안 보낸 Start에 다시 적용한다.
+                    entries.filterIsInstance<QueueEntry.Alias>().forEach { applyAlias(it) }
                     if (corrupt > 0) dirty = true
                     removedVictims = enforceCap()
                     loaded = true
@@ -175,7 +192,7 @@ class Uploader(
     fun enqueue(vararg added: QueueEntry): Boolean {
         if (added.isEmpty()) return true
         var ok = true
-        val canEncrypt = loaded
+        val canEncrypt = loaded && !memoryOnly
         val prepared = ArrayList<Pair<QueueEntry, String?>>(added.size)
         for (e in added) {
             try {
@@ -207,20 +224,50 @@ class Uploader(
                 return ok
             }
             entries.addAll(newEntries)
-            // 로드 직전에 경합해 아직 암호화하지 못한 항목은 여기서 암호화한다(드문 경우).
-            val lines = accepted.mapNotNull { p -> p.second ?: try { queue.encode(p.first) } catch (t: Exception) { null } }
-            try {
-                queue.appendEncrypted(lines)
-            } catch (t: Exception) {
-                ok = false
-                saveFailureCount.incrementAndGet()
-                Log.w(TAG, "큐 파일 쓰기 실패: ${t.javaClass.simpleName}")
+            newEntries.filterIsInstance<QueueEntry.Alias>().forEach { applyAlias(it) }
+            if (!memoryOnly) {
+                // 로드 직전에 경합해 아직 암호화하지 못한 항목은 여기서 암호화한다(드문 경우).
+                val lines = accepted.mapNotNull { p -> p.second ?: try { queue.encode(p.first) } catch (t: Exception) { null } }
+                try {
+                    queue.appendEncrypted(lines)
+                } catch (t: Exception) {
+                    ok = false
+                    saveFailureCount.incrementAndGet()
+                    Log.w(TAG, "큐 파일 쓰기 실패: ${t.javaClass.simpleName}")
+                }
+                compaction?.tail?.addAll(lines)
             }
-            compaction?.tail?.addAll(lines)
             victims = enforceCap()
         }
         if (victims) saveRegistrations()
         return ok
+    }
+
+    /**
+     * lock을 잡고 부른다. 큐에 남은(아직 서버에 안 보낸) Start 중 차량 ID가 [alias]의 from인 것을 to로 바꾼다.
+     * 이미 서버에 올라간 트립은 서버의 alias 테이블이 잇는다. 파일은 다음 컴팩션(dirty)에서 바뀐다. 바꾼 개수를 돌려준다.
+     */
+    private fun applyAlias(alias: QueueEntry.Alias): Int {
+        var changed = 0
+        fun swap(list: MutableList<QueueEntry>) {
+            for (i in list.indices) {
+                val e = list[i]
+                if (e is QueueEntry.Start && e.vehicleId == alias.fromVehicleId) {
+                    list[i] = e.copy(
+                        vehicleId = alias.toVehicleId,
+                        driverId = if (e.driverId == alias.fromVehicleId) alias.toVehicleId else e.driverId,
+                    )
+                    changed++
+                }
+            }
+        }
+        swap(entries)
+        swap(early)
+        if (changed > 0) {
+            structVersion++
+            dirty = true
+        }
+        return changed
     }
 
     /** lock을 잡고 부른다. */
@@ -241,7 +288,7 @@ class Uploader(
             if (loaded) {
                 dirty = false
                 try {
-                    queue.rewrite(emptyList())
+                    if (!memoryOnly) queue.rewrite(emptyList())
                 } catch (t: Exception) {
                     Log.w(TAG, "큐 비우기 실패: ${t.javaClass.simpleName}")
                 }
@@ -288,7 +335,7 @@ class Uploader(
         val snapshot: List<QueueEntry>
         val version: Long
         synchronized(lock) {
-            if (!loaded || compaction != null) return false
+            if (!loaded || memoryOnly || compaction != null) return false
             snapshot = entries.toList()
             version = structVersion
             compaction = Compaction()
@@ -299,8 +346,9 @@ class Uploader(
             val encrypted = queue.encryptAll(snapshot) // lock 밖
             val file = queue.writeTmp(encrypted) // lock 밖(fsync 포함)
             tmp = file
-            while (true) {
-                val tail: List<String>
+            var committed = false
+            while (!committed) {
+                var tail: List<String> = emptyList()
                 synchronized(lock) {
                     if (structVersion != version) {
                         // 그 사이 상한 정리·clear로 목록이 바뀌었다. 이 스냅샷으로는 교체하지 않는다.
@@ -313,13 +361,16 @@ class Uploader(
                     if (pending.isEmpty()) {
                         queue.commit(file) // rename만 lock 안
                         compaction = null
-                        return true
+                        committed = true
+                        return@synchronized
                     }
                     tail = ArrayList(pending)
                     pending.clear()
                 }
-                queue.appendTmp(file, tail) // lock 밖
+                if (!committed) queue.appendTmp(file, tail) // lock 밖
             }
+            queue.syncDir() // rename을 디스크에 남기는 fsync는 lock 밖. 실패해도 컴팩션은 성공이다(FileIo가 삼킨다)
+            return true
         } catch (t: Throwable) {
             Log.w(TAG, "컴팩션 실패(다음에 다시 시도): ${t.javaClass.simpleName}")
             synchronized(lock) {
@@ -358,17 +409,43 @@ class Uploader(
                 try {
                     when (step) {
                         is Step.Create -> {
-                            val serverId = api.createTrip(step.start)
+                            synchronized(lock) {
+                                creatingLocalId = step.start.localId
+                                creatingDropped = false
+                            }
+                            val serverId = try {
+                                api.createTrip(step.start)
+                            } catch (t: Throwable) {
+                                synchronized(lock) { creatingLocalId = null }
+                                throw t
+                            }
                             var save = false
                             synchronized(lock) {
+                                val dropped = creatingDropped
+                                creatingLocalId = null
+                                creatingDropped = false
                                 if (removeEntry(step.entry)) {
                                     registrations[step.start.localId] = Registration(serverId, step.start, null)
                                     held.remove(step.start.localId)
                                     removed++
                                     save = true
+                                } else if (dropped) {
+                                    // 서버에는 트립이 만들어졌는데 그 사이 상한 정리가 큐 항목을 지웠다. 등록은 남겨 다음 시작 때 복구가 End를 보내게 한다.
+                                    registrations[step.start.localId] = Registration(serverId, step.start, null)
+                                    held.remove(step.start.localId)
+                                    save = true
                                 }
                             }
                             if (save) saveRegistrations()
+                        }
+                        is Step.Alias -> {
+                            api.aliasVehicle(step.alias)
+                            synchronized(lock) {
+                                if (removeEntry(step.alias)) {
+                                    held.remove(step.alias.localId)
+                                    removed++
+                                }
+                            }
                         }
                         is Step.Points -> {
                             api.postPoints(step.serverId, step.batch.map { it.point })
@@ -469,6 +546,10 @@ class Uploader(
             override val firstEntry get() = end
         }
 
+        class Alias(val alias: QueueEntry.Alias) : Step {
+            override val firstEntry get() = alias
+        }
+
         class Orphan(val entry: QueueEntry) : Step {
             override val firstEntry get() = entry
         }
@@ -499,6 +580,7 @@ class Uploader(
         val head = entries.firstOrNull { !isHeld(it.localId, now) } ?: return null
         return when (head) {
             is QueueEntry.Start -> Step.Create(head)
+            is QueueEntry.Alias -> Step.Alias(head)
             is QueueEntry.Point -> {
                 val reg = registrations[head.localId] ?: return Step.Orphan(head)
                 val run = ArrayList<QueueEntry.Point>()
@@ -533,6 +615,11 @@ class Uploader(
                 s == 400 || s == 413 || s == 422 -> Action.Isolate
                 else -> Action.Hold(id, "HELD HTTP $s")
             }
+            is Step.Alias -> when {
+                // 400·409 등은 다시 보내도 같으니 dead-letter로 격리한다(보류하면 영영 재시도한다). 404(서버가 아직 모름)는 보류.
+                s == 404 -> Action.Hold(id, "HELD HTTP $s")
+                else -> Action.Isolate
+            }
             is Step.Orphan -> Action.Stop(DrainKind.RETRY, "RETRY HTTP $s")
         }
     }
@@ -566,7 +653,8 @@ class Uploader(
 
     /** lock을 잡고 부른다. [expected]와 같은 객체를 목록에서 찾아 지운다(그 사이 clear·정리로 사라졌으면 건드리지 않는다). */
     private fun removeEntry(expected: QueueEntry): Boolean {
-        val i = entries.indexOfFirst { it === expected }
+        // Start는 그 사이 [applyAlias]로 차량 ID만 바뀐 사본으로 교체됐을 수 있어 localId로도 찾는다.
+        val i = entries.indexOfFirst { it === expected || (expected is QueueEntry.Start && it is QueueEntry.Start && it.localId == expected.localId) }
         if (i < 0) return false
         val e = entries.removeAt(i)
         structVersion++
@@ -580,6 +668,7 @@ class Uploader(
     /** 격리 항목을 dead-letter 파일에 남긴다. 파일은 [deadLetterMax]줄까지만 두고 넘으면 오래된 줄부터 버린다. 실패해도 던지지 않는다. */
     private fun deadLetter(entry: QueueEntry, reason: String) {
         Log.w(TAG, "dead-letter: $reason")
+        if (memoryOnly) return // 디스크에 쓰지 않는 실행이다
         try {
             val line = JSONObject().put("reason", reason).put("entry", QueueCodec.encode(entry)).toString()
             synchronized(deadLock) {
@@ -616,6 +705,7 @@ class Uploader(
             }
             registrations.remove(victim)
             held.remove(victim)
+            if (victim == creatingLocalId) creatingDropped = true
             dropped = true
             Log.w(TAG, "큐 상한 $maxPoints 초과: 가장 오래된 종료 트립 제거(점 ${before - points.get()}개)")
         }
@@ -654,6 +744,7 @@ class Uploader(
 
     /** lock 밖에서 부른다. lock 안에서 JSON만 만들고, 암호화·fsync·rename은 [idsLock]으로 순서만 지킨다. */
     private fun saveRegistrations() {
+        if (memoryOnly) return
         val lines: List<String>
         val version: Long
         synchronized(lock) {

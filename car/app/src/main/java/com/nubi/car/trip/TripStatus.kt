@@ -24,6 +24,8 @@ data class TripStatus(
     val corruptLines: Int = 0,
     /** 암호화 키를 새로 만들어 읽을 수 없게 돼 폐기한 저장 줄 수. */
     val discardedLines: Int = 0,
+    /** 암호화 키를 쓸 수 없어 이번 실행은 디스크에 저장하지 않고 메모리에서만 동작 중('저장 보류(키 오류)'). */
+    val storageHeld: Boolean = false,
 ) {
     companion object {
         val SERVICE_FAILED = RecorderHealth.SERVICE_FAILED

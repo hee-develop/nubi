@@ -82,4 +82,25 @@ class VehicleIdTest {
         assertNull(r.vehicleId)
         assertTrue(api.vins.isEmpty())
     }
+
+    @Test
+    fun PermanentFailure는_재시도하지_않는다() {
+        val api = FakeVehicleApi { throw PermanentFailure("TLS 필요") }
+        val r = resolver(api, attempts = 3)
+        r.onVin("VIN")
+        assertEquals(1, api.vins.size)
+        assertNull(r.vehicleId)
+    }
+
+    @Test
+    fun 키를_못_풀어_메모리_모드면_저장_파일을_읽지도_쓰지도_않는다() {
+        val file = File(tmp.root, "vehicle-id.enc")
+        VehicleIdStore(file) { cipher }.save("kept-id")
+        val before = file.readText()
+        val held = VehicleIdStore(file, { false }) { cipher }
+        assertNull(held.load())
+        held.save("new-id")
+        assertEquals(before, file.readText())
+        assertEquals("kept-id", VehicleIdStore(file) { cipher }.load())
+    }
 }

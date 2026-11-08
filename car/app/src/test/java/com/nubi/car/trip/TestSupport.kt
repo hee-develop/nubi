@@ -34,7 +34,8 @@ fun newUploader(
 
 /** Keystore 대신 소프트웨어 AES 키로 DEK를 감싸는 테스트용 래퍼. */
 class SoftwareKeyWrapper(private val key: javax.crypto.SecretKey = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()) : KeyWrapper {
-    var failUnwrap = false
+    var failUnwrap = false // 일시 오류(예: KeyStoreException)
+    var failUnwrapLost: Throwable? = null // 영구 손실(KeyPermanentlyLostException·AEADBadTagException 등)
     var failWrap = false
     var unwrapCalls = 0
 
@@ -46,6 +47,7 @@ class SoftwareKeyWrapper(private val key: javax.crypto.SecretKey = KeyGenerator.
 
     override fun unwrap(blob: ByteArray): ByteArray {
         unwrapCalls++
+        failUnwrapLost?.let { throw it }
         if (failUnwrap) throw IllegalStateException("unwrap 실패")
         val c = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
             .apply { init(javax.crypto.Cipher.DECRYPT_MODE, key, javax.crypto.spec.GCMParameterSpec(128, blob, 0, 12)) }
@@ -93,6 +95,8 @@ class FakeServer : TripApi {
     var onCreate: (QueueEntry.Start) -> Unit = {}
     var onPoints: (String, List<TripPoint>) -> Unit = { _, _ -> }
     var onEnd: (String, QueueEntry.End) -> Unit = { _, _ -> }
+    var onAlias: (QueueEntry.Alias) -> Unit = {}
+    val aliases = ArrayList<QueueEntry.Alias>()
 
     @Synchronized
     override fun createTrip(e: QueueEntry.Start): String {
@@ -120,6 +124,13 @@ class FakeServer : TripApi {
             ended.putIfAbsent(tripId, e.endedAtMillis)
             events.add("end $tripId endedAt=${e.endedAtMillis}")
         }
+    }
+
+    @Synchronized
+    override fun aliasVehicle(e: QueueEntry.Alias) {
+        onAlias(e)
+        aliases.add(e)
+        events.add("alias ${e.fromVehicleId}->${e.toVehicleId}")
     }
 
     fun seqs(localId: String): List<Int> = pointsByTrip[tripIdByLocalId[localId]]?.keys?.toList() ?: emptyList()
@@ -206,6 +217,7 @@ class FailingApi(private val error: () -> Throwable) : TripApi {
     override fun createTrip(e: QueueEntry.Start): String = throw error()
     override fun postPoints(tripId: String, points: List<TripPoint>) = throw error()
     override fun endTrip(tripId: String, e: QueueEntry.End) = throw error()
+    override fun aliasVehicle(e: QueueEntry.Alias) = throw error()
 }
 
 val networkDown = FailingApi { IOException("down") }

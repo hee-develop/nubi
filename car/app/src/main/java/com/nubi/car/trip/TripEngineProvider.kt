@@ -52,7 +52,7 @@ object TripEngineProvider {
             cipherSetup = { setup.value },
         )
         val resolver = VehicleIdResolver(
-            store = VehicleIdStore(File(dir, "vehicle-id.enc")) { setup.value.cipher },
+            store = VehicleIdStore(File(dir, "vehicle-id.enc"), { setup.value.persistent }) { setup.value.cipher },
             api = HttpVehicleApi(BuildConfig.SERVER_URL),
             executor = Executors.newSingleThreadExecutor(),
         )

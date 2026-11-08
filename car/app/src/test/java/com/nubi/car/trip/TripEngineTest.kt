@@ -132,6 +132,42 @@ class TripEngineTest {
     }
 
     @Test
+    fun UUID로_대체한_뒤_서버_ID를_받으면_미전송_Start를_서버_ID로_바꾸고_alias를_한_번_보낸다() {
+        var down = true
+        server.onCreate = { if (down) throw java.io.IOException("down") }
+        val e = engine()
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.drive(4)
+        scheduler.advance(7_000) // 10초 경과: UUID로 대체해 Start가 큐에 올라가지만 서버가 내려가 있다
+        val uuid = store.getString("vehicleId")
+        assertNotNull(uuid)
+        assertTrue(server.events.isEmpty())
+        vehicle.vehicleId = "server-issued" // 이제야 서버 ID를 받았다
+        scheduler.advance(10_000) // tick이 전환을 확인한다
+        assertEquals("server-issued", store.getString("vehicleId"))
+        down = false
+        scheduler.advance(6 * 60_000)
+        assertEquals(listOf(QueueEntry.Alias(uuid!!, "server-issued")), server.aliases)
+        assertTrue(server.events.any { it.startsWith("create ") && it.endsWith("vehicle=server-issued") })
+        assertTrue(server.events.none { it.contains("vehicle=$uuid") && it.startsWith("create") })
+        // 이미 전환했으므로 다음 확인에서 alias를 또 보내지 않는다
+        scheduler.advance(60_000)
+        assertEquals(1, server.aliases.size)
+    }
+
+    @Test
+    fun 서버_ID가_처음부터_있으면_alias를_보내지_않는다() {
+        vehicle.vehicleId = "server-issued"
+        val e = engine()
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.drive(4)
+        scheduler.advance(120_000)
+        assertTrue(server.aliases.isEmpty())
+    }
+
+    @Test
     fun VIN이_오면_UUID를_만들지_않고_해시를_차량_ID로_쓴다() {
         val e = engine()
         e.onServiceStart()

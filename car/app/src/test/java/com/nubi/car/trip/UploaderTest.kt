@@ -563,7 +563,7 @@ class UploaderTest {
         val server = FakeServer()
         val u = uploader(server)
         u.enqueue(start("a"), *points("a", 0..3), QueueEntry.End("a", 1, null))
-        val tmpDir = File(dir, "queue.jsonl.tmp").apply { mkdir() } // 임시 파일 자리에 디렉터리 → 컴팩션 쓰기가 실패한다
+        val tmpDir = File(dir, "queue.compact.tmp").apply { mkdir() } // 컴팩션 임시 파일 자리에 디렉터리 → 컴팩션 쓰기가 실패한다
         assertEquals(DrainKind.OK, u.drain().kind) // drain은 컴팩션 실패에 영향받지 않는다
         assertEquals(listOf(0, 1, 2, 3), server.seqs("a"))
         assertEquals("컴팩션이 실패했으므로 파일은 그대로", 6, queueLines())
@@ -664,28 +664,138 @@ class UploaderTest {
     }
 
     @Test
-    fun Keystore_unwrap_예외와_wrap_실패에서도_크래시하지_않는다() {
+    fun Keystore_영구_손실과_wrap_실패에서도_크래시하지_않는다() {
         dir = tmp.newFolder("trips")
         val wrapper = SoftwareKeyWrapper()
         dekUploader(wrapper).enqueue(start("a"))
-        wrapper.failUnwrap = true // Keystore 키가 사라진 경우
+        wrapper.failUnwrapLost = KeyPermanentlyLostException("키 없음") // Keystore 키가 사라진 경우
         val lost = dekUploader(wrapper)
         assertEquals(0, lost.pendingEntries)
         assertEquals(1, lost.discardedLines)
+        assertFalse(lost.memoryOnly)
         assertTrue(lost.enqueue(start("b")))
-        // wrap까지 실패하면 이번 실행에만 쓰는 임시 키로 계속 돈다
+        // wrap까지 실패하면 이번 실행에만 쓰는 임시 키로 메모리에서만 돈다(디스크에 쓰지 않는다)
         File(dir, "dek.bin").delete()
+        wrapper.failUnwrapLost = null
         wrapper.failWrap = true
+        val queueBefore = File(dir, "queue.jsonl").readText()
         val ephemeral = dekUploader(wrapper)
+        assertTrue(ephemeral.memoryOnly)
         assertTrue(ephemeral.enqueue(start("c"), *points("c", 0..1)))
         assertEquals(3, ephemeral.pendingEntries)
+        assertFalse(File(dir, "queue.jsonl").exists() && File(dir, "queue.jsonl").readText() != "")
+        assertTrue(queueBefore.isNotEmpty())
+    }
+
+    @Test
+    fun 일시_키_오류면_기존_파일을_건드리지_않고_메모리_큐로_업로드하며_다음_실행에_다시_읽는다() {
+        dir = tmp.newFolder("trips")
+        val wrapper = SoftwareKeyWrapper()
+        dekUploader(wrapper).enqueue(start("old"), *points("old", 0..2), QueueEntry.End("old", 5, null))
+        val queueBefore = File(dir, "queue.jsonl").readText()
+        val dekBefore = File(dir, "dek.bin").readText()
+        wrapper.failUnwrap = true
         val server = FakeServer()
-        val drain = Uploader(
+        val u = Uploader(
             File(dir, "queue.jsonl"), File(dir, "server-ids.jsonl"), File(dir, "dead-letter.jsonl"), server,
-            { CipherSetup(AesGcmCipher.fromBytes(ByteArray(32))) },
+            { DekCipherFactory(dir, wrapper, sleep = {}).setup() },
         )
-        assertEquals(0, drain.corruptLines) // load 전
-        drain.load()
-        assertTrue(drain.corruptLines >= 1) // 임시 키로 쓴 줄은 다른 키로 읽을 수 없다
+        u.load()
+        assertTrue(u.memoryOnly)
+        assertEquals(0, u.corruptLines) // 읽지 않았으므로 '손상'으로 세지 않는다
+        assertEquals(0, u.discardedLines)
+        assertTrue(u.enqueue(start("new"), *points("new", 0..1), QueueEntry.End("new", 9, null)))
+        assertEquals(DrainKind.OK, u.drain().kind)
+        assertEquals(listOf(0, 1), server.seqs("new")) // 메모리 큐는 업로드된다
+        assertTrue(u.compact().not()) // 디스크 컴팩션은 하지 않는다
+        assertEquals(queueBefore, File(dir, "queue.jsonl").readText())
+        assertEquals(dekBefore, File(dir, "dek.bin").readText())
+        assertFalse(File(dir, "dek.bin.stale").exists())
+        // 키가 돌아온 다음 실행: 옛 큐가 그대로 읽힌다
+        wrapper.failUnwrap = false
+        val next = dekUploader(wrapper)
+        assertFalse(next.memoryOnly)
+        assertEquals(5, next.pendingEntries)
+    }
+
+    @Test
+    fun alias는_큐의_미전송_Start_차량_ID를_바꾸고_서버에_한_번_보낸다() {
+        val server = FakeServer()
+        val u = uploader(server, load = false)
+        u.load()
+        u.enqueue(start("t1", vehicleId = "uuid-1"), *points("t1", 0..1))
+        u.enqueue(start("t2", vehicleId = "other"))
+        u.enqueue(QueueEntry.Alias("uuid-1", "server-1"))
+        // 파일도 바뀐다(다음 컴팩션 뒤). 다시 로드해도 Alias가 남아 있으면 같은 결과다.
+        assertEquals(DrainKind.OK, u.drain().kind)
+        assertEquals(listOf("alias uuid-1->server-1"), server.events.filter { it.startsWith("alias") })
+        assertEquals(1, server.events.count { it == "create t1 startedAt=0 vehicle=server-1" })
+        assertEquals(1, server.events.count { it == "create t2 startedAt=0 vehicle=other" })
+        assertEquals(0, u.pendingEntries)
+        assertEquals(0, uploader(networkDown).pendingEntries)
+    }
+
+    @Test
+    fun 재시작해도_저장된_Alias가_미전송_Start에_다시_적용된다() {
+        val server = FakeServer()
+        val u = uploader(networkDown)
+        u.enqueue(start("t1", vehicleId = "uuid-1"), QueueEntry.Alias("uuid-1", "server-1"))
+        // 컴팩션 전에 죽었다고 보고 파일을 원래 순서(Start가 옛 ID)로 되돌린다
+        val restart = File(dir, "queue.jsonl")
+        restart.writeText(
+            listOf(start("t1", vehicleId = "uuid-1"), QueueEntry.Alias("uuid-1", "server-1"))
+                .joinToString("") { cipher.encrypt(QueueCodec.encode(it)) + "\n" },
+        )
+        val again = uploader(server)
+        assertEquals(DrainKind.OK, again.drain().kind)
+        assertTrue(server.events.contains("create t1 startedAt=0 vehicle=server-1"))
+        assertEquals(1, server.aliases.size)
+    }
+
+    @Test
+    fun alias_영구_4xx는_dead_letter로_격리하고_큐를_막지_않는다() {
+        val server = FakeServer().apply { onAlias = { throw HttpFailure(409, "conflict") } }
+        val u = uploader(server)
+        u.enqueue(QueueEntry.Alias("a", "b"), start("t"))
+        assertEquals(DrainKind.OK, u.drain().kind)
+        assertEquals(1, u.readDeadLetters().size)
+        assertTrue(server.events.any { it.startsWith("create t") })
+        // 일시 오류는 항목을 남긴다
+        val s2 = FakeServer().apply { onAlias = { throw HttpFailure(503, "down") } }
+        val u2 = uploader(s2)
+        u2.enqueue(QueueEntry.Alias("c", "d"))
+        assertEquals(DrainKind.RETRY, u2.drain().kind)
+        assertEquals(1, u2.pendingEntries)
+    }
+
+    @Test
+    fun Create_성공_직후_상한_정리로_항목이_사라져도_등록을_남겨_복구가_End를_보낼_수_있다() {
+        val server = FakeServer()
+        val u = uploader(server, maxPoints = 5)
+        server.onCreate = { e ->
+            // 서버 응답을 기다리는 사이(lock 밖) 다른 트립이 점을 쌓아 상한을 넘기고, 가장 오래된 종료 트립(= a)이 통째로 지워진다
+            if (e.localId == "a") u.enqueue(start("b"), *points("b", 0..5))
+        }
+        u.enqueue(start("a"), QueueEntry.End("a", 3, null))
+        server.onPoints = { _, _ -> throw HttpFailure(503, "stop") } // 이후는 멈춰서 상태만 본다
+        assertEquals(DrainKind.RETRY, u.drain().kind)
+        assertEquals(1, server.createCalls.coerceAtMost(1))
+        // 다음 시작: 큐에는 a가 없지만 등록이 남아 있어 End가 만들어진다
+        val restarted = uploader(server)
+        val recovered = restarted.recoverUnfinished()
+        assertTrue("등록이 남아 a의 End를 복구해야 한다", recovered >= 1)
+        server.onPoints = { _, _ -> }
+        assertEquals(DrainKind.OK, restarted.drain().kind)
+        assertTrue(server.ended.containsKey(server.tripIdByLocalId["a"]))
+    }
+
+    @Test
+    fun 컴팩션은_queue_compact_tmp를_쓰고_clear의_임시_파일과_겹치지_않는다() {
+        val u = uploader(networkDown)
+        u.enqueue(start("a"))
+        assertEquals("queue.compact.tmp", FileIo.compactTmpOf(File(dir, "queue.jsonl")).name)
+        assertEquals("queue.jsonl.tmp", FileIo.tmpOf(File(dir, "queue.jsonl")).name)
+        assertTrue(u.compact())
+        assertFalse(File(dir, "queue.compact.tmp").exists())
     }
 }

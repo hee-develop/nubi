@@ -202,6 +202,7 @@ class MainActivity : Activity() {
         restartButton.visibility =
             if (s.health == RecorderHealth.SERVICE_FAILED && hasLocationPermission() && !distractionOptimized) View.VISIBLE else View.GONE
         val storage = listOfNotNull(
+            if (s.storageHeld) getString(R.string.storage_held_key_error) else null,
             if (s.saveFailures > 0) getString(R.string.storage_save_failed, s.saveFailures) else null,
             if (s.corruptLines > 0) getString(R.string.storage_corrupt, s.corruptLines) else null,
             if (s.discardedLines > 0) getString(R.string.storage_discarded, s.discardedLines) else null,

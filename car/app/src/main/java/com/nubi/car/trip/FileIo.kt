@@ -12,6 +12,9 @@ import java.nio.file.StandardOpenOption
 object FileIo {
     fun tmpOf(target: File) = File(target.parentFile, target.name + ".tmp")
 
+    /** 컴팩션 전용 임시 파일(`queue.jsonl` → `queue.compact.tmp`). [writeAtomically]의 [tmpOf]와 겹치지 않는다. */
+    fun compactTmpOf(target: File) = File(target.parentFile, target.nameWithoutExtension + ".compact.tmp")
+
     /** [tmp]를 새로 만들어 [bytes]를 쓰고 fsync한다. rename은 [commit]이 한다. */
     fun writeSynced(tmp: File, bytes: ByteArray) {
         FileOutputStream(tmp, false).use {
@@ -34,14 +37,13 @@ object FileIo {
         FileOutputStream(file, true).use { it.write(bytes) }
     }
 
-    /** [tmp]를 [target] 자리로 옮긴다. 원자적 이동이 안 되는 파일시스템이면 일반 교체로 대신한다. */
+    /** [tmp]를 [target] 자리로 옮긴다(rename만 한다. 디렉터리 fsync는 [syncDir]을 따로 부른다). 원자적 이동이 안 되는 파일시스템이면 일반 교체로 대신한다. */
     fun commit(tmp: File, target: File) {
         try {
             Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
         } catch (e: AtomicMoveNotSupportedException) {
             Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
         }
-        syncDir(target.parentFile)
     }
 
     fun writeAtomically(target: File, bytes: ByteArray) {
@@ -49,6 +51,7 @@ object FileIo {
         try {
             writeSynced(tmp, bytes)
             commit(tmp, target)
+            syncDir(target.parentFile)
         } catch (e: Exception) {
             tmp.delete()
             throw e
@@ -56,7 +59,7 @@ object FileIo {
     }
 
     /** rename을 디스크에 남긴다. 디렉터리를 열 수 없는 환경에서는 건너뛴다. */
-    private fun syncDir(dir: File?) {
+    fun syncDir(dir: File?) {
         if (dir == null) return
         try {
             FileChannel.open(dir.toPath(), StandardOpenOption.READ).use { it.force(true) }

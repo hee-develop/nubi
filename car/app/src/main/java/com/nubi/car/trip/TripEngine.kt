@@ -113,6 +113,7 @@ class TripEngine(
     /** 큐 로드가 끝났다. 이전 프로세스가 끝내지 못한 트립에 End를 넣고(진행 중인 트립은 제외) 업로드를 시도한다. */
     private fun onLoaded() {
         uploader.recoverUnfinished(HashSet(liveTrips))
+        checkVehicleAlias()
         requestUpload(force = false)
         publish()
     }
@@ -130,6 +131,7 @@ class TripEngine(
             unsupported = false
             setServiceFailed(false)
             vehicle.start()
+            checkVehicleAlias()
             requestUpload(force = false)
             publish()
         }
@@ -239,6 +241,7 @@ class TripEngine(
     // 내부 ---------------------------------------------------------------
 
     private fun onTick() {
+        checkVehicleAlias()
         handle(machine.onTick(elapsed()))
         publish()
     }
@@ -344,12 +347,35 @@ class TripEngine(
      * 차량 ID는 서버가 VIN으로 발급한 ID다(차량 앱은 VIN을 서버에 한 번 보내 받고 암호화 저장해 재사용한다).
      * 그 ID를 받기 전에는 UUID를 만들거나 저장하지 않고 null(업로드 보류)을 돌려준다.
      * 서비스 시작 후 [VIN_WAIT_MILLIS]가 지나도 ID가 없을 때만(또는 [force]) UUID로 대체해 저장한다(이때는 서버 등록을 하지 않는다).
+     * 서버 ID를 나중에 받으면 [reconcileVehicleId]가 UUID를 서버 ID에 잇는다.
      */
     private fun resolveVehicleId(force: Boolean): String? {
-        vehicle.vehicleId?.let { return it }
+        vehicle.vehicleId?.let {
+            reconcileVehicleId(it)
+            return it
+        }
         val waited = clock.elapsedMs() - serviceStartedElapsed >= VIN_WAIT_MILLIS
         if (!waited && !force) return null
         return store.getString(KEY_VEHICLE_ID) ?: UUID.randomUUID().toString().also { store.putString(KEY_VEHICLE_ID, it) }
+    }
+
+    /** 서버 발급 차량 ID를 이미 받았으면 UUID 대체 ID가 남아 있는지 확인한다. */
+    private fun checkVehicleAlias() {
+        vehicle.vehicleId?.let { reconcileVehicleId(it) }
+    }
+
+    /**
+     * UUID로 대체해 쓰던 차량 ID가 저장돼 있는데 서버 ID를 이제야 받았다면, 큐에 남은 미전송 Start의 차량 ID를 서버 ID로 바꾸고
+     * 서버에 alias(`POST /vehicles/alias`)를 큐 항목으로 보낸다(재시도 가능). 둘 다 [Uploader.enqueue]가 한다.
+     * 저장된 UUID는 서버 ID로 바꿔 한 번만 한다(큐에 넣은 뒤 저장하므로, 그 사이 죽으면 다시 넣는다. 서버 alias는 멱등).
+     */
+    private fun reconcileVehicleId(serverId: String) {
+        val old = store.getString(KEY_VEHICLE_ID) ?: return
+        if (old == serverId) return
+        Log.i(TAG, "UUID 차량 ID를 서버 ID로 전환(alias 큐 등록)")
+        uploader.enqueue(QueueEntry.Alias(old, serverId))
+        store.putString(KEY_VEHICLE_ID, serverId)
+        requestUpload(force = false)
     }
 
     private fun requestUpload(force: Boolean) {
@@ -413,6 +439,7 @@ class TripEngine(
             saveFailures = uploader.saveFailures,
             corruptLines = uploader.corruptLines,
             discardedLines = uploader.discardedLines,
+            storageHeld = uploader.memoryOnly,
         )
         updateTimers()
     }

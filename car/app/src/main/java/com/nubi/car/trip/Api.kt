@@ -7,6 +7,9 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 
+/** 다시 시도해도 소용없는 실패(예: release에서 TLS 없이 VIN을 보내려는 경우). 재시도 대상이 아니다. */
+class PermanentFailure(message: String) : IOException(message)
+
 /** 서버가 2xx가 아닌 응답을 줬다. 어떻게 다룰지는 [Uploader]가 상태 코드로 분류한다. */
 class HttpFailure(val status: Int, message: String) : IOException(message)
 
@@ -15,6 +18,9 @@ interface TripApi {
     fun createTrip(e: QueueEntry.Start): String
     fun postPoints(tripId: String, points: List<TripPoint>)
     fun endTrip(tripId: String, e: QueueEntry.End)
+
+    /** UUID 대체 차량 ID를 서버 발급 ID에 잇는다(멱등). */
+    fun aliasVehicle(e: QueueEntry.Alias)
 }
 
 class HttpTripApi(private val baseUrl: String) : TripApi {
@@ -56,6 +62,10 @@ class HttpTripApi(private val baseUrl: String) : TripApi {
         post("/trips/$tripId/end", JSONObject().put("endedAt", isoOf(e.endedAtMillis)).put("odometerEndKm", e.odometerEndKm ?: JSONObject.NULL))
     }
 
+    override fun aliasVehicle(e: QueueEntry.Alias) {
+        post("/vehicles/alias", JSONObject().put("fromVehicleId", e.fromVehicleId).put("toVehicleId", e.toVehicleId))
+    }
+
     private fun post(path: String, body: JSONObject): String = postJson(baseUrl, path, body)
 }
 
@@ -68,7 +78,7 @@ interface VehicleApi {
 class HttpVehicleApi(private val baseUrl: String) : VehicleApi {
     override fun register(vin: String): String {
         // VIN은 개인정보에 준하므로 release에서는 TLS(https)가 아니면 보내지 않는다. debug는 에뮬레이터 로컬 서버(평문)를 허용한다.
-        if (!BuildConfig.DEBUG && !baseUrl.startsWith("https://")) throw IOException("TLS 필요")
+        if (!BuildConfig.DEBUG && !baseUrl.startsWith("https://")) throw PermanentFailure("TLS 필요")
         val text = postJson(baseUrl, "/vehicles/register", JSONObject().put("vin", vin))
         return try {
             JSONObject(text).getString("vehicleId").also { require(it.isNotBlank()) }

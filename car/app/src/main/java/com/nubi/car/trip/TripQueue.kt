@@ -19,6 +19,14 @@ sealed interface QueueEntry {
     data class Point(override val localId: String, val point: TripPoint) : QueueEntry
 
     data class End(override val localId: String, val endedAtMillis: Long, val odometerEndKm: Double?) : QueueEntry
+
+    /**
+     * UUID로 대체해 쓰던 차량 ID([fromVehicleId])를 서버 발급 ID([toVehicleId])로 잇는다(`POST /vehicles/alias`).
+     * [localId]는 `alias:<from>`이라 어떤 트립과도 겹치지 않는다. 큐에 있는 동안 아직 안 보낸 Start의 차량 ID도 이 항목으로 바뀐다.
+     */
+    data class Alias(override val localId: String, val fromVehicleId: String, val toVehicleId: String) : QueueEntry {
+        constructor(fromVehicleId: String, toVehicleId: String) : this("alias:$fromVehicleId", fromVehicleId, toVehicleId)
+    }
 }
 
 object QueueCodec {
@@ -49,6 +57,11 @@ object QueueCodec {
                 o.put("endedAt", e.endedAtMillis)
                 o.put("odo", e.odometerEndKm ?: JSONObject.NULL)
             }
+            is QueueEntry.Alias -> {
+                o.put("t", "alias")
+                o.put("from", e.fromVehicleId)
+                o.put("to", e.toVehicleId)
+            }
         }
         return o.toString()
     }
@@ -74,6 +87,7 @@ object QueueCodec {
                 ),
             )
             "end" -> QueueEntry.End(id, o.getLong("endedAt"), o.optDoubleOrNull("odo"))
+            "alias" -> QueueEntry.Alias(id, o.getString("from"), o.getString("to"))
             else -> null
         }
     } catch (e: Exception) {
@@ -130,7 +144,7 @@ class EncryptedLines(private val file: File, private val cipher: LineCipher) {
 
     /** 컴팩션 1단계: 임시 파일에 쓰고 fsync한다(교체는 [commit]). lock 밖에서 부른다. */
     fun writeTmp(encrypted: List<String>): File {
-        val tmp = FileIo.tmpOf(file)
+        val tmp = FileIo.compactTmpOf(file)
         FileIo.writeSynced(tmp, joined(encrypted))
         return tmp
     }
@@ -141,6 +155,8 @@ class EncryptedLines(private val file: File, private val cipher: LineCipher) {
 
     /** 컴팩션 마지막 단계: rename만 한다. */
     fun commit(tmp: File) = FileIo.commit(tmp, file)
+
+    fun syncDir() = FileIo.syncDir(file.parentFile)
 
     private fun joined(encrypted: List<String>) = encrypted.joinToString("") { it + "\n" }.toByteArray()
 }
@@ -178,6 +194,9 @@ class TripQueue(file: File, cipher: LineCipher) {
     fun appendTmp(tmp: File, encrypted: List<String>) = lines.appendTmp(tmp, encrypted)
 
     fun commit(tmp: File) = lines.commit(tmp)
+
+    /** rename을 디스크에 남긴다(디렉터리 fsync). lock 밖에서 부른다. */
+    fun syncDir() = lines.syncDir()
 }
 
 /** 재시도 간격: 2초에서 시작해 두 배씩, 최대 5분. */

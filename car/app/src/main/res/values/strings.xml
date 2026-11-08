@@ -22,6 +22,7 @@
     <string name="health_service_failed">기록이 멈췄습니다. 앱을 열어 두면 다시 시작합니다</string>
     <string name="health_unsupported">이 차량은 위치 기능을 지원하지 않습니다</string>
     <string name="restart_recording">다시 시작</string>
+    <string name="storage_held_key_error">저장 보류(키 오류)</string>
     <string name="storage_save_failed">저장 실패 %1$d건</string>
     <string name="storage_corrupt">손상 %1$d줄</string>
     <string name="storage_discarded">복호화할 수 없어 폐기 %1$d줄</string>

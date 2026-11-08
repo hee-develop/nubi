@@ -62,4 +62,101 @@ class CipherTest {
         assertFalse(File(dir, "dek.bin").exists())
         assertEquals("ok", setup.cipher.decrypt(setup.cipher.encrypt("ok")))
     }
+
+    @Test
+    fun 일시_Keystore_오류는_1_3_5초_간격으로_재시도하고_끝내_실패해도_파일을_지우지_않고_메모리_모드가_된다() {
+        val dir = tmp.newFolder()
+        val wrapper = SoftwareKeyWrapper()
+        val old = DekCipherFactory(dir, wrapper).setup()
+        TripQueue(File(dir, "queue.jsonl"), old.cipher).append(listOf(start("a"), start("b")))
+        val dekBefore = File(dir, "dek.bin").readText()
+        val queueBefore = File(dir, "queue.jsonl").readText()
+        wrapper.failUnwrap = true // IllegalStateException = KeyStoreException 같은 일시 오류
+        wrapper.unwrapCalls = 0
+        val sleeps = ArrayList<Long>()
+        val setup = DekCipherFactory(dir, wrapper, sleep = { sleeps.add(it) }).setup()
+        assertEquals(listOf(1_000L, 3_000L, 5_000L), sleeps)
+        assertEquals(4, wrapper.unwrapCalls)
+        assertFalse(setup.persistent)
+        assertTrue(setup.keyError)
+        assertEquals(0, setup.discardedLines)
+        assertEquals(dekBefore, File(dir, "dek.bin").readText())
+        assertEquals(queueBefore, File(dir, "queue.jsonl").readText())
+        assertFalse(File(dir, "dek.bin.stale").exists())
+        // 다음 실행에서 키가 돌아오면 옛 데이터를 그대로 읽는다
+        wrapper.failUnwrap = false
+        val next = DekCipherFactory(dir, wrapper).setup()
+        assertTrue(next.persistent)
+        assertEquals(2, TripQueue(File(dir, "queue.jsonl"), next.cipher).load().entries.size)
+    }
+
+    @Test
+    fun 일시_오류가_재시도_안에_풀리면_정상_동작한다() {
+        val dir = tmp.newFolder()
+        val wrapper = SoftwareKeyWrapper()
+        val old = DekCipherFactory(dir, wrapper).setup()
+        val line = old.cipher.encrypt("x")
+        var calls = 0
+        val flaky = object : KeyWrapper {
+            override fun wrap(dek: ByteArray) = wrapper.wrap(dek)
+            override fun unwrap(blob: ByteArray) = if (++calls < 3) throw java.security.ProviderException("busy") else wrapper.unwrap(blob)
+        }
+        val sleeps = ArrayList<Long>()
+        val setup = DekCipherFactory(dir, flaky, sleep = { sleeps.add(it) }).setup()
+        assertEquals(listOf(1_000L, 3_000L), sleeps)
+        assertTrue(setup.persistent)
+        assertEquals("x", setup.cipher.decrypt(line))
+    }
+
+    @Test
+    fun 영구_손실은_재시도_없이_재생성하고_옛_데이터를_폐기한다() {
+        val lost = listOf<Throwable>(
+            KeyPermanentlyLostException("getKey null"),
+            javax.crypto.AEADBadTagException("tag"),
+            RuntimeException("wrapped", javax.crypto.AEADBadTagException("tag")),
+        )
+        for (e in lost) {
+            val dir = tmp.newFolder()
+            val wrapper = SoftwareKeyWrapper()
+            val old = DekCipherFactory(dir, wrapper).setup()
+            TripQueue(File(dir, "queue.jsonl"), old.cipher).append(listOf(start("a")))
+            wrapper.failUnwrapLost = e
+            val sleeps = ArrayList<Long>()
+            val fresh = DekCipherFactory(dir, wrapper, sleep = { sleeps.add(it) }).setup()
+            assertTrue(sleeps.isEmpty())
+            assertEquals(1, fresh.discardedLines)
+            assertTrue(fresh.persistent)
+            assertFalse(File(dir, "queue.jsonl").exists())
+            wrapper.failUnwrapLost = null
+            assertEquals(0, DekCipherFactory(dir, wrapper).setup().discardedLines)
+        }
+    }
+
+    @Test
+    fun dek_bin이_없거나_형식이_손상됐으면_영구_손실로_본다() {
+        val dir = tmp.newFolder()
+        val wrapper = SoftwareKeyWrapper()
+        val old = DekCipherFactory(dir, wrapper).setup()
+        TripQueue(File(dir, "queue.jsonl"), old.cipher).append(listOf(start("a")))
+        File(dir, "dek.bin").delete()
+        assertEquals(1, DekCipherFactory(dir, wrapper).setup().discardedLines)
+        // wrap 결과가 짧아 형식이 깨진 경우
+        File(dir, "dek.bin").writeText(java.util.Base64.getEncoder().encodeToString(ByteArray(5)))
+        wrapper.failUnwrapLost = KeyPermanentlyLostException("형식 손상")
+        assertEquals(0, DekCipherFactory(dir, wrapper, sleep = { throw AssertionError("재시도 금지") }).setup().discardedLines)
+    }
+
+    @Test
+    fun 영구_손실_뒤_wrap_저장도_실패하면_옛_dek_bin을_stale로_옮긴다() {
+        val dir = tmp.newFolder()
+        val wrapper = SoftwareKeyWrapper()
+        DekCipherFactory(dir, wrapper).setup()
+        wrapper.failUnwrapLost = KeyPermanentlyLostException("키 없음")
+        wrapper.failWrap = true
+        val setup = DekCipherFactory(dir, wrapper).setup()
+        assertFalse(setup.persistent)
+        assertFalse(setup.keyError)
+        assertFalse(File(dir, "dek.bin").exists())
+        assertTrue(File(dir, "dek.bin.stale").exists())
+    }
 }
