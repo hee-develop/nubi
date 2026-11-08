@@ -1,5 +1,5 @@
 # 주행 기록 E2E. 서버가 떠 있고 debug 앱이 설치된 emulator-5554에서 돈다(scripts/e2e-car.sh가 서버·설치·권한 부여를 맡는다).
-# 신호·위치는 debug 빌드의 nubi-debug://signal 주소로 넣는다(reset, gear, speed, gpx, now, flush).
+# 신호·위치는 debug 빌드의 nubi-debug://signal 주소로 넣는다(reset, real, gear, gpx, now, flush). 속도는 수집하지 않는다.
 # 스크린샷은 ${SHOT_DIR} 아래에 남긴다. CLOCK_PLUS_6MIN(env 기본값을 두면 -e보다 우선해 0이 되므로 두지 않는다)은 스크립트가 넘기는 "지금 + 6분"(epoch ms)이다.
 # 글자 검증은 정규식(전체 일치)이다. clearState는 쓰지 않는다(앱이 사용자 10에서 돌아 데이터가 지워지지 않는다). 초기화는 reset=1로 한다.
 appId: com.nubi.car
@@ -16,8 +16,8 @@ env:
 - assertNotVisible: '권한 필요'
 - takeScreenshot: ${SHOT_DIR}/01-idle
 
-# 2. 기어 D + 속도 40 → 위치 30점(약 725m)을 1초 간격으로 재생
-- openLink: nubi-debug://signal?gear=D&speed=40
+# 2. 기어 D → 위치 30점(약 725m)을 1초 간격으로 재생. reset이 실제 위치 스트림을 끈 뒤(앞 단계)에 gpx를 시작하므로 섞이지 않는다
+- openLink: nubi-debug://signal?gear=D
 - openLink: nubi-debug://signal?gpx=e2e-north.gpx
 - extendedWaitUntil:
     visible: '기록 중'

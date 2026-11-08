@@ -56,7 +56,7 @@ echo "== debug 앱 설치"
 (cd "$ROOT/car" && ./gradlew :app:installDebug -q -Pnubi.serverPort="$PORT")
 
 echo "== 권한 사전 부여(사용자 $APP_USER)"
-for perm in pleos.car.permission.FUSED_LOCATION android.permission.ACCESS_COARSE_LOCATION android.car.permission.CAR_SPEED; do
+for perm in pleos.car.permission.FUSED_LOCATION android.permission.ACCESS_COARSE_LOCATION; do
   "${ADB[@]}" shell pm grant --user "$APP_USER" "$APP_ID" "$perm" || echo "경고: $perm 부여 실패" >&2
 done
 # 새 권한이 적용되도록 프로세스를 새로 시작한다
@@ -90,32 +90,16 @@ set -e
 [ "$MAESTRO_RC" -eq 0 ] || { echo "Maestro 실패(rc=$MAESTRO_RC)" >&2; exit "$MAESTRO_RC"; }
 
 echo "== 서버 검증"
-# 종료 업로드가 끝날 때까지 잠시 기다리며 트립 요약을 가져온다
-VEHICLE_ID=""
-for _ in $(seq 1 15); do
-  LIST="$(curl -fs "http://127.0.0.1:$PORT/trips?limit=10")"
-  VEHICLE_ID="$(node -e 'const t=JSON.parse(process.argv[1]).trips;process.stdout.write(t[0]?.vehicleId??"")' "$LIST")"
-  [ -n "$VEHICLE_ID" ] && break
+# 종료 업로드가 끝날 때까지 잠시 기다리며 트립을 찾는다
+TRIP_ID=""
+for _ in $(seq 1 30); do
+  LIST="$(curl -fs "http://127.0.0.1:$PORT/trips?limit=10" || true)"
+  TRIP_ID="$(node -e 'try{const t=JSON.parse(process.argv[1]).trips;process.stdout.write(t.length===1&&t[0].endedAt&&t[0].pointCount>=30?t[0].tripId:"")}catch{}' "${LIST:-}")"
+  [ -n "$TRIP_ID" ] && break
   sleep 1
 done
-[ -n "$VEHICLE_ID" ] || { echo "서버에 트립이 없습니다." >&2; exit 1; }
-for _ in $(seq 1 15); do
-  LIST="$(curl -fs "http://127.0.0.1:$PORT/trips?vehicleId=$VEHICLE_ID&limit=10")"
-  node -e '
-    const t = JSON.parse(process.argv[1]).trips;
-    process.exit(t.length === 1 && t[0].endedAt && t[0].pointCount >= 20 ? 0 : 1);
-  ' "$LIST" && break
-  sleep 1
-done
-echo "$LIST" >"$RUN_DIR/trips.json"
-node -e '
-  const t = JSON.parse(process.argv[1]).trips;
-  const fail = (m) => { console.error("검증 실패: " + m); process.exit(1); };
-  if (t.length !== 1) fail(`트립이 1건이어야 하는데 ${t.length}건`);
-  const [x] = t;
-  if (!x.endedAt) fail("endedAt 없음");
-  if (!(x.pointCount >= 20)) fail(`pointCount ${x.pointCount} < 20`);
-  if (!(x.distanceM >= 500)) fail(`distanceM ${x.distanceM} < 500`);
-  console.log(`OK trip=${x.tripId} pointCount=${x.pointCount} distanceM=${x.distanceM} durationS=${x.durationS} endedAt=${x.endedAt} odometer=${x.odometerStartKm}->${x.odometerEndKm}`);
-' "$LIST"
+echo "${LIST:-}" >"$RUN_DIR/trips.json"
+[ -n "$TRIP_ID" ] || { echo "종료된 트립(점 30개 이상)이 서버에 없습니다. $RUN_DIR/trips.json 을 확인하세요." >&2; exit 1; }
+curl -fs "http://127.0.0.1:$PORT/trips/$TRIP_ID" >"$RUN_DIR/trip-detail.json"
+node "$ROOT/scripts/verify-trip.mjs" "$RUN_DIR/trip-detail.json" "$ROOT/car/app/src/debug/assets/e2e-north.gpx" "$RUN_DIR/trips.json"
 echo "== 통과. 산출물: $RUN_DIR"
