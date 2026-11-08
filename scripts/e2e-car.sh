@@ -62,10 +62,13 @@ done
 # 새 권한이 적용되도록 프로세스를 새로 시작한다
 "${ADB[@]}" shell am force-stop "$APP_ID"
 
+# 차량 ID 발급용 서버 비밀키(E2E 전용 값). VIN을 보내면 이 키로 HMAC한 ID를 돌려받는다
+HMAC_KEY="e2e-vehicle-hmac-key"
+PROBE_VIN="E2E-PROBE-VIN-0001"
 echo "== 서버 시작 (포트 $PORT, 메모리 DB)"
 mkdir -p "$RUN_DIR"
 # watch 없이 한 번만 띄운다. 서브셸이 곧 프로세스 그룹 리더라 그룹 전체(tsx와 자식 node)를 함께 종료한다.
-(cd "$ROOT/server" && NUBI_DB=:memory: PORT="$PORT" exec ./node_modules/.bin/tsx src/index.ts >"$RUN_DIR/server.log" 2>&1) &
+(cd "$ROOT/server" && NUBI_DB=:memory: NUBI_VEHICLE_HMAC_KEY="$HMAC_KEY" PORT="$PORT" exec ./node_modules/.bin/tsx src/index.ts >"$RUN_DIR/server.log" 2>&1) &
 SERVER_PGID=$!
 for _ in $(seq 1 30); do
   curl -fs "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
@@ -86,7 +89,7 @@ set +e
   --test-output-dir "$RUN_DIR/maestro/trip-recording"
 MAESTRO_RC=$?
 set -e
-"${ADB[@]}" logcat -d -s NubiLoc NubiTrip NubiVehicle NubiCarSignals NubiService NubiDebug AndroidRuntime >"$RUN_DIR/app-logcat.txt" 2>&1 || true
+"${ADB[@]}" logcat -d -s NubiLoc NubiTrip NubiVehicle NubiCarSignals NubiService NubiDebug NubiUpload NubiVehicleId NubiCipher AndroidRuntime >"$RUN_DIR/app-logcat.txt" 2>&1 || true
 [ "$MAESTRO_RC" -eq 0 ] || { echo "Maestro 실패(rc=$MAESTRO_RC)" >&2; exit "$MAESTRO_RC"; }
 
 echo "== 서버 검증"
@@ -101,5 +104,8 @@ done
 echo "${LIST:-}" >"$RUN_DIR/trips.json"
 [ -n "$TRIP_ID" ] || { echo "종료된 트립(점 30개 이상)이 서버에 없습니다. $RUN_DIR/trips.json 을 확인하세요." >&2; exit 1; }
 curl -fs "http://127.0.0.1:$PORT/trips/$TRIP_ID" >"$RUN_DIR/trip-detail.json"
-node "$ROOT/scripts/verify-trip.mjs" "$RUN_DIR/trip-detail.json" "$ROOT/car/app/src/debug/assets/e2e-north.gpx" "$RUN_DIR/trips.json"
+# 차량 ID 발급 API: 탐침 VIN을 직접 등록해 응답을 남긴다(앱이 쓴 VIN과는 별개). 서버가 VIN을 저장·응답하지 않는지 verify-trip이 확인한다
+curl -fs -X POST -H 'content-type: application/json' -d "{\"vin\":\"$PROBE_VIN\"}" "http://127.0.0.1:$PORT/vehicles/register" >"$RUN_DIR/register.json"
+curl -fs "http://127.0.0.1:$PORT/trips?limit=10" >"$RUN_DIR/trips-after-register.json"
+NUBI_VEHICLE_HMAC_KEY="$HMAC_KEY" E2E_PROBE_VIN="$PROBE_VIN" node "$ROOT/scripts/verify-trip.mjs" "$RUN_DIR/trip-detail.json" "$ROOT/car/app/src/debug/assets/e2e-north.gpx" "$RUN_DIR/trips-after-register.json" "$ROOT/server/src/db/schema.ts" "$RUN_DIR/register.json"
 echo "== 통과. 산출물: $RUN_DIR"
