@@ -1,4 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">누비</string>
+    <string name="notification_channel">주행 기록</string>
+    <string name="notification_title">누비가 주행 위치를 기록하고 있어요</string>
+    <string name="state_permission">권한 필요</string>
+    <string name="state_idle">대기</string>
+    <string name="state_recording">기록 중</string>
+    <string name="state_ended">종료됨</string>
+    <string name="samples_format">샘플 %1$d</string>
+    <string name="distance_format">거리 %1$dm</string>
+    <string name="upload_format">마지막 업로드: %1$s</string>
+    <string name="permission_title">위치 권한이 필요해요</string>
+    <string name="permission_body">운전한 경로를 자동으로 기록하려면 차량 위치를 읽어야 해요. 기록은 이 차량의 주행 이력으로만 저장돼요. 속도 권한은 선택이고, 허용하지 않아도 기록돼요.</string>
+    <string name="permission_confirm">허용하고 시작</string>
 </resources>

@@ -5,11 +5,29 @@
         android:name="android.hardware.type.automotive"
         android:required="true" />
 
+    <!-- Pleos 위치(런타임 동의), 차량 정보(VIN), 주행 정보(오도미터) -->
+    <uses-permission android:name="pleos.car.permission.FUSED_LOCATION" />
+    <uses-permission android:name="pleos.car.permission.CAR_INFO" />
+    <uses-permission android:name="pleos.car.permission.CAR_DRIVE" />
+
+    <!-- AAOS CarPropertyManager: 기어(GEAR_SELECTION), 속도(PERF_VEHICLE_SPEED) -->
+    <uses-permission android:name="android.car.permission.CAR_POWERTRAIN" />
+    <uses-permission android:name="android.car.permission.CAR_SPEED" />
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application
         android:allowBackup="false"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+        <!-- CCP(회전식 컨트롤러) 미지원 선언. 터치·음성만으로 조작한다 -->
+        <meta-data
+            android:name="com.hmg.rotary.ROTARY_SUPPORTED"
+            android:value="false" />
 
         <activity
             android:name=".MainActivity"
@@ -18,6 +36,16 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- 화면은 글자만 보이고 조작이 거의 없으므로 주행 중 사용 가능(DO)으로 선언한다 -->
+            <meta-data
+                android:name="distractionOptimized"
+                android:value="true" />
         </activity>
+
+        <service
+            android:name=".TripRecordingService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
     </application>
 </manifest>

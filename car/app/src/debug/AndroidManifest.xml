@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application android:networkSecurityConfig="@xml/network_security_config">
+        <!-- E2E용 신호·위치 주입 통로. adb·Maestro가 nubi-debug://signal?gear=D 같은 주소로 부른다. 디버그 빌드에만 들어간다.
+             호출자가 DUMP 권한을 가져야 한다. adb shell은 갖고 있고 일반 앱은 가질 수 없다 -->
+        <activity
+            android:name=".SignalInjectActivity"
+            android:exported="true"
+            android:permission="android.permission.DUMP"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="nubi-debug" android:host="signal" />
+            </intent-filter>
+            <meta-data
+                android:name="distractionOptimized"
+                android:value="true" />
+        </activity>
+    </application>
+</manifest>
