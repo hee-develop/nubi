@@ -1,170 +1,344 @@
 package com.nubi.car.trip
 
 import android.util.Log
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.io.IOException
-import java.net.HttpURLConnection
-import java.net.URL
 import java.util.concurrent.atomic.AtomicInteger
-
-/** 서버가 2xx가 아닌 응답을 줬다. 어떻게 다룰지는 [Uploader]가 상태 코드로 분류한다. */
-class HttpFailure(val status: Int, message: String) : IOException(message)
-
-interface TripApi {
-    /** 같은 [QueueEntry.Start.localId]로 다시 부르면 서버는 기존 tripId를 돌려준다(멱등). */
-    fun createTrip(e: QueueEntry.Start): String
-    fun postPoints(tripId: String, points: List<TripPoint>)
-    fun endTrip(tripId: String, e: QueueEntry.End)
-}
-
-class HttpTripApi(private val baseUrl: String) : TripApi {
-    override fun createTrip(e: QueueEntry.Start): String {
-        val body = JSONObject()
-            .put("localId", e.localId)
-            .put("vehicleId", e.vehicleId)
-            .put("driverId", e.driverId)
-            .put("startedAt", isoOf(e.startedAtMillis))
-            .put("odometerStartKm", e.odometerStartKm ?: JSONObject.NULL)
-        val text = post("/trips", body)
-        // 2xx인데 JSON이 아닌 응답(프록시·캡티브 포털 등)은 성공으로 치지 않는다.
-        return try {
-            JSONObject(text).getString("tripId")
-        } catch (ex: Exception) {
-            throw IOException("응답 형식 오류 /trips")
-        }
-    }
-
-    override fun postPoints(tripId: String, points: List<TripPoint>) {
-        val arr = JSONArray()
-        points.forEach { p ->
-            val s = p.sample
-            arr.put(
-                JSONObject()
-                    .put("seq", p.seq)
-                    .put("ts", isoOf(s.tsMillis))
-                    .put("lat", s.lat)
-                    .put("lon", s.lon)
-                    .put("headingDeg", s.headingDeg?.toDouble() ?: JSONObject.NULL)
-                    .put("confidence", s.confidence?.toDouble() ?: JSONObject.NULL)
-                    .put("gear", s.gear?.name ?: JSONObject.NULL),
-            )
-        }
-        post("/trips/$tripId/points", JSONObject().put("points", arr))
-    }
-
-    override fun endTrip(tripId: String, e: QueueEntry.End) {
-        post("/trips/$tripId/end", JSONObject().put("endedAt", isoOf(e.endedAtMillis)).put("odometerEndKm", e.odometerEndKm ?: JSONObject.NULL))
-    }
-
-    private fun post(path: String, body: JSONObject): String {
-        val conn = URL(baseUrl + path).openConnection() as HttpURLConnection
-        try {
-            conn.requestMethod = "POST"
-            conn.connectTimeout = 5_000
-            conn.readTimeout = 10_000
-            conn.doOutput = true
-            conn.setRequestProperty("Content-Type", "application/json")
-            conn.outputStream.use { it.write(body.toString().toByteArray()) }
-            val code = conn.responseCode
-            val text = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() } ?: ""
-            if (code in 200..299) return text
-            throw HttpFailure(code, "HTTP $code $path")
-        } finally {
-            conn.disconnect()
-        }
-    }
-}
 
 enum class DrainKind { OK, RETRY, HELD }
 
-/** [HELD]는 서버가 요청 자체를 거절해(Start 4xx 등) 항목을 버리지 않고 보류한 경우다. */
+/** [HELD]는 서버가 요청 자체를 거절해(Start 4xx 등) 항목을 버리지 않고 보류한 트립이 남은 경우다. */
 data class DrainResult(val kind: DrainKind, val uploadedPoints: Int, val message: String) {
     val ok: Boolean get() = kind == DrainKind.OK
 }
 
 /**
- * 큐를 앞에서부터 서버로 보낸다. 점은 같은 트립 것끼리 [batchSize]개씩 묶는다.
+ * 큐를 서버로 보낸다. 점은 같은 트립 것끼리 [batchSize]개씩 묶는다.
  *
- * - 네트워크 호출은 lock 밖에서 한다. lock 안에서는 head 스냅샷을 뜨고, 성공한 뒤 제거만 한다(그동안에도 [enqueue]가 막히지 않는다).
- * - 어떤 예외든 재시도로 분류한다(크래시 없음). 서버 응답은 상태 코드로 나눈다.
- *   - 408·425·429·5xx·네트워크 오류·형식 오류: 멈추고 백오프(항목 유지)
- *   - 점 배치 400(413·422 포함): 반으로 나눠 재전송, 1점까지 400이면 그 점만 dead-letter로 격리
- *   - 404(트립 없음): 저장해 둔 Start로 같은 localId의 트립을 다시 만든 뒤 재전송(한 번만)
- *   - Start·그 밖의 4xx: 버리지 않고 보류([DrainKind.HELD]). End의 영구 4xx만 dead-letter로 격리
- * - 파일은 append 전용이다. 보낸 항목 제거는 메모리에서 하고 파일은 [compactEvery]개마다·drain이 끝날 때 컴팩션한다.
- *   그 사이에 죽어도 서버가 멱등(localId, (trip, seq), end)이라 재전송은 안전하다.
- * - 점이 [maxPoints]를 넘으면 가장 오래된 종료 트립부터 통째로 지운다.
+ * 스레드·lock 규칙
+ * - 파일을 읽고 복호화하는 [load]는 워커 스레드에서 부른다(생성자는 아무것도 읽지 않는다). 로드 전 [enqueue]는 메모리에만 쌓고 로드가 끝날 때 파일에 잇는다.
+ * - lock 안에서는 메모리 목록 조작과 파일 append(한 번의 write)만 한다. JSON 인코딩·암호화는 lock 밖에서 하고,
+ *   컴팩션(전체 재기록)은 lock 안에서 목록 스냅샷만 뜨고 암호화·임시 파일 쓰기·fsync는 lock 밖에서 한 뒤 rename 순간만 lock을 잡는다.
+ *   컴팩션 중 들어온 항목은 이미 암호화된 줄로 꼬리(tail)에 모았다가 임시 파일에 이어 붙인다.
+ * - 네트워크 호출도 lock 밖이다.
+ *
+ * 서버 응답 분류
+ * - 408·425·429·5xx·네트워크 오류·형식 오류: 멈추고 백오프(항목 유지)
+ * - 점 배치 400(413·422 포함): 반으로 나눠 재전송, 1점까지 400이면 그 점만 dead-letter로 격리. 성공하면 배치 크기를 원래대로 되돌린다
+ * - 404(트립 없음): 저장해 둔 Start로 같은 localId의 트립을 다시 만든 뒤 재전송(한 번만)
+ * - Start·그 밖의 4xx: 버리지 않고 **그 트립만 보류**한다(보류 트립 id 집합). drain은 보류 트립의 항목을 건너뛰고 다른 트립을 계속 올리며,
+ *   보류 트립은 백오프 뒤 다시 시도한다. End의 영구 4xx(400·413·422)만 dead-letter로 격리하고 그 트립의 등록(registration)도 지워 복구 루프를 막는다
+ * - 점이 [maxPoints]를 넘으면 가장 오래된 종료 트립부터 통째로 지운다(메모리에서 바로, 파일은 다음 컴팩션에서)
  */
 class Uploader(
-    private val queue: TripQueue,
-    idsFile: File,
-    deadLetterFile: File,
+    private val queueFile: File,
+    private val idsFile: File,
+    private val deadLetterFile: File,
     private val api: TripApi,
-    cipher: LineCipher,
+    private val cipherSetup: () -> CipherSetup,
     private val batchSize: Int = 100,
     private val maxPoints: Int = 50_000,
     private val compactEvery: Int = 1_000,
+    private val deadLetterMax: Int = 5_000,
+    private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 },
 ) {
     /** 서버에 만든 트립의 서버 id와, 404일 때 다시 만들 Start, 마지막으로 올린 점의 시각. */
     private data class Registration(val serverId: String, val start: QueueEntry.Start, val lastPointTs: Long?)
 
+    private class Held(val retryAtMs: Long, val failures: Int)
+
+    private class Compaction {
+        /** 컴팩션 중 append된, 이미 암호화된 줄. */
+        val tail = ArrayList<String>()
+    }
+
     private val lock = Any()
-    private val ids = EncryptedLines(idsFile, cipher)
-    private val deadLetters = EncryptedLines(deadLetterFile, cipher)
-    private val entries = ArrayDeque<QueueEntry>(queue.load())
-    private val registrations = loadRegistrations()
-    private val points = AtomicInteger(entries.count { it is QueueEntry.Point })
-    private val total = AtomicInteger(entries.size)
+    private val loadLock = Any()
+    private val idsLock = Any()
+    private val deadLock = Any()
+
+    private val entries = ArrayDeque<QueueEntry>()
+    private val early = ArrayList<QueueEntry>()
+    private val registrations = LinkedHashMap<String, Registration>()
+    private val held = HashMap<String, Held>()
+    private val points = AtomicInteger(0)
+    private val total = AtomicInteger(0)
+    private val saveFailureCount = AtomicInteger(0)
+
+    private var structVersion = 0L
+    private var compaction: Compaction? = null
+    private var dirty = false
+    private var clearAfterLoad = false
+    private var idsVersion = 0L
+    private var idsWritten = 0L
+    private var deadCount = 0
+
+    private lateinit var queue: TripQueue
+    private lateinit var ids: EncryptedLines
+    private lateinit var deadLetters: EncryptedLines
+
+    @Volatile
+    var loaded = false
+        private set
+
+    /** 복호화·해석에 실패해 건너뛴 줄 수(큐·server-ids). 이번 실행 동안 누적이 아니라 로드 때 센 값이다. */
+    @Volatile
+    var corruptLines = 0
+        private set
+
+    /** 새 DEK로 바뀌어 읽을 수 없게 돼 폐기한 줄 수. */
+    @Volatile
+    var discardedLines = 0
+        private set
+
+    /** 큐 파일 쓰기·인코딩에 실패한 횟수(누적). 0보다 크면 화면에 '저장 실패'를 보인다. */
+    val saveFailures: Int get() = saveFailureCount.get()
 
     val pendingPoints: Int get() = points.get()
     val pendingEntries: Int get() = total.get()
 
-    fun enqueue(vararg added: QueueEntry) {
-        if (added.isEmpty()) return
-        synchronized(lock) {
-            entries.addAll(added)
-            points.addAndGet(added.count { it is QueueEntry.Point })
-            total.addAndGet(added.size)
-            queue.append(added.toList())
-            enforceCap()
+    // 로드 ---------------------------------------------------------------
+
+    /** 암호화 준비(Keystore unwrap)와 파일 읽기·복호화를 한다. **워커 스레드에서** 부른다. 여러 번 불러도 한 번만 한다. */
+    fun load() {
+        synchronized(loadLock) {
+            if (loaded) return
+            val setup = try {
+                cipherSetup()
+            } catch (t: Throwable) {
+                Log.w(TAG, "암호화 준비 예외, 임시 키로 진행: ${t.javaClass.simpleName}")
+                CipherSetup(AesGcmCipher.fromBytes(ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }), 0, false)
+            }
+            discardedLines = setup.discardedLines
+            queue = TripQueue(queueFile, setup.cipher)
+            ids = EncryptedLines(idsFile, setup.cipher)
+            deadLetters = EncryptedLines(deadLetterFile, setup.cipher)
+            var corrupt = 0
+            val fileEntries: MutableList<QueueEntry> = try {
+                queue.load().also { corrupt += it.corrupt }.entries
+            } catch (t: Exception) {
+                Log.w(TAG, "큐 파일 읽기 실패: ${t.javaClass.simpleName}")
+                saveFailureCount.incrementAndGet()
+                ArrayList()
+            }
+            val regs = try {
+                loadRegistrations().also { corrupt += it.second }.first
+            } catch (t: Exception) {
+                Log.w(TAG, "server-ids 읽기 실패: ${t.javaClass.simpleName}")
+                LinkedHashMap()
+            }
+            synchronized(deadLock) { deadCount = try { deadLetters.countLines() } catch (t: Exception) { 0 } }
+            corruptLines = corrupt
+            if (corrupt > 0) Log.w(TAG, "복호화·해석 실패로 건너뛴 줄: ${corrupt}줄(큐·server-ids)")
+
+            // 로드 전에 들어온 항목을 암호화해 파일에 잇는다. 암호화는 lock 밖에서 하고, 그 사이 더 들어왔으면 한 번 더 돈다.
+            var done = false
+            while (!done) {
+                val batch = synchronized(lock) { early.toList() }
+                val lines = batch.mapNotNull { e -> try { queue.encode(e) } catch (t: Exception) { null } }
+                var removedVictims = false
+                synchronized(lock) {
+                    if (early.size != batch.size) return@synchronized
+                    if (clearAfterLoad) {
+                        fileEntries.clear()
+                        regs.clear()
+                        dirty = true
+                    }
+                    entries.addAll(fileEntries)
+                    entries.addAll(early)
+                    points.addAndGet(fileEntries.count { it is QueueEntry.Point })
+                    total.addAndGet(fileEntries.size)
+                    registrations.putAll(regs)
+                    try {
+                        queue.appendEncrypted(lines)
+                    } catch (t: Exception) {
+                        saveFailureCount.incrementAndGet()
+                    }
+                    early.clear()
+                    if (corrupt > 0) dirty = true
+                    removedVictims = enforceCap()
+                    loaded = true
+                    done = true
+                }
+                if (done && removedVictims) saveRegistrations()
+            }
+            Log.i(TAG, "큐 로드 ${total.get()}항목, 손상 $corrupt, 폐기 ${setup.discardedLines}, 키 영속=${setup.persistent}")
         }
     }
 
-    fun clear() = synchronized(lock) {
-        entries.clear()
-        registrations.clear()
-        points.set(0)
-        total.set(0)
-        queue.rewrite(emptyList())
+    // 쓰기 ---------------------------------------------------------------
+
+    /**
+     * 항목을 큐에 넣는다. 인코딩 예외(NaN 등)는 그 항목만 버리고, 파일 쓰기 예외는 메모리에는 남긴다(이번 실행에서는 업로드된다).
+     * 어느 쪽이든 [saveFailures]를 올리고 false를 돌려줄 뿐 예외를 던지지 않는다.
+     */
+    fun enqueue(vararg added: QueueEntry): Boolean {
+        if (added.isEmpty()) return true
+        var ok = true
+        val canEncrypt = loaded
+        val prepared = ArrayList<Pair<QueueEntry, String?>>(added.size)
+        for (e in added) {
+            try {
+                prepared.add(e to if (canEncrypt) queue.encode(e) else QueueCodec.encode(e).let { null })
+            } catch (t: Exception) {
+                ok = false
+                saveFailureCount.incrementAndGet()
+                Log.w(TAG, "큐 항목 인코딩 실패, 버림: ${t.javaClass.simpleName}")
+            }
+        }
+        var victims = false
+        synchronized(lock) {
+            val accepted = ArrayList<Pair<QueueEntry, String?>>(prepared.size)
+            for (p in prepared) {
+                val e = p.first
+                // 같은 트립의 End는 하나만 둔다(복구 End와 원래 End가 겹치는 경우).
+                if (e is QueueEntry.End && hasEnd(e.localId, accepted)) {
+                    Log.i(TAG, "이미 End가 큐에 있어 건너뜀")
+                    continue
+                }
+                accepted.add(p)
+            }
+            if (accepted.isEmpty()) return ok
+            val newEntries = accepted.map { it.first }
+            points.addAndGet(newEntries.count { it is QueueEntry.Point })
+            total.addAndGet(newEntries.size)
+            if (!loaded) {
+                early.addAll(newEntries)
+                return ok
+            }
+            entries.addAll(newEntries)
+            // 로드 직전에 경합해 아직 암호화하지 못한 항목은 여기서 암호화한다(드문 경우).
+            val lines = accepted.mapNotNull { p -> p.second ?: try { queue.encode(p.first) } catch (t: Exception) { null } }
+            try {
+                queue.appendEncrypted(lines)
+            } catch (t: Exception) {
+                ok = false
+                saveFailureCount.incrementAndGet()
+                Log.w(TAG, "큐 파일 쓰기 실패: ${t.javaClass.simpleName}")
+            }
+            compaction?.tail?.addAll(lines)
+            victims = enforceCap()
+        }
+        if (victims) saveRegistrations()
+        return ok
+    }
+
+    /** lock을 잡고 부른다. */
+    private fun hasEnd(localId: String, pending: List<Pair<QueueEntry, String?>>): Boolean =
+        entries.any { it is QueueEntry.End && it.localId == localId } ||
+            early.any { it is QueueEntry.End && it.localId == localId } ||
+            pending.any { it.first is QueueEntry.End && it.first.localId == localId }
+
+    fun clear() {
+        synchronized(lock) {
+            entries.clear()
+            early.clear()
+            registrations.clear()
+            held.clear()
+            points.set(0)
+            total.set(0)
+            structVersion++
+            if (loaded) {
+                dirty = false
+                try {
+                    queue.rewrite(emptyList())
+                } catch (t: Exception) {
+                    Log.w(TAG, "큐 비우기 실패: ${t.javaClass.simpleName}")
+                }
+            } else {
+                clearAfterLoad = true
+            }
+        }
         saveRegistrations()
     }
 
-    /** 시작했으나 End를 못 보낸 트립(이전 프로세스가 죽은 경우)에 마지막 샘플 시각으로 End를 큐에 넣는다. 만든 End 수를 돌려준다. */
-    fun recoverUnfinished(): Int = synchronized(lock) {
-        val ended = entries.filterIsInstance<QueueEntry.End>().map { it.localId }.toSet()
-        val started = LinkedHashMap<String, Pair<Long, Long?>>() // localId -> (startedAt, 마지막 점 시각)
-        registrations.forEach { (id, r) -> started[id] = r.start.startedAtMillis to r.lastPointTs }
-        entries.filterIsInstance<QueueEntry.Start>().forEach { started.putIfAbsent(it.localId, it.startedAtMillis to null) }
-        val recovered = ArrayList<QueueEntry>()
-        for ((id, info) in started) {
-            if (id in ended) continue
-            val lastQueued = entries.filterIsInstance<QueueEntry.Point>().filter { it.localId == id }.maxOfOrNull { it.point.sample.tsMillis }
-            val endedAt = listOfNotNull(info.first, info.second, lastQueued).max()
-            recovered.add(QueueEntry.End(id, endedAt, null))
+    /**
+     * 시작했으나 End를 못 보낸 트립(이전 프로세스가 죽은 경우)에 마지막 샘플 시각으로 End를 큐에 넣는다. 만든 End 수를 돌려준다.
+     * 큐에 그 트립의 End가 이미 있으면 건너뛰고, [exclude]한 트립(지금 진행 중인 트립)은 건드리지 않는다. 로드 전에는 아무것도 하지 않는다.
+     */
+    fun recoverUnfinished(exclude: Set<String> = emptySet()): Int {
+        val recovered = synchronized(lock) {
+            if (!loaded) return 0
+            val ended = entries.filterIsInstance<QueueEntry.End>().map { it.localId }.toSet()
+            val started = LinkedHashMap<String, Pair<Long, Long?>>() // localId -> (startedAt, 마지막 점 시각)
+            registrations.forEach { (id, r) -> started[id] = r.start.startedAtMillis to r.lastPointTs }
+            entries.filterIsInstance<QueueEntry.Start>().forEach { started.putIfAbsent(it.localId, it.startedAtMillis to null) }
+            val list = ArrayList<QueueEntry>()
+            for ((id, info) in started) {
+                if (id in ended || id in exclude) continue
+                val lastQueued = entries.filterIsInstance<QueueEntry.Point>().filter { it.localId == id }.maxOfOrNull { it.point.sample.tsMillis }
+                val endedAt = listOfNotNull(info.first, info.second, lastQueued).max()
+                list.add(QueueEntry.End(id, endedAt, null))
+            }
+            list
         }
-        if (recovered.isNotEmpty()) {
-            Log.i(TAG, "미종료 트립 ${recovered.size}건 복구(End 추가)")
-            enqueue(*recovered.toTypedArray())
-        }
-        recovered.size
+        if (recovered.isEmpty()) return 0
+        Log.i(TAG, "미종료 트립 ${recovered.size}건 복구(End 추가)")
+        enqueue(*recovered.toTypedArray())
+        return recovered.size
     }
 
     /** dead-letter 파일의 내용(점마다 한 줄: 사유와 원본). 진단·테스트용. */
-    fun readDeadLetters(): List<String> = synchronized(lock) { deadLetters.readAll() }
+    fun readDeadLetters(): List<String> = synchronized(deadLock) { deadLetters.readAll() }
+
+    // 컴팩션 -------------------------------------------------------------
+
+    /** 큐 파일을 지금 메모리 상태로 바꿔 쓴다. 예외를 던지지 않고, 못 했으면 false(다음에 다시 시도한다). */
+    fun compact(): Boolean {
+        val snapshot: List<QueueEntry>
+        val version: Long
+        synchronized(lock) {
+            if (!loaded || compaction != null) return false
+            snapshot = entries.toList()
+            version = structVersion
+            compaction = Compaction()
+            dirty = false
+        }
+        var tmp: File? = null
+        try {
+            val encrypted = queue.encryptAll(snapshot) // lock 밖
+            val file = queue.writeTmp(encrypted) // lock 밖(fsync 포함)
+            tmp = file
+            while (true) {
+                val tail: List<String>
+                synchronized(lock) {
+                    if (structVersion != version) {
+                        // 그 사이 상한 정리·clear로 목록이 바뀌었다. 이 스냅샷으로는 교체하지 않는다.
+                        compaction = null
+                        dirty = true
+                        file.delete()
+                        return false
+                    }
+                    val pending = compaction!!.tail
+                    if (pending.isEmpty()) {
+                        queue.commit(file) // rename만 lock 안
+                        compaction = null
+                        return true
+                    }
+                    tail = ArrayList(pending)
+                    pending.clear()
+                }
+                queue.appendTmp(file, tail) // lock 밖
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "컴팩션 실패(다음에 다시 시도): ${t.javaClass.simpleName}")
+            synchronized(lock) {
+                compaction = null
+                dirty = true
+            }
+            try {
+                tmp?.delete()
+            } catch (e: Exception) {
+                // 지우지 못해도 다음 컴팩션이 덮어쓴다
+            }
+            return false
+        }
+    }
+
+    // drain --------------------------------------------------------------
 
     fun drain(): DrainResult {
+        load()
         var uploaded = 0
         var ended = 0
         var removed = 0
@@ -172,68 +346,97 @@ class Uploader(
         val recreated = HashSet<String>()
         try {
             while (true) {
-                val step = synchronized(lock) { snapshot(currentBatch) } ?: return DrainResult(DrainKind.OK, uploaded, summary(uploaded, ended))
+                val step = synchronized(lock) { snapshot(currentBatch, nowMs()) }
+                if (step == null) {
+                    val heldTrips = synchronized(lock) { heldTripCount(nowMs()) }
+                    return if (heldTrips > 0) {
+                        DrainResult(DrainKind.HELD, uploaded, "HELD ${heldTrips}건")
+                    } else {
+                        DrainResult(DrainKind.OK, uploaded, summary(uploaded, ended))
+                    }
+                }
                 try {
                     when (step) {
                         is Step.Create -> {
                             val serverId = api.createTrip(step.start)
+                            var save = false
                             synchronized(lock) {
-                                if (popHead(step.entry)) {
+                                if (removeEntry(step.entry)) {
                                     registrations[step.start.localId] = Registration(serverId, step.start, null)
-                                    saveRegistrations()
+                                    held.remove(step.start.localId)
                                     removed++
+                                    save = true
                                 }
                             }
+                            if (save) saveRegistrations()
                         }
                         is Step.Points -> {
                             api.postPoints(step.serverId, step.batch.map { it.point })
+                            var save = false
                             synchronized(lock) {
-                                if (popHead(step.batch.first())) {
-                                    repeat(step.batch.size - 1) { popHead(entries.first()) }
+                                if (removeEntry(step.batch.first())) {
+                                    for (i in 1 until step.batch.size) removeEntry(step.batch[i])
                                     removed += step.batch.size
+                                    held.remove(step.localId)
                                     registrations[step.localId]?.let {
                                         registrations[step.localId] = it.copy(lastPointTs = step.batch.last().point.sample.tsMillis)
-                                        saveRegistrations()
+                                        save = true
                                     }
                                 }
                             }
+                            if (save) saveRegistrations()
                             uploaded += step.batch.size
+                            currentBatch = batchSize // 이분할 뒤 성공했으면 원래 크기로 복원
                         }
                         is Step.Finish -> {
                             api.endTrip(step.serverId, step.end)
+                            var save = false
                             synchronized(lock) {
-                                if (popHead(step.end)) {
+                                if (removeEntry(step.end)) {
                                     registrations.remove(step.end.localId)
-                                    saveRegistrations()
+                                    held.remove(step.end.localId)
                                     removed++
+                                    save = true
                                 }
                             }
+                            if (save) saveRegistrations()
                             ended++
                         }
-                        is Step.Orphan -> synchronized(lock) {
+                        is Step.Orphan -> {
                             if (step.entry is QueueEntry.Point) deadLetter(step.entry, "트립 정보 없음")
                             Log.w(TAG, "트립 정보 없는 항목 정리: ${step.entry.javaClass.simpleName}")
-                            if (popHead(step.entry)) removed++
+                            synchronized(lock) { if (removeEntry(step.entry)) removed++ }
                         }
                     }
                     if (removed >= compactEvery) {
-                        synchronized(lock) { queue.rewrite(entries.toList()) }
+                        compact()
                         removed = 0
                     }
                 } catch (e: HttpFailure) {
-                    val action = classify(step, e, currentBatch, recreated)
+                    val action = try {
+                        classify(step, e, recreated)
+                    } catch (t: Exception) {
+                        Action.Stop(DrainKind.RETRY, "RETRY ${t.javaClass.simpleName}")
+                    }
                     when (action) {
                         is Action.Stop -> return DrainResult(action.kind, uploaded, action.message)
-                        is Action.Retry -> {
-                            currentBatch = action.batchSize ?: currentBatch
-                        }
+                        is Action.Hold -> hold(action.localId, action.message)
+                        is Action.Retry -> currentBatch = action.batchSize ?: currentBatch
                         is Action.Isolate -> {
+                            deadLetter(step.firstEntry, "HTTP ${e.status}")
+                            var save = false
                             synchronized(lock) {
-                                if (popHead(step.firstEntry)) {
-                                    deadLetter(step.firstEntry, "HTTP ${e.status}")
+                                if (removeEntry(step.firstEntry)) {
                                     removed++
+                                    if (step is Step.Finish) {
+                                        // 격리한 End의 트립은 더 복구할 것이 없다. 등록을 남기면 다음 시작 때 End를 또 만들어 같은 일을 반복한다.
+                                        registrations.remove(step.end.localId)
+                                        held.remove(step.end.localId)
+                                        save = true
+                                    }
                                 }
                             }
+                            if (save) saveRegistrations()
                             currentBatch = batchSize
                         }
                     }
@@ -244,7 +447,7 @@ class Uploader(
                 }
             }
         } finally {
-            synchronized(lock) { if (removed > 0) queue.rewrite(entries.toList()) }
+            if (removed > 0 || synchronized(lock) { dirty }) compact()
         }
     }
 
@@ -273,19 +476,35 @@ class Uploader(
 
     private sealed interface Action {
         class Stop(val kind: DrainKind, val message: String) : Action
+        class Hold(val localId: String, val message: String) : Action
         class Retry(val batchSize: Int?) : Action
         object Isolate : Action
     }
 
-    private fun snapshot(batch: Int): Step? {
-        val head = entries.firstOrNull() ?: return null
+    private fun isHeld(localId: String, now: Long): Boolean = held[localId]?.let { it.retryAtMs > now } ?: false
+
+    /** lock을 잡고 부른다. 남은 항목 중 지금 보류 중인 트립 수. */
+    private fun heldTripCount(now: Long): Int = entries.asSequence().map { it.localId }.distinct().count { isHeld(it, now) }
+
+    private fun hold(localId: String, message: String) {
+        synchronized(lock) {
+            val failures = (held[localId]?.failures ?: 0) + 1
+            held[localId] = Held(nowMs() + backoffMillis(failures), failures)
+        }
+        Log.w(TAG, "트립 보류($message)")
+    }
+
+    /** lock을 잡고 부른다. 보류 중이 아닌 첫 항목에서 다음 전송 단위를 정한다(보류 트립의 항목은 건너뛴다). */
+    private fun snapshot(batch: Int, now: Long): Step? {
+        val head = entries.firstOrNull { !isHeld(it.localId, now) } ?: return null
         return when (head) {
             is QueueEntry.Start -> Step.Create(head)
             is QueueEntry.Point -> {
                 val reg = registrations[head.localId] ?: return Step.Orphan(head)
                 val run = ArrayList<QueueEntry.Point>()
                 for (e in entries) {
-                    if (e !is QueueEntry.Point || e.localId != head.localId || run.size >= batch) break
+                    if (e.localId != head.localId) continue // 다른 트립(보류 중인 것 포함)은 건너뛴다
+                    if (e !is QueueEntry.Point || run.size >= batch) break
                     run.add(e)
                 }
                 Step.Points(head.localId, reg.serverId, run)
@@ -297,50 +516,60 @@ class Uploader(
         }
     }
 
-    private fun classify(step: Step, e: HttpFailure, currentBatch: Int, recreated: MutableSet<String>): Action {
+    private fun classify(step: Step, e: HttpFailure, recreated: MutableSet<String>): Action {
         val s = e.status
-        val retryable = s == 408 || s == 425 || s == 429 || s >= 500
-        if (retryable) return Action.Stop(DrainKind.RETRY, "RETRY HTTP $s")
+        if (isRetryable(s)) return Action.Stop(DrainKind.RETRY, "RETRY HTTP $s")
+        val id = step.firstEntry.localId
         return when (step) {
-            is Step.Create -> Action.Stop(DrainKind.HELD, "HELD HTTP $s")
+            is Step.Create -> Action.Hold(id, "HELD HTTP $s")
             is Step.Points -> when {
                 s == 404 -> recreate(step.localId, recreated)
                 s == 400 || s == 413 || s == 422 ->
                     if (step.batch.size > 1) Action.Retry(maxOf(1, step.batch.size / 2)) else Action.Isolate
-                else -> Action.Stop(DrainKind.HELD, "HELD HTTP $s")
+                else -> Action.Hold(id, "HELD HTTP $s")
             }
             is Step.Finish -> when {
                 s == 404 -> recreate(step.end.localId, recreated)
                 s == 400 || s == 413 || s == 422 -> Action.Isolate
-                else -> Action.Stop(DrainKind.HELD, "HELD HTTP $s")
+                else -> Action.Hold(id, "HELD HTTP $s")
             }
             is Step.Orphan -> Action.Stop(DrainKind.RETRY, "RETRY HTTP $s")
         }
     }
 
-    /** 서버에 트립이 없다(404). 저장해 둔 Start로 같은 localId의 트립을 다시 만들고 재전송한다. 이미 한 번 해 봤으면 재시도로 넘긴다. */
+    private fun isRetryable(s: Int) = s == 408 || s == 425 || s == 429 || s >= 500
+
+    /**
+     * 서버에 트립이 없다(404). 저장해 둔 Start로 같은 localId의 트립을 다시 만들고 재전송한다. 이미 한 번 해 봤으면 재시도로 넘긴다.
+     * 다시 만드는 호출의 예외는 HTTP든 네트워크·JSON이든 여기서 분류해 밖으로 새지 않는다.
+     */
     private fun recreate(localId: String, recreated: MutableSet<String>): Action {
         if (!recreated.add(localId)) return Action.Stop(DrainKind.RETRY, "RETRY HTTP 404")
         val reg = synchronized(lock) { registrations[localId] } ?: return Action.Stop(DrainKind.RETRY, "RETRY HTTP 404")
         return try {
             val newId = api.createTrip(reg.start)
+            var save = false
             synchronized(lock) {
                 registrations[localId]?.let {
                     registrations[localId] = it.copy(serverId = newId)
-                    saveRegistrations()
+                    save = true
                 }
             }
+            if (save) saveRegistrations()
             Action.Retry(null)
         } catch (ex: HttpFailure) {
-            val retryable = ex.status == 408 || ex.status == 425 || ex.status == 429 || ex.status >= 500
-            Action.Stop(if (retryable) DrainKind.RETRY else DrainKind.HELD, "${if (retryable) "RETRY" else "HELD"} HTTP ${ex.status}")
+            if (isRetryable(ex.status)) Action.Stop(DrainKind.RETRY, "RETRY HTTP ${ex.status}") else Action.Hold(localId, "HELD HTTP ${ex.status}")
+        } catch (ex: Exception) {
+            Action.Stop(DrainKind.RETRY, "RETRY ${ex.javaClass.simpleName}")
         }
     }
 
-    /** lock을 잡고 부른다. head가 기대한 항목일 때만 제거한다(그 사이 clear·정리로 사라졌으면 건드리지 않는다). */
-    private fun popHead(expected: QueueEntry): Boolean {
-        if (entries.firstOrNull() !== expected) return false
-        val e = entries.removeFirst()
+    /** lock을 잡고 부른다. [expected]와 같은 객체를 목록에서 찾아 지운다(그 사이 clear·정리로 사라졌으면 건드리지 않는다). */
+    private fun removeEntry(expected: QueueEntry): Boolean {
+        val i = entries.indexOfFirst { it === expected }
+        if (i < 0) return false
+        val e = entries.removeAt(i)
+        structVersion++
         total.decrementAndGet()
         if (e is QueueEntry.Point) points.decrementAndGet()
         return true
@@ -348,13 +577,30 @@ class Uploader(
 
     private fun summary(uploaded: Int, ended: Int) = "OK $uploaded" + if (ended > 0) " END $ended" else ""
 
+    /** 격리 항목을 dead-letter 파일에 남긴다. 파일은 [deadLetterMax]줄까지만 두고 넘으면 오래된 줄부터 버린다. 실패해도 던지지 않는다. */
     private fun deadLetter(entry: QueueEntry, reason: String) {
         Log.w(TAG, "dead-letter: $reason")
-        deadLetters.append(listOf(JSONObject().put("reason", reason).put("entry", QueueCodec.encode(entry)).toString()))
+        try {
+            val line = JSONObject().put("reason", reason).put("entry", QueueCodec.encode(entry)).toString()
+            synchronized(deadLock) {
+                deadLetters.append(listOf(line))
+                deadCount++
+                if (deadCount > deadLetterMax) {
+                    val keep = deadLetters.readAll().takeLast(deadLetterMax)
+                    deadLetters.rewrite(keep)
+                    deadCount = keep.size
+                }
+            }
+        } catch (t: Exception) {
+            Log.w(TAG, "dead-letter 기록 실패: ${t.javaClass.simpleName}")
+        }
     }
 
-    /** lock을 잡고 부른다. 점이 상한을 넘으면 가장 오래된 종료 트립부터 통째로 지운다. */
-    private fun enforceCap() {
+    /**
+     * lock을 잡고 부른다. 점이 상한을 넘으면 가장 오래된 종료 트립부터 통째로 메모리에서 지운다. 파일은 다음 컴팩션(dirty)에서 줄인다.
+     * 등록을 지웠으면 true(호출자가 lock 밖에서 [saveRegistrations]).
+     */
+    private fun enforceCap(): Boolean {
         var dropped = false
         while (points.get() > maxPoints) {
             val ended = entries.filterIsInstance<QueueEntry.End>().map { it.localId }.toSet()
@@ -369,18 +615,22 @@ class Uploader(
                 if (e is QueueEntry.Point) points.decrementAndGet()
             }
             registrations.remove(victim)
+            held.remove(victim)
             dropped = true
             Log.w(TAG, "큐 상한 $maxPoints 초과: 가장 오래된 종료 트립 제거(점 ${before - points.get()}개)")
         }
         if (dropped) {
-            queue.rewrite(entries.toList())
-            saveRegistrations()
+            structVersion++
+            dirty = true
         }
+        return dropped
     }
 
-    private fun loadRegistrations(): MutableMap<String, Registration> {
+    private fun loadRegistrations(): Pair<MutableMap<String, Registration>, Int> {
         val map = LinkedHashMap<String, Registration>()
-        for (line in ids.readAll()) {
+        val read = ids.read()
+        var corrupt = read.corrupt
+        for (line in read.lines) {
             try {
                 val o = JSONObject(line)
                 val id = o.getString("id")
@@ -396,15 +646,18 @@ class Uploader(
                     if (o.isNull("lastPointTs")) null else o.getLong("lastPointTs"),
                 )
             } catch (e: Exception) {
-                Log.w(TAG, "server-ids 줄 무시")
+                corrupt++
             }
         }
-        return map
+        return map to corrupt
     }
 
+    /** lock 밖에서 부른다. lock 안에서 JSON만 만들고, 암호화·fsync·rename은 [idsLock]으로 순서만 지킨다. */
     private fun saveRegistrations() {
-        ids.rewrite(
-            registrations.map { (id, r) ->
+        val lines: List<String>
+        val version: Long
+        synchronized(lock) {
+            lines = registrations.map { (id, r) ->
                 JSONObject()
                     .put("id", id)
                     .put("serverId", r.serverId)
@@ -414,8 +667,18 @@ class Uploader(
                     .put("odo", r.start.odometerStartKm ?: JSONObject.NULL)
                     .put("lastPointTs", r.lastPointTs ?: JSONObject.NULL)
                     .toString()
-            },
-        )
+            }
+            version = ++idsVersion
+        }
+        synchronized(idsLock) {
+            if (version < idsWritten) return // 더 새 스냅샷이 이미 저장됐다
+            try {
+                ids.rewrite(lines)
+                idsWritten = version
+            } catch (t: Exception) {
+                Log.w(TAG, "server-ids 저장 실패: ${t.javaClass.simpleName}")
+            }
+        }
     }
 
     private companion object {

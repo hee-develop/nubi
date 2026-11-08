@@ -48,7 +48,7 @@ class QueueTest {
         val raw = file.readText()
         assertFalse("평문 좌표가 파일에 보이면 안 된다", raw.contains("37.5") || raw.contains("lat") || raw.contains("veh"))
         assertEquals(entries.size, raw.lines().count { it.isNotBlank() })
-        assertEquals(entries, TripQueue(file, cipher).load())
+        assertEquals(entries, TripQueue(file, cipher).load().entries)
     }
 
     @Test
@@ -56,7 +56,9 @@ class QueueTest {
         val file = File(tmp.root, "q.jsonl")
         TripQueue(file, testCipher()).append(listOf(start("a")))
         file.appendText(QueueCodec.encode(start("legacy")) + "\n")
-        assertEquals(0, TripQueue(file, testCipher()).load().size) // 다른 키 + 평문 줄 모두 건너뜀
+        val loaded = TripQueue(file, testCipher()).load()
+        assertEquals(0, loaded.entries.size) // 다른 키 + 평문 줄 모두 건너뜀
+        assertEquals(2, loaded.corrupt) // 건너뛴 줄은 센다
     }
 
     @Test
@@ -66,7 +68,7 @@ class QueueTest {
         val q = TripQueue(file, cipher)
         q.append(listOf(start("a"), start("b")))
         q.rewrite(listOf(start("b")))
-        assertEquals(listOf(start("b")), q.load())
+        assertEquals(listOf(start("b")), q.load().entries)
         assertTrue(File(tmp.root, "q.jsonl.tmp").exists().not())
     }
 

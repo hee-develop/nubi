@@ -21,9 +21,17 @@ class UploaderTest {
     private val cipher = testCipher()
     private lateinit var dir: File
 
-    private fun uploader(api: TripApi, batchSize: Int = 100, maxPoints: Int = 50_000, compactEvery: Int = 1_000): Uploader {
+    private fun uploader(
+        api: TripApi,
+        batchSize: Int = 100,
+        maxPoints: Int = 50_000,
+        compactEvery: Int = 1_000,
+        deadLetterMax: Int = 5_000,
+        nowMs: () -> Long = { System.nanoTime() / 1_000_000 },
+        load: Boolean = true,
+    ): Uploader {
         if (!::dir.isInitialized) dir = tmp.newFolder("trips")
-        return newUploader(dir, api, cipher, batchSize, maxPoints, compactEvery)
+        return newUploader(dir, api, cipher, batchSize, maxPoints, compactEvery, deadLetterMax, nowMs, load)
     }
 
     private fun queueLines() = File(dir, "queue.jsonl").let { if (it.exists()) it.readLines().count { l -> l.isNotBlank() } else 0 }
@@ -122,20 +130,53 @@ class UploaderTest {
     }
 
     @Test
-    fun Start가_4xx면_버리지_않고_보류한다() {
+    fun Start가_4xx면_버리지_않고_그_트립만_보류하고_백오프_뒤_다시_시도한다() {
+        var now = 0L
         val server = FakeServer()
         var reject = true
-        server.onCreate = { if (reject) throw HttpFailure(400, "bad start") }
-        val u = uploader(server)
+        server.onCreate = { if (reject && it.localId == "a") throw HttpFailure(400, "bad start") }
+        val u = uploader(server, nowMs = { now })
         u.enqueue(start("a"), *points("a", 0..2), QueueEntry.End("a", 1, null))
         val r = u.drain()
         assertEquals(DrainKind.HELD, r.kind)
         assertEquals(5, u.pendingEntries)
         assertEquals(3, u.pendingPoints)
         assertTrue(u.readDeadLetters().isEmpty())
+        val calls = server.createCalls
+        assertEquals("백오프 안에서는 다시 보내지 않는다", DrainKind.HELD, u.drain().kind)
+        assertEquals(calls, server.createCalls)
         reject = false
+        now += 2_000
         assertEquals(DrainKind.OK, u.drain().kind)
         assertEquals(listOf(0, 1, 2), server.seqs("a"))
+    }
+
+    @Test
+    fun 보류된_트립이_앞에_있어도_뒤의_다른_트립은_계속_올라간다() {
+        var now = 0L
+        val server = FakeServer()
+        server.onCreate = { if (it.localId == "a") throw HttpFailure(422, "bad start") }
+        val u = uploader(server, nowMs = { now })
+        u.enqueue(start("a"), *points("a", 0..1), QueueEntry.End("a", 1, null))
+        u.enqueue(start("b"), *points("b", 0..2), QueueEntry.End("b", 2, null))
+        val r = u.drain()
+        assertEquals(DrainKind.HELD, r.kind)
+        assertEquals(listOf(0, 1, 2), server.seqs("b"))
+        assertEquals(1, server.ended.size)
+        assertEquals(4, u.pendingEntries) // a의 Start·점 2·End만 남음
+        assertEquals(2, u.pendingPoints)
+    }
+
+    @Test
+    fun 점_End의_그_밖의_4xx도_그_트립만_보류한다() {
+        val server = FakeServer()
+        server.onPoints = { id, _ -> if (id == server.tripIdByLocalId["a"]) throw HttpFailure(403, "forbidden") }
+        val u = uploader(server)
+        u.enqueue(start("a"), *points("a", 0..1), QueueEntry.End("a", 1, null))
+        u.enqueue(start("b"), *points("b", 0..1), QueueEntry.End("b", 2, null))
+        assertEquals(DrainKind.HELD, u.drain().kind)
+        assertEquals(listOf(0, 1), server.seqs("b"))
+        assertEquals(3, u.pendingEntries)
     }
 
     @Test
@@ -305,5 +346,346 @@ class UploaderTest {
         assertEquals(DrainKind.OK, u.drain().kind)
         assertEquals(2, u.readDeadLetters().size)
         assertNotNull(u.readDeadLetters().first())
+    }
+
+    // 이분할·404 재생성 ----------------------------------------------------
+
+    @Test
+    fun 이분할_뒤_성공하면_배치_크기를_원래대로_되돌린다() {
+        val server = FakeServer()
+        val sizes = ArrayList<Int>()
+        server.onPoints = { _, b ->
+            sizes.add(b.size)
+            if (sizes.size <= 2) throw HttpFailure(413, "too big")
+        }
+        val u = uploader(server, batchSize = 8)
+        u.enqueue(start("a"), *points("a", 0..7))
+        assertEquals(DrainKind.OK, u.drain().kind)
+        assertEquals(listOf(8, 4, 2, 6), sizes) // 2점으로 줄여 성공한 뒤 다시 최대 크기(남은 6점)
+        assertEquals((0..7).toList(), server.seqs("a"))
+    }
+
+    @Test
+    fun 재생성_createTrip이_네트워크_JSON_예상밖_예외를_던져도_크래시하지_않고_재시도로_분류한다() {
+        for (error in listOf<() -> Throwable>({ IOException("down") }, { org.json.JSONException("bad") }, { IllegalStateException("boom") })) {
+            dir = tmp.newFolder()
+            val server = FakeServer()
+            val u = uploader(server)
+            u.enqueue(start("a"), *points("a", 0..1))
+            assertEquals(DrainKind.OK, u.drain().kind)
+            server.tripIdByLocalId.clear()
+            server.pointsByTrip.clear()
+            server.onCreate = { throw error() }
+            u.enqueue(*points("a", 2..3))
+            val r = u.drain() // 404 → 재생성에서 예외. 던지지 않는다
+            assertEquals(DrainKind.RETRY, r.kind)
+            assertEquals(2, u.pendingPoints)
+        }
+    }
+
+    // HTTP 변환 ----------------------------------------------------------
+
+    @Test
+    fun HttpTripApi는_실제_HTTP_400을_HttpFailure_400으로_바꾼다() {
+        TinyHttpServer { _, _ -> 400 to """{"error":"invalid_body"}""" }.use { http ->
+            val api = HttpTripApi("http://127.0.0.1:${http.port}")
+            val calls = listOf<() -> Unit>(
+                { api.createTrip(start("a")) },
+                { api.postPoints("t", listOf(point(0))) },
+                { api.endTrip("t", QueueEntry.End("a", 1, null)) },
+            )
+            for (call in calls) {
+                val e = org.junit.Assert.assertThrows(HttpFailure::class.java) { call() }
+                assertEquals(400, e.status)
+            }
+        }
+    }
+
+    @Test
+    fun HttpVehicleApi는_VIN을_본문으로_보내고_vehicleId를_받는다() {
+        var path = ""
+        var body = ""
+        TinyHttpServer { p, b ->
+            path = p
+            body = b
+            200 to """{"vehicleId":"abc123"}"""
+        }.use { http ->
+            assertEquals("abc123", HttpVehicleApi("http://127.0.0.1:${http.port}").register("VIN9"))
+            assertEquals("/vehicles/register", path)
+            assertEquals("VIN9", JSONObject(body).getString("vin"))
+        }
+        TinyHttpServer { _, _ -> 400 to """{"error":"invalid_body"}""" }.use { http ->
+            assertEquals(400, org.junit.Assert.assertThrows(HttpFailure::class.java) { HttpVehicleApi("http://127.0.0.1:${http.port}").register("x") }.status)
+        }
+    }
+
+    // End dead-letter·복구·dead-letter 상한 ---------------------------------
+
+    @Test
+    fun End가_영구_4xx로_dead_letter가_되면_등록도_지워져_복구_루프가_생기지_않는다() {
+        val server = FakeServer()
+        server.onEnd = { _, _ -> throw HttpFailure(400, "bad end") }
+        val u = uploader(server)
+        u.enqueue(start("a"), *points("a", 0..1), QueueEntry.End("a", 5, null))
+        assertEquals(DrainKind.OK, u.drain().kind)
+        assertEquals(1, u.readDeadLetters().size)
+        assertTrue(u.readDeadLetters().single().contains("end"))
+        assertEquals("격리한 End의 트립은 복구 대상이 아니다", 0, u.recoverUnfinished())
+        val restarted = uploader(server)
+        assertEquals(0, restarted.recoverUnfinished()) // 재시작 뒤에도 End를 다시 만들지 않는다
+        assertEquals(0, restarted.pendingEntries)
+    }
+
+    @Test
+    fun dead_letter_파일은_상한을_넘으면_오래된_줄부터_버린다() {
+        val u = uploader(FakeServer(), deadLetterMax = 5)
+        u.enqueue(*points("ghost", 0..7)) // 고아 점 8개가 차례로 dead-letter가 된다
+        assertEquals(DrainKind.OK, u.drain().kind)
+        val seqs = u.readDeadLetters().map { (QueueCodec.decode(JSONObject(it).getString("entry")) as QueueEntry.Point).point.seq }
+        assertEquals(listOf(3, 4, 5, 6, 7), seqs)
+    }
+
+    @Test
+    fun 복구는_진행_중인_트립을_건드리지_않고_큐에_End가_이미_있으면_건너뛴다() {
+        val u = uploader(FakeServer())
+        u.enqueue(start("live", 10), QueueEntry.Point("live", point(0, ts = 20)))
+        u.enqueue(start("dead", 5), QueueEntry.Point("dead", point(0, ts = 8)))
+        assertEquals(1, u.recoverUnfinished(setOf("live")))
+        assertEquals(0, u.recoverUnfinished(setOf("live"))) // 두 번째는 End가 이미 있다
+        // 진행 중이던 트립이 원래 End를 넣는다
+        u.enqueue(QueueEntry.End("live", 30, 7.0))
+        // 이미 End가 있는 트립에 End를 또 넣어도 하나만 남는다
+        u.enqueue(QueueEntry.End("dead", 99, 9.0))
+        val server = FakeServer()
+        val sender = uploader(server)
+        assertEquals(DrainKind.OK, sender.drain().kind)
+        assertEquals(2, server.events.count { it.startsWith("end ") })
+    }
+
+    // 저장 실패·손상·로드 ---------------------------------------------------
+
+    @Test
+    fun 인코딩_예외_NaN은_그_항목만_버리고_저장_실패로_센다_크래시하지_않는다() {
+        val u = uploader(FakeServer())
+        val ok = u.enqueue(
+            QueueEntry.Point("a", TripPoint(0, Sample(1_000, Double.NaN, 127.0))),
+            QueueEntry.Point("a", TripPoint(1, Sample(2_000, 37.5, Double.POSITIVE_INFINITY))),
+        )
+        assertFalse(ok)
+        assertEquals(0, u.pendingEntries)
+        assertEquals(2, u.saveFailures)
+        assertTrue(u.enqueue(start("a")))
+        assertEquals(1, u.pendingEntries)
+    }
+
+    @Test
+    fun 파일_append가_IOException이면_저장_실패로_세지만_메모리_항목은_업로드된다() {
+        dir = tmp.newFolder("trips")
+        File(dir, "queue.jsonl").mkdir() // 파일 자리에 디렉터리가 있어 읽기·쓰기 모두 실패한다
+        val server = FakeServer()
+        val u = uploader(server)
+        val before = u.saveFailures
+        assertFalse(u.enqueue(start("a"), *points("a", 0..1)))
+        assertTrue(u.saveFailures > before)
+        assertEquals(3, u.pendingEntries)
+        assertEquals(DrainKind.OK, u.drain().kind)
+        assertEquals(listOf(0, 1), server.seqs("a"))
+    }
+
+    @Test
+    fun 복호화에_실패한_줄은_세어_보고하고_컴팩션에서_파일에서도_사라진다() {
+        val first = uploader(networkDown)
+        first.enqueue(start("a"), *points("a", 0..1))
+        File(dir, "queue.jsonl").appendText("garbage-line\nanother-bad-line\n")
+        val server = FakeServer()
+        val second = uploader(server)
+        assertEquals(2, second.corruptLines)
+        assertEquals(3, second.pendingEntries)
+        assertEquals(DrainKind.OK, second.drain().kind)
+        assertEquals(listOf(0, 1), server.seqs("a"))
+        assertEquals(0, queueLines())
+        assertEquals(0, uploader(networkDown).corruptLines)
+    }
+
+    @Test
+    fun 로드_전에_들어온_항목은_메모리에_쌓였다가_로드_때_파일_뒤에_이어진다() {
+        val first = uploader(networkDown)
+        first.enqueue(start("a"), *points("a", 0..1))
+        val second = uploader(networkDown, load = false)
+        assertTrue(second.enqueue(*points("a", 2..3)))
+        assertFalse(second.loaded)
+        assertEquals(2, second.pendingEntries)
+        second.load()
+        assertTrue(second.loaded)
+        assertEquals(5, second.pendingEntries)
+        assertEquals(4, second.pendingPoints)
+        val onDisk = TripQueue(File(dir, "queue.jsonl"), cipher).load().entries.filterIsInstance<QueueEntry.Point>().map { it.point.seq }
+        assertEquals(listOf(0, 1, 2, 3), onDisk)
+    }
+
+    // 컴팩션 -------------------------------------------------------------
+
+    @Test
+    fun 큐_5000줄_컴팩션_중에도_enqueue는_50ms_안에_끝나고_그_사이_들어온_항목도_파일에_남는다() {
+        dir = tmp.newFolder("trips")
+        val slow = SlowCipher(cipher)
+        val u = newUploader(dir, networkDown, slow)
+        u.enqueue(start("a"), *points("a", 0..4_998))
+        assertEquals(5_000, u.pendingEntries)
+        val base = slow.encryptCount.get()
+        val midCompaction = CountDownLatch(1)
+        slow.perLineNanos = 200_000 // 줄당 0.2ms → 컴팩션 전체 약 1초
+        slow.slowWhen = { Thread.currentThread().name == "compactor" } // 컴팩션 스레드의 암호화만 느리게
+        slow.onEncrypt = { n -> if (n - base > 300) midCompaction.countDown() }
+        val pool = Executors.newSingleThreadExecutor { Thread(it, "compactor") }
+        try {
+            val compaction = pool.submit<Boolean> { u.compact() }
+            assertTrue("컴팩션이 진행 중이어야 한다", midCompaction.await(10, TimeUnit.SECONDS))
+            assertFalse(compaction.isDone)
+            val begin = System.nanoTime()
+            val ok = u.enqueue(*points("a", 5_000..5_002))
+            val tookMs = (System.nanoTime() - begin) / 1_000_000.0
+            println("컴팩션 중 enqueue 소요: ${tookMs}ms (큐 5000줄, 줄당 암호화 0.2ms 가짜 cipher)")
+            assertTrue(ok)
+            assertTrue("컴팩션 중 enqueue가 ${tookMs}ms 걸렸다(lock 안 암호화·쓰기 의심)", tookMs < 50)
+            assertFalse("enqueue가 끝났을 때도 컴팩션은 진행 중이어야 한다", compaction.isDone)
+            assertTrue(compaction.get(30, TimeUnit.SECONDS))
+        } finally {
+            pool.shutdownNow()
+        }
+        val reopened = newUploader(dir, networkDown, cipher)
+        assertEquals(5_003, reopened.pendingEntries)
+        assertEquals(5_002, reopened.pendingPoints)
+    }
+
+    @Test
+    fun 컴팩션_중_IO_실패는_큐를_그대로_두고_다음에_다시_시도한다() {
+        val server = FakeServer()
+        val u = uploader(server)
+        u.enqueue(start("a"), *points("a", 0..3), QueueEntry.End("a", 1, null))
+        val tmpDir = File(dir, "queue.jsonl.tmp").apply { mkdir() } // 임시 파일 자리에 디렉터리 → 컴팩션 쓰기가 실패한다
+        assertEquals(DrainKind.OK, u.drain().kind) // drain은 컴팩션 실패에 영향받지 않는다
+        assertEquals(listOf(0, 1, 2, 3), server.seqs("a"))
+        assertEquals("컴팩션이 실패했으므로 파일은 그대로", 6, queueLines())
+        tmpDir.delete()
+        assertTrue(u.compact())
+        assertEquals(0, queueLines())
+        assertEquals(0, uploader(networkDown).pendingEntries)
+    }
+
+    @Test
+    fun 컴팩션_중_상한_정리가_일어나면_옛_스냅샷으로_교체하지_않는다() {
+        dir = tmp.newFolder("trips")
+        val slow = SlowCipher(cipher)
+        val u = newUploader(dir, networkDown, slow, maxPoints = 20)
+        u.enqueue(start("old"), *points("old", 0..9), QueueEntry.End("old", 1, null))
+        slow.perLineNanos = 20_000_000 // 줄당 20ms(컴팩션 스레드만)
+        slow.slowWhen = { Thread.currentThread().name == "compactor" }
+        val inside = CountDownLatch(1)
+        val base = slow.encryptCount.get()
+        slow.onEncrypt = { n -> if (n - base > 2) inside.countDown() }
+        val pool = Executors.newSingleThreadExecutor { Thread(it, "compactor") }
+        try {
+            val compaction = pool.submit<Boolean> { u.compact() }
+            assertTrue(inside.await(5, TimeUnit.SECONDS))
+            u.enqueue(start("live"), *points("live", 0..14)) // 25점 > 20 → old 정리
+            assertFalse("정리로 목록이 바뀌었으니 컴팩션은 교체를 포기한다", compaction.get(30, TimeUnit.SECONDS))
+        } finally {
+            pool.shutdownNow()
+        }
+        assertEquals(15, u.pendingPoints)
+        assertTrue(u.compact()) // 다음 컴팩션은 정리된 상태를 반영한다
+        val reopened = uploader(networkDown)
+        assertEquals(16, reopened.pendingEntries)
+        assertEquals(15, reopened.pendingPoints)
+    }
+
+    @Test
+    fun drain_중에_상한_정리가_진행_중_트립을_지워도_카운터가_맞고_끝까지_올라간다() {
+        val server = FakeServer()
+        val inPost = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        var first = true
+        server.onPoints = { _, _ ->
+            if (first) {
+                first = false
+                inPost.countDown()
+                release.await(5, TimeUnit.SECONDS)
+            }
+        }
+        val u = uploader(server, maxPoints = 10)
+        u.enqueue(start("old"), *points("old", 0..3), QueueEntry.End("old", 1, null))
+        u.enqueue(start("mid"), *points("mid", 0..3), QueueEntry.End("mid", 2, null))
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+            val drain = pool.submit<DrainResult> { u.drain() }
+            assertTrue(inPost.await(5, TimeUnit.SECONDS))
+            u.enqueue(start("live"), *points("live", 0..3)) // 12점 > 10 → 전송 중인 old를 통째로 정리
+            release.countDown()
+            assertEquals(DrainKind.OK, drain.get(10, TimeUnit.SECONDS).kind)
+        } finally {
+            release.countDown()
+            pool.shutdownNow()
+        }
+        assertEquals(0, u.pendingPoints)
+        assertEquals(0, u.pendingEntries)
+        assertEquals(listOf(0, 1, 2, 3), server.seqs("mid"))
+        assertEquals(listOf(0, 1, 2, 3), server.seqs("live"))
+        assertEquals(0, uploader(networkDown).pendingEntries) // 파일도 일치
+    }
+
+    // 암호화 키 손상 -------------------------------------------------------
+
+    private fun dekUploader(wrapper: SoftwareKeyWrapper) = Uploader(
+        queueFile = File(dir, "queue.jsonl"),
+        idsFile = File(dir, "server-ids.jsonl"),
+        deadLetterFile = File(dir, "dead-letter.jsonl"),
+        api = networkDown,
+        cipherSetup = { DekCipherFactory(dir, wrapper).setup() },
+    ).also { it.load() }
+
+    @Test
+    fun DEK가_손상되면_새_DEK로_재생성하고_기존_큐는_폐기_개수를_남기며_크래시하지_않는다() {
+        dir = tmp.newFolder("trips")
+        val wrapper = SoftwareKeyWrapper()
+        val first = dekUploader(wrapper)
+        first.enqueue(start("a"), *points("a", 0..2))
+        assertEquals(0, first.discardedLines)
+        val second = dekUploader(wrapper)
+        assertEquals(4, second.pendingEntries) // 같은 DEK면 그대로 읽힌다
+        File(dir, "dek.bin").writeText("깨진 DEK")
+        val third = dekUploader(wrapper)
+        assertEquals(0, third.pendingEntries)
+        assertEquals(4, third.discardedLines)
+        assertTrue(third.enqueue(start("b")))
+        val fourth = dekUploader(wrapper)
+        assertEquals(1, fourth.pendingEntries) // 새 DEK가 저장돼 다음 시작에는 읽힌다
+        assertEquals(0, fourth.discardedLines)
+    }
+
+    @Test
+    fun Keystore_unwrap_예외와_wrap_실패에서도_크래시하지_않는다() {
+        dir = tmp.newFolder("trips")
+        val wrapper = SoftwareKeyWrapper()
+        dekUploader(wrapper).enqueue(start("a"))
+        wrapper.failUnwrap = true // Keystore 키가 사라진 경우
+        val lost = dekUploader(wrapper)
+        assertEquals(0, lost.pendingEntries)
+        assertEquals(1, lost.discardedLines)
+        assertTrue(lost.enqueue(start("b")))
+        // wrap까지 실패하면 이번 실행에만 쓰는 임시 키로 계속 돈다
+        File(dir, "dek.bin").delete()
+        wrapper.failWrap = true
+        val ephemeral = dekUploader(wrapper)
+        assertTrue(ephemeral.enqueue(start("c"), *points("c", 0..1)))
+        assertEquals(3, ephemeral.pendingEntries)
+        val server = FakeServer()
+        val drain = Uploader(
+            File(dir, "queue.jsonl"), File(dir, "server-ids.jsonl"), File(dir, "dead-letter.jsonl"), server,
+            { CipherSetup(AesGcmCipher.fromBytes(ByteArray(32))) },
+        )
+        assertEquals(0, drain.corruptLines) // load 전
+        drain.load()
+        assertTrue(drain.corruptLines >= 1) // 임시 키로 쓴 줄은 다른 키로 읽을 수 없다
     }
 }
