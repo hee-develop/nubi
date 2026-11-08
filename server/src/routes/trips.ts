@@ -1,16 +1,24 @@
 import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
 import type { Db } from '../db/index.js';
 
 const MAX_POINTS_PER_BATCH = 500;
+const MAX_ID_LENGTH = 128;
+export const MAX_BODY_BYTES = 1024 * 1024;
 
 const iso = z.string().datetime({ offset: true });
 const nullableNumber = z.number().finite().nullish();
+const id = z.string().min(1).max(MAX_ID_LENGTH);
+
+/** 시각은 오프셋이 달라도 UTC(ISO, Z)로 정규화해 저장한다. */
+const toUtc = (value: string) => new Date(value).toISOString();
 
 const startBody = z.object({
-  vehicleId: z.string().min(1),
-  driverId: z.string().min(1),
+  localId: id,
+  vehicleId: id,
+  driverId: id,
   startedAt: iso,
   odometerStartKm: nullableNumber,
 });
@@ -20,8 +28,9 @@ const pointSchema = z.object({
   ts: iso,
   lat: z.number().min(-90).max(90),
   lon: z.number().min(-180).max(180),
-  headingDeg: nullableNumber,
+  headingDeg: z.number().min(0).max(360).nullish(),
   confidence: nullableNumber,
+  // 차량 앱은 속도를 수집하지 않는다. 과거 데이터 호환용으로만 받는다.
   speedKph: nullableNumber,
   gear: z.enum(['P', 'R', 'N', 'D']).nullish(),
 });
@@ -32,12 +41,15 @@ const endBody = z.object({ endedAt: iso, odometerEndKm: nullableNumber });
 
 type TripRow = {
   id: string;
+  local_id: string | null;
   vehicle_id: string;
   driver_id: string;
   started_at: string;
   ended_at: string | null;
   odometer_start_km: number | null;
   odometer_end_km: number | null;
+  point_count: number;
+  distance_m: number;
 };
 
 type PointRow = {
@@ -72,26 +84,55 @@ const toPoint = (r: PointRow) => ({
   gear: r.gear as 'P' | 'R' | 'N' | 'D' | null,
 });
 
-const summarize = (db: Db, trip: TripRow) => {
-  const rows = db.prepare('SELECT lat, lon FROM trip_points WHERE trip_id = ? ORDER BY seq').all(trip.id) as { lat: number; lon: number }[];
-  let distanceM = 0;
-  for (let i = 1; i < rows.length; i++) distanceM += haversineM(rows[i - 1].lat, rows[i - 1].lon, rows[i].lat, rows[i].lon);
+/**
+ * 요약(점 수·거리)은 저장하지 않고 조회 때 SQL 한 번으로 계산한다. 종료 뒤에 늦게 도착한 점도 자동으로 반영되고, 목록도 쿼리 1회다.
+ * [pageSql]은 `page` CTE 본문(트립 행을 고르는 SELECT)이다.
+ */
+const summaryQuery = (pageSql: string) => `
+  WITH page AS (${pageSql}),
+  p AS (
+    SELECT trip_id, lat, lon,
+           LAG(lat) OVER w AS plat, LAG(lon) OVER w AS plon
+    FROM trip_points
+    WHERE trip_id IN (SELECT id FROM page)
+    WINDOW w AS (PARTITION BY trip_id ORDER BY seq)
+  ),
+  s AS (
+    SELECT trip_id, COUNT(*) AS n,
+           SUM(CASE WHEN plat IS NULL THEN 0 ELSE
+             2 * ${EARTH_RADIUS_M} * asin(min(1.0, sqrt(
+               sin(radians(lat - plat) / 2) * sin(radians(lat - plat) / 2) +
+               cos(radians(plat)) * cos(radians(lat)) * sin(radians(lon - plon) / 2) * sin(radians(lon - plon) / 2)
+             ))) END) AS d
+    FROM p GROUP BY trip_id
+  )
+  SELECT page.*, COALESCE(s.n, 0) AS point_count, COALESCE(s.d, 0) AS distance_m
+  FROM page LEFT JOIN s ON s.trip_id = page.id
+  ORDER BY page.started_at DESC, page.created_at DESC`;
+
+const toSummary = (trip: TripRow) => {
   const durationS = trip.ended_at ? Math.max(0, Math.round((Date.parse(trip.ended_at) - Date.parse(trip.started_at)) / 1000)) : null;
   return {
     tripId: trip.id,
+    localId: trip.local_id,
     vehicleId: trip.vehicle_id,
     driverId: trip.driver_id,
     startedAt: trip.started_at,
     endedAt: trip.ended_at,
     odometerStartKm: trip.odometer_start_km,
     odometerEndKm: trip.odometer_end_km,
-    pointCount: rows.length,
-    distanceM: Math.round(distanceM * 10) / 10,
+    pointCount: trip.point_count,
+    distanceM: Math.round(trip.distance_m * 10) / 10,
     durationS,
   };
 };
 
-const getTrip = (db: Db, id: string) => db.prepare('SELECT * FROM trips WHERE id = ?').get(id) as TripRow | undefined;
+const getSummary = (db: Db, tripId: string) => {
+  const row = db.prepare(summaryQuery('SELECT * FROM trips WHERE id = ?')).get(tripId) as TripRow | undefined;
+  return row ? toSummary(row) : undefined;
+};
+
+const tripExists = (db: Db, tripId: string) => db.prepare('SELECT 1 AS x FROM trips WHERE id = ?').get(tripId) !== undefined;
 
 const readJson = async (req: Request): Promise<unknown> => {
   try {
@@ -103,26 +144,31 @@ const readJson = async (req: Request): Promise<unknown> => {
 
 export const tripsRoutes = (db: Db) =>
   new Hono()
+    .use(
+      bodyLimit({
+        maxSize: MAX_BODY_BYTES,
+        onError: (c) => c.json({ error: 'payload_too_large' }, 413),
+      }),
+    )
     .post('/', async (c) => {
       const parsed = startBody.safeParse(await readJson(c.req.raw));
       if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
       const b = parsed.data;
-      const tripId = randomUUID();
-      db.prepare('INSERT INTO trips (id, vehicle_id, driver_id, started_at, odometer_start_km, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
-        tripId,
-        b.vehicleId,
-        b.driverId,
-        b.startedAt,
-        b.odometerStartKm ?? null,
-        new Date().toISOString(),
-      );
-      return c.json({ tripId }, 201);
+      // 같은 localId로 다시 오면(재시도·응답 유실) 새로 만들지 않고 기존 tripId를 돌려준다.
+      const r = db
+        .prepare(
+          'INSERT OR IGNORE INTO trips (id, local_id, vehicle_id, driver_id, started_at, odometer_start_km, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        )
+        .run(randomUUID(), b.localId, b.vehicleId, b.driverId, toUtc(b.startedAt), b.odometerStartKm ?? null, new Date().toISOString());
+      const row = db.prepare('SELECT id FROM trips WHERE local_id = ?').get(b.localId) as { id: string };
+      return c.json({ tripId: row.id }, Number(r.changes) > 0 ? 201 : 200);
     })
     .post('/:tripId/points', async (c) => {
       const tripId = c.req.param('tripId');
       const parsed = pointsBody.safeParse(await readJson(c.req.raw));
       if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
-      if (!getTrip(db, tripId)) return c.json({ error: 'not_found' }, 404);
+      if (!tripExists(db, tripId)) return c.json({ error: 'not_found' }, 404);
+      // 종료된 트립에도 점을 받는다. 재시도 순서 때문에 End보다 늦게 도착할 수 있고, 요약은 조회 때 계산하므로 항상 일치한다.
       const insert = db.prepare(
         'INSERT OR IGNORE INTO trip_points (trip_id, seq, ts, lat, lon, heading_deg, confidence, speed_kph, gear) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
       );
@@ -133,7 +179,7 @@ export const tripsRoutes = (db: Db) =>
           const r = insert.run(
             tripId,
             p.seq,
-            p.ts,
+            toUtc(p.ts),
             p.lat,
             p.lon,
             p.headingDeg ?? null,
@@ -153,23 +199,24 @@ export const tripsRoutes = (db: Db) =>
     .post('/:tripId/end', async (c) => {
       const parsed = endBody.safeParse(await readJson(c.req.raw));
       if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
-      const trip = getTrip(db, c.req.param('tripId'));
-      if (!trip) return c.json({ error: 'not_found' }, 404);
-      if (!trip.ended_at) {
-        db.prepare('UPDATE trips SET ended_at = ?, odometer_end_km = ? WHERE id = ?').run(
-          parsed.data.endedAt,
-          parsed.data.odometerEndKm ?? null,
-          trip.id,
-        );
-      }
-      const s = summarize(db, getTrip(db, trip.id)!);
+      const tripId = c.req.param('tripId');
+      if (!tripExists(db, tripId)) return c.json({ error: 'not_found' }, 404);
+      // 이미 종료된 트립은 그대로 둔다(멱등).
+      db.prepare('UPDATE trips SET ended_at = ?, odometer_end_km = ? WHERE id = ? AND ended_at IS NULL').run(
+        toUtc(parsed.data.endedAt),
+        parsed.data.odometerEndKm ?? null,
+        tripId,
+      );
+      const s = getSummary(db, tripId)!;
       return c.json({ tripId: s.tripId, pointCount: s.pointCount, distanceM: s.distanceM, durationS: s.durationS ?? 0 }, 200);
     })
     .get('/:tripId', (c) => {
-      const trip = getTrip(db, c.req.param('tripId'));
-      if (!trip) return c.json({ error: 'not_found' }, 404);
-      const points = (db.prepare('SELECT * FROM trip_points WHERE trip_id = ? ORDER BY seq').all(trip.id) as PointRow[]).map(toPoint);
-      return c.json({ ...summarize(db, trip), points }, 200);
+      const summary = getSummary(db, c.req.param('tripId'));
+      if (!summary) return c.json({ error: 'not_found' }, 404);
+      const points = (db.prepare('SELECT * FROM trip_points WHERE trip_id = ? ORDER BY seq').all(summary.tripId) as PointRow[]).map(
+        toPoint,
+      );
+      return c.json({ ...summary, points }, 200);
     })
     .get('/', (c) => {
       const vehicleId = c.req.query('vehicleId');
@@ -177,8 +224,10 @@ export const tripsRoutes = (db: Db) =>
       const limit = Number.isInteger(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
       const rows = (
         vehicleId
-          ? db.prepare('SELECT * FROM trips WHERE vehicle_id = ? ORDER BY started_at DESC, created_at DESC LIMIT ?').all(vehicleId, limit)
-          : db.prepare('SELECT * FROM trips ORDER BY started_at DESC, created_at DESC LIMIT ?').all(limit)
+          ? db
+              .prepare(summaryQuery('SELECT * FROM trips WHERE vehicle_id = ? ORDER BY started_at DESC, created_at DESC LIMIT ?'))
+              .all(vehicleId, limit)
+          : db.prepare(summaryQuery('SELECT * FROM trips ORDER BY started_at DESC, created_at DESC LIMIT ?')).all(limit)
       ) as TripRow[];
-      return c.json({ trips: rows.map((t) => summarize(db, t)) }, 200);
+      return c.json({ trips: rows.map(toSummary) }, 200);
     });
