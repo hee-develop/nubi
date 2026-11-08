@@ -19,8 +19,6 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
-        // 차량 ID = SHA-256(pepper + VIN). 앱에 고정된 값이라 비밀은 아니다(VIN 사전 공격을 막는 소금 역할). 바꾸면 모든 차량 ID가 바뀐다.
-        buildConfigField("String", "VIN_PEPPER", "\"nubi-vin-pepper-v1-6f3a9c1e\"")
     }
 
     testOptions {

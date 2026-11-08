@@ -4,7 +4,6 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import android.util.Log
 import com.nubi.car.BuildConfig
 import com.nubi.car.signals.VehicleInfo
 import java.io.File
@@ -43,15 +42,20 @@ object TripEngineProvider {
             }
         }
         val dir = File(context.filesDir, "trips").apply { mkdirs() }
-        val cipher = KeystoreCipher.create()
+        // Keystore unwrap·파일 읽기는 워커에서 한다. 메인 스레드는 아무것도 기다리지 않는다.
+        val setup = lazy { KeystoreCipher.create(dir) }
         val uploader = Uploader(
-            queue = TripQueue(File(dir, "queue.jsonl"), cipher),
+            queueFile = File(dir, "queue.jsonl"),
             idsFile = File(dir, "server-ids.jsonl"),
             deadLetterFile = File(dir, "dead-letter.jsonl"),
             api = HttpTripApi(BuildConfig.SERVER_URL),
-            cipher = cipher,
+            cipherSetup = { setup.value },
         )
-        Log.i("NubiTrip", "엔진 생성, 대기 항목 ${uploader.pendingEntries}")
-        return TripEngine(clock, scheduler, Executors.newSingleThreadExecutor(), VehicleInfo(context), store, uploader)
+        val resolver = VehicleIdResolver(
+            store = VehicleIdStore(File(dir, "vehicle-id.enc")) { setup.value.cipher },
+            api = HttpVehicleApi(BuildConfig.SERVER_URL),
+            executor = Executors.newSingleThreadExecutor(),
+        )
+        return TripEngine(clock, scheduler, Executors.newSingleThreadExecutor(), VehicleInfo(context, resolver), store, uploader)
     }
 }

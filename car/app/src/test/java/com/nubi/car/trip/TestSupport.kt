@@ -9,17 +9,72 @@ import javax.crypto.KeyGenerator
 
 fun testCipher(): LineCipher = AesGcmCipher(KeyGenerator.getInstance("AES").apply { init(256) }.generateKey())
 
-fun newUploader(dir: File, api: TripApi, cipher: LineCipher, batchSize: Int = 100, maxPoints: Int = 50_000, compactEvery: Int = 1_000) =
-    Uploader(
-        queue = TripQueue(File(dir, "queue.jsonl"), cipher),
-        idsFile = File(dir, "server-ids.jsonl"),
-        deadLetterFile = File(dir, "dead-letter.jsonl"),
-        api = api,
-        cipher = cipher,
-        batchSize = batchSize,
-        maxPoints = maxPoints,
-        compactEvery = compactEvery,
-    )
+fun newUploader(
+    dir: File,
+    api: TripApi,
+    cipher: LineCipher,
+    batchSize: Int = 100,
+    maxPoints: Int = 50_000,
+    compactEvery: Int = 1_000,
+    deadLetterMax: Int = 5_000,
+    nowMs: () -> Long = { System.nanoTime() / 1_000_000 },
+    load: Boolean = true,
+) = Uploader(
+    queueFile = File(dir, "queue.jsonl"),
+    idsFile = File(dir, "server-ids.jsonl"),
+    deadLetterFile = File(dir, "dead-letter.jsonl"),
+    api = api,
+    cipherSetup = { CipherSetup(cipher) },
+    batchSize = batchSize,
+    maxPoints = maxPoints,
+    compactEvery = compactEvery,
+    deadLetterMax = deadLetterMax,
+    nowMs = nowMs,
+).also { if (load) it.load() }
+
+/** Keystore 대신 소프트웨어 AES 키로 DEK를 감싸는 테스트용 래퍼. */
+class SoftwareKeyWrapper(private val key: javax.crypto.SecretKey = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()) : KeyWrapper {
+    var failUnwrap = false
+    var failWrap = false
+    var unwrapCalls = 0
+
+    override fun wrap(dek: ByteArray): ByteArray {
+        if (failWrap) throw IllegalStateException("wrap 실패")
+        val c = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding").apply { init(javax.crypto.Cipher.ENCRYPT_MODE, key) }
+        return c.iv + c.doFinal(dek)
+    }
+
+    override fun unwrap(blob: ByteArray): ByteArray {
+        unwrapCalls++
+        if (failUnwrap) throw IllegalStateException("unwrap 실패")
+        val c = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+            .apply { init(javax.crypto.Cipher.DECRYPT_MODE, key, javax.crypto.spec.GCMParameterSpec(128, blob, 0, 12)) }
+        return c.doFinal(blob, 12, blob.size - 12)
+    }
+}
+
+/** 암호화 한 줄마다 [perLineNanos]만큼 느려지는 가짜 cipher(실제 암호화는 위임). 컴팩션이 lock을 쥐고 있는지 확인하는 용도. */
+class SlowCipher(private val inner: LineCipher) : LineCipher {
+    @Volatile
+    var perLineNanos = 0L
+
+    /** 느리게 만들 스레드 조건. 기본은 모든 스레드. */
+    @Volatile
+    var slowWhen: () -> Boolean = { true }
+
+    @Volatile
+    var onEncrypt: (Int) -> Unit = {}
+    val encryptCount = java.util.concurrent.atomic.AtomicInteger()
+
+    override fun encrypt(plain: String): String {
+        val n = encryptCount.incrementAndGet()
+        onEncrypt(n)
+        if (perLineNanos > 0 && slowWhen()) java.util.concurrent.locks.LockSupport.parkNanos(perLineNanos)
+        return inner.encrypt(plain)
+    }
+
+    override fun decrypt(line: String): String? = inner.decrypt(line)
+}
 
 fun point(seq: Int, ts: Long = 1_000L * seq, lat: Double = 37.5 + seq * 0.0001) = TripPoint(seq, Sample(ts, lat, 127.0, gear = Gear.D))
 
@@ -121,7 +176,7 @@ class ManualScheduler(private val clock: FakeClock) : Scheduler {
 }
 
 class FakeVehicle : VehicleSource {
-    override var vinHash: String? = null
+    override var vehicleId: String? = null
     var odometer: Double? = 0.0
     var started = 0
     var stopped = 0

@@ -3,6 +3,7 @@
     <string name="app_name">누비</string>
     <string name="notification_channel">주행 기록</string>
     <string name="notification_title">누비가 주행 위치를 기록하고 있어요</string>
+    <string name="state_loading">불러오는 중</string>
     <string name="state_permission">권한 필요</string>
     <string name="state_idle">대기</string>
     <string name="state_recording">기록 중</string>
@@ -18,4 +19,10 @@
     <string name="permission_body">운전한 경로를 자동으로 기록하려면 차량 위치를 읽어야 해요. 기록은 이 차량의 주행 이력으로만 저장돼요. 속도는 수집하지 않아요.</string>
     <string name="permission_confirm">허용하고 시작</string>
     <string name="permission_open_settings">설정 열기</string>
+    <string name="health_service_failed">기록이 멈췄습니다. 앱을 열어 두면 다시 시작합니다</string>
+    <string name="health_unsupported">이 차량은 위치 기능을 지원하지 않습니다</string>
+    <string name="restart_recording">다시 시작</string>
+    <string name="storage_save_failed">저장 실패 %1$d건</string>
+    <string name="storage_corrupt">손상 %1$d줄</string>
+    <string name="storage_discarded">복호화할 수 없어 폐기 %1$d줄</string>
 </resources>

@@ -18,6 +18,7 @@ import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.nubi.car.trip.RecorderHealth
 import com.nubi.car.trip.TripEngine
 import com.nubi.car.trip.TripEngineProvider
 import com.nubi.car.trip.TripState
@@ -33,6 +34,9 @@ class MainActivity : Activity() {
     private lateinit var samplesText: TextView
     private lateinit var distanceText: TextView
     private lateinit var uploadText: TextView
+    private lateinit var healthText: TextView
+    private lateinit var storageText: TextView
+    private lateinit var restartButton: Button
     private lateinit var permissionCard: LinearLayout
     private lateinit var permissionConfirm: Button
     private lateinit var permissionSettings: Button
@@ -41,8 +45,11 @@ class MainActivity : Activity() {
     private var car: Car? = null
     private var uxManager: CarUxRestrictionsManager? = null
 
-    /** DO가 요구되는 동안 true. 이때 권한 카드·버튼은 숨기고 문자열은 [maxStringLength]로 자른다. */
-    private var distractionOptimized = false
+    /**
+     * DO가 요구되는 동안 true. 이때 권한 카드·버튼은 숨기고 문자열은 [maxStringLength]로 자른다.
+     * 규제 서비스에 등록하지 못하면 실제 값을 알 수 없으므로 fail-closed로 true를 유지한다(등록에 성공하면 실제 값으로 갱신).
+     */
+    private var distractionOptimized = true
     private var maxStringLength = 0
 
     /** 요청 뒤에도 거부됐고 시스템이 더는 묻지 않는 상태(영구 거부). 이때 '설정 열기'를 보인다. */
@@ -128,16 +135,24 @@ class MainActivity : Activity() {
     // 주행 규제 ---------------------------------------------------------------
 
     private fun registerUxRestrictions() {
+        // 등록이 끝나 실제 값을 받을 때까지는 제한된 것으로 본다.
+        distractionOptimized = true
         try {
-            val c = Car.createCar(this) ?: return
+            val c = Car.createCar(this) ?: return failClosed("Car 없음")
             car = c
-            val manager = c.getCarManager(Car.CAR_UX_RESTRICTION_SERVICE) as? CarUxRestrictionsManager ?: return
+            val manager = c.getCarManager(Car.CAR_UX_RESTRICTION_SERVICE) as? CarUxRestrictionsManager ?: return failClosed("규제 서비스 없음")
             uxManager = manager
             manager.registerListener(uxListener)
-            manager.currentCarUxRestrictions?.let { applyRestrictions(it) }
+            val current = manager.currentCarUxRestrictions
+            if (current != null) applyRestrictions(current) else failClosed("현재 규제 값 없음")
         } catch (e: Throwable) {
-            Log.w("NubiMain", "주행 규제 등록 실패: ${e.javaClass.simpleName} ${e.message}")
+            failClosed("${e.javaClass.simpleName} ${e.message}")
         }
+    }
+
+    private fun failClosed(reason: String) {
+        distractionOptimized = true
+        Log.w("NubiMain", "주행 규제 등록 실패, DO로 간주: $reason")
     }
 
     private fun unregisterUxRestrictions() {
@@ -171,11 +186,28 @@ class MainActivity : Activity() {
         stateText.text = limited(
             when {
                 needsPermission -> getString(R.string.state_permission)
+                s.loading -> getString(R.string.state_loading)
                 s.state == TripState.IDLE -> getString(R.string.state_idle)
                 s.state == TripState.RECORDING -> getString(R.string.state_recording)
                 else -> getString(R.string.state_ended)
             },
         )
+        val healthMessage = when (s.health) {
+            RecorderHealth.SERVICE_FAILED -> getString(R.string.health_service_failed)
+            RecorderHealth.UNSUPPORTED -> getString(R.string.health_unsupported)
+            RecorderHealth.OK -> null
+        }
+        healthText.visibility = if (healthMessage == null) View.GONE else View.VISIBLE
+        healthText.text = limited(healthMessage ?: "")
+        restartButton.visibility =
+            if (s.health == RecorderHealth.SERVICE_FAILED && hasLocationPermission() && !distractionOptimized) View.VISIBLE else View.GONE
+        val storage = listOfNotNull(
+            if (s.saveFailures > 0) getString(R.string.storage_save_failed, s.saveFailures) else null,
+            if (s.corruptLines > 0) getString(R.string.storage_corrupt, s.corruptLines) else null,
+            if (s.discardedLines > 0) getString(R.string.storage_discarded, s.discardedLines) else null,
+        )
+        storageText.visibility = if (storage.isEmpty()) View.GONE else View.VISIBLE
+        storageText.text = limited(storage.joinToString(" · "))
         samplesText.text = limited(getString(R.string.samples_format, s.sampleCount))
         distanceText.text = limited(getString(R.string.distance_format, s.distanceM))
         val upload = when (s.upload.kind) {
@@ -199,6 +231,12 @@ class MainActivity : Activity() {
         samplesText = text(24f)
         distanceText = text(24f)
         uploadText = text(18f)
+        healthText = text(20f, bold = true)
+        storageText = text(18f)
+        restartButton = Button(this).apply {
+            text = getString(R.string.restart_recording)
+            setOnClickListener { startService() }
+        }
         permissionConfirm = Button(this).apply {
             text = getString(R.string.permission_confirm)
             setOnClickListener { requestPermissions() }
@@ -224,6 +262,9 @@ class MainActivity : Activity() {
             addView(samplesText)
             addView(distanceText)
             addView(uploadText)
+            addView(storageText)
+            addView(healthText)
+            addView(restartButton)
             addView(permissionCard, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 32 })
         }
     }

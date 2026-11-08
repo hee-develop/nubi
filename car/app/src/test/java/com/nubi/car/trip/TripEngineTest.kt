@@ -1,7 +1,6 @@
 package com.nubi.car.trip
 
 import com.nubi.car.BuildConfig
-import com.nubi.car.signals.VehicleInfo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
@@ -43,15 +42,6 @@ class TripEngineTest {
     }
 
     @Test
-    fun 차량_ID는_앱_고정_pepper를_붙인_SHA256이다() {
-        // echo -n "nubi-pepper" + "VIN123" | shasum -a 256 과 같은 값
-        val expected = java.security.MessageDigest.getInstance("SHA-256").digest("pepperVIN123".toByteArray()).joinToString("") { "%02x".format(it) }
-        assertEquals(expected, VehicleInfo.hashVin("VIN123", "pepper"))
-        assertNotEquals(VehicleInfo.hashVin("VIN123", "pepper"), VehicleInfo.hashVin("VIN123", "other"))
-        assertEquals(64, VehicleInfo.hashVin("VIN123").length)
-    }
-
-    @Test
     fun 놀_때는_타이머가_하나도_돌지_않는다() {
         val e = engine()
         e.onServiceStart()
@@ -63,7 +53,7 @@ class TripEngineTest {
 
     @Test
     fun 기록_중에는_tick이_돌고_끝나_업로드가_비면_다시_멈춘다() {
-        vehicle.vinHash = "hash"
+        vehicle.vehicleId = "hash"
         val e = engine()
         e.onServiceStart()
         e.onGear(Gear.D)
@@ -95,7 +85,7 @@ class TripEngineTest {
         assertTrue("VIN 전이라 아직 아무것도 올라가면 안 된다", server.events.isEmpty())
         assertNull("VIN 전에는 UUID를 저장하지 않는다", store.getString("vehicleId"))
 
-        vehicle.vinHash = "hash-1"
+        vehicle.vehicleId = "hash-1"
         scheduler.advance(1_000)
 
         assertEquals("create ${server.tripIdByLocalId.keys.single()} startedAt=$firstTs vehicle=hash-1", server.events.first())
@@ -148,7 +138,7 @@ class TripEngineTest {
         e.onGear(Gear.D)
         e.drive(3)
         scheduler.advance(1_000)
-        vehicle.vinHash = "hash-2"
+        vehicle.vehicleId = "hash-2"
         scheduler.advance(2_000)
         assertNull(store.getString("vehicleId"))
         scheduler.advance(61_000)
@@ -157,7 +147,7 @@ class TripEngineTest {
 
     @Test
     fun 업로드_워커가_예외를_던져도_다음_업로드가_막히지_않는다() {
-        vehicle.vinHash = "hash"
+        vehicle.vehicleId = "hash"
         var calls = 0
         val flaky = Executor { job ->
             calls++
@@ -177,7 +167,7 @@ class TripEngineTest {
 
     @Test
     fun drain에서_예상_밖_예외가_나도_실패로_기록하고_계속_재시도한다() {
-        vehicle.vinHash = "hash"
+        vehicle.vehicleId = "hash"
         var broken = true
         val api = object : TripApi by server {
             override fun createTrip(e: QueueEntry.Start): String {
@@ -200,7 +190,7 @@ class TripEngineTest {
 
     @Test
     fun 서비스_종료는_마지막_채택_샘플_시각으로_트립을_끝내고_차량_SDK를_해제한다() {
-        vehicle.vinHash = "hash"
+        vehicle.vehicleId = "hash"
         val e = engine()
         e.onServiceStart()
         e.onGear(Gear.D)
@@ -217,5 +207,152 @@ class TripEngineTest {
         val e = engine()
         e.setRealLocationAccepted(false)
         assertEquals(!BuildConfig.DEBUG, e.acceptRealLocation)
+    }
+
+    // 로드·상태 -------------------------------------------------------------
+
+    /** 워커 작업을 쌓아 두었다가 [pump]로 돌리는 수동 실행기. */
+    private class ManualWorker : Executor {
+        val jobs = ArrayDeque<Runnable>()
+        override fun execute(command: Runnable) {
+            jobs.addLast(command)
+        }
+    }
+
+    private fun pump(worker: ManualWorker) {
+        scheduler.runPosted()
+        while (worker.jobs.isNotEmpty()) {
+            worker.jobs.removeFirst().run()
+            scheduler.runPosted()
+        }
+    }
+
+    @Test
+    fun 큐_로드는_워커에서_하고_끝나기_전에는_불러오는_중이다() {
+        if (!::dir.isInitialized) dir = tmp.newFolder("trips")
+        val seed = newUploader(dir, networkDown, cipher)
+        seed.enqueue(start("old", 1_000, "hash"), QueueEntry.Point("old", point(0, ts = 1_500)))
+        val worker = ManualWorker()
+        val loading = newUploader(dir, server, cipher, load = false)
+        val e = engine(loading, worker)
+        assertTrue("생성자는 파일을 읽지 않는다", !loading.loaded)
+        assertTrue(e.status.loading)
+        assertEquals(1, worker.jobs.size) // 로드가 워커에 올라가 있다
+        pump(worker)
+        assertTrue(!e.status.loading)
+        // 로드 뒤 미종료 트립 복구와 업로드가 이어진다
+        assertEquals(1_500L, server.ended[server.tripIdByLocalId.getValue("old")])
+    }
+
+    @Test
+    fun 서비스_시작_실패는_저장돼_다시_열어도_보이고_복구는_서비스_시작과_무관하게_돈다() {
+        if (!::dir.isInitialized) dir = tmp.newFolder("trips")
+        newUploader(dir, networkDown, cipher).enqueue(start("crashed", 1_000, "hash"), QueueEntry.Point("crashed", point(0, ts = 2_000)))
+        val e = engine(uploader())
+        e.onServiceFailed() // onServiceStart는 부르지 않는다
+        scheduler.runPosted()
+        assertEquals(RecorderHealth.SERVICE_FAILED, e.status.health)
+        assertEquals(TripStatus.SERVICE_FAILED, e.status.health)
+        assertEquals("SERVICE_FAILED", store.getString("recorderHealth"))
+        assertEquals(2_000L, server.ended[server.tripIdByLocalId.getValue("crashed")])
+        // 프로세스가 다시 떠도(새 엔진, 같은 저장소) 남아 있다
+        val reopened = engine(uploader())
+        assertEquals(RecorderHealth.SERVICE_FAILED, reopened.status.health)
+        // 서비스가 다시 뜨면 지운다
+        reopened.onServiceStart()
+        scheduler.runPosted()
+        assertEquals(RecorderHealth.OK, reopened.status.health)
+        assertEquals("OK", store.getString("recorderHealth"))
+    }
+
+    @Test
+    fun 위치_미지원이면_UNSUPPORTED로_둔다() {
+        val e = engine()
+        e.onServiceStart()
+        e.onLocationUnsupported()
+        scheduler.runPosted()
+        assertEquals(RecorderHealth.UNSUPPORTED, e.status.health)
+        assertEquals(TripStatus.UNSUPPORTED, e.status.health)
+        // 서비스 실패가 더 우선한다
+        e.onServiceFailed()
+        scheduler.runPosted()
+        assertEquals(RecorderHealth.SERVICE_FAILED, e.status.health)
+    }
+
+    @Test
+    fun NaN_무한대_범위밖_좌표는_샘플_단계에서_버린다() {
+        vehicle.vehicleId = "hash"
+        val e = engine()
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.onLocation(Double.NaN, 127.0, null, null)
+        e.onLocation(37.5, Double.POSITIVE_INFINITY, null, null)
+        e.onLocation(91.0, 127.0, null, null)
+        e.onLocation(37.5, 127.0, Float.NaN, Float.NEGATIVE_INFINITY) // heading·confidence는 null로 바꿔 채택
+        scheduler.advance(1_000)
+        e.drive(3, firstIndex = 1) // 25m 간격 정상 샘플 3개 → 변위 75m로 트립 시작
+        assertEquals(TripState.RECORDING, e.status.state)
+        assertEquals(4, e.status.sampleCount) // 잘못된 샘플 3개는 세지 않고, heading·confidence가 NaN인 샘플은 채택
+        assertEquals(0, e.status.saveFailures)
+    }
+
+    @Test
+    fun 큐_저장_실패는_상태에_나타난다() {
+        vehicle.vehicleId = "hash"
+        if (!::dir.isInitialized) dir = tmp.newFolder("trips")
+        File(dir, "queue.jsonl").mkdir() // 파일 쓰기가 실패한다
+        val e = engine(uploader())
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.drive(4)
+        assertTrue(e.status.saveFailures > 0)
+        assertEquals(TripState.RECORDING, e.status.state) // 크래시 없이 기록 계속
+    }
+
+    @Test
+    fun 손상_줄과_폐기_줄은_상태로_올라간다() {
+        if (!::dir.isInitialized) dir = tmp.newFolder("trips")
+        newUploader(dir, networkDown, cipher).enqueue(start("a"))
+        File(dir, "queue.jsonl").appendText("garbage\n")
+        val e = engine(uploader())
+        scheduler.runPosted()
+        assertEquals(1, e.status.corruptLines)
+        assertEquals(0, e.status.discardedLines)
+    }
+
+    @Test
+    fun 서버가_발급한_차량_ID를_Start에_쓰고_UUID를_만들지_않는다() {
+        vehicle.vehicleId = "server-issued"
+        val e = engine()
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.drive(4)
+        e.onGear(Gear.P)
+        scheduler.advance(5 * 60_000 + 10_000)
+        assertTrue(server.events.first().endsWith("vehicle=server-issued"))
+        assertNull(store.getString("vehicleId"))
+    }
+
+    @Test
+    fun 로드_중에_시작한_진행_중_트립에_복구_End를_넣지_않는다() {
+        vehicle.vehicleId = "hash"
+        if (!::dir.isInitialized) dir = tmp.newFolder("trips")
+        val worker = ManualWorker()
+        val e = engine(newUploader(dir, server, cipher, load = false), worker)
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.drive(4) // 로드가 끝나기 전에 트립이 시작돼 Start·점이 로드 전 버퍼에 쌓인다
+        pump(worker) // 로드 → 복구(진행 중인 트립은 제외)
+        e.drive(1, firstIndex = 4)
+        assertEquals(TripState.RECORDING, e.status.state)
+        e.onGear(Gear.P)
+        scheduler.advance(5 * 60_000 + 10_000)
+        pump(worker)
+        scheduler.advance(120_000)
+        pump(worker)
+        assertEquals(1, server.ended.size)
+        assertEquals(1, server.events.count { it.startsWith("end ") })
+        val localId = server.tripIdByLocalId.keys.single()
+        assertEquals(listOf(0, 1, 2, 3, 4), server.seqs(localId))
     }
 }

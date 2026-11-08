@@ -49,6 +49,8 @@ class TripRecordingService : Service() {
         super.onCreate()
         engine = TripEngineProvider.get(this)
         if (!startInForeground()) {
+            // 조용히 접지 않는다. 실패를 저장해 다음에 화면이 앞에 올 때 안내하고 재시작을 시도한다.
+            engine.onServiceFailed()
             stopSelf()
             return
         }
@@ -95,7 +97,7 @@ class TripRecordingService : Service() {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
             true
         } catch (e: Exception) {
-            // 권한이 빠졌을 때 앱이 죽지 않도록 서비스만 접는다. 화면은 "권한 필요"를 보인다.
+            // 권한이 빠졌거나 백그라운드 시작이 막혔을 때 앱이 죽지 않도록 서비스만 접는다(호출자가 실패 상태를 저장한다).
             Log.w(TAG, "startForeground(location) 실패: ${e.javaClass.simpleName} ${e.message}")
             false
         }
@@ -106,11 +108,23 @@ class TripRecordingService : Service() {
         try {
             val f = FusedLocation(this)
             f.initialize()
+            val supported = f.isSupported()
+            Log.i(LOC_TAG, "isSupported=$supported")
+            if (!supported) {
+                // 위치 기능이 없는 차량. 콜백을 등록하지 않고 화면에 알린다.
+                engine.onLocationUnsupported()
+                try {
+                    f.release()
+                } catch (e: Throwable) {
+                    Log.w(LOC_TAG, "FusedLocation 해제 실패", e)
+                }
+                return
+            }
             fused = f
-            Log.i(LOC_TAG, "isSupported=${f.isSupported()}")
             f.registerFusedLocationCallback(listener)
         } catch (e: Throwable) {
             Log.w(LOC_TAG, "FusedLocation 시작 실패: ${e.javaClass.simpleName} ${e.message}")
+            engine.onLocationUnsupported()
         }
     }
 

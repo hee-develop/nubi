@@ -24,8 +24,8 @@ interface Scheduler {
 }
 
 interface VehicleSource {
-    /** `SHA-256(pepper + VIN)`. VIN 콜백이 오기 전이거나 실패하면 null. */
-    val vinHash: String?
+    /** 서버가 발급한 차량 ID(`POST /vehicles/register`, 저장해 재사용). VIN을 못 읽었거나 아직 못 받았으면 null. */
+    val vehicleId: String?
     fun start()
     fun stop()
     fun readOdometerKm(callback: (Double?) -> Unit)
@@ -38,7 +38,8 @@ interface KeyValueStore {
 
 /**
  * 상태기계·큐·업로드를 묶는 엔진. Android에 의존하지 않아 JVM에서 테스트한다([TripEngineProvider]가 실제 의존성을 꽂는다).
- * 모든 입구 메서드는 [Scheduler]로 넘겨 순서대로 처리하고, 네트워크는 [worker]에서만 한다.
+ * 모든 입구 메서드는 [Scheduler]로 넘겨 순서대로 처리하고, 네트워크와 큐 파일 로드·복호화는 [worker]에서만 한다.
+ * 생성하면 바로 워커에서 큐 로드를 시작하고(그동안 [TripStatus.loading]), 끝나면 미종료 트립 복구를 한 번 한다(서비스 시작 성공 여부와 무관).
  */
 class TripEngine(
     private val clock: Clock,
@@ -62,6 +63,13 @@ class TripEngine(
     private var tickJob: Cancellable? = null
     private var uploadJob: Cancellable? = null
 
+    /** 서비스를 못 띄운 상태는 재시작해도 남도록 저장한다(다음 화면 진입 때 안내하려고). */
+    private var serviceFailed = store.getString(KEY_HEALTH) == RecorderHealth.SERVICE_FAILED.name
+    private var unsupported = false
+
+    /** Start가 큐에 들어갔거나 곧 들어갈 트립 중 End가 아직 큐에 없는 것. 미종료 트립 복구가 건드리면 안 된다. */
+    private val liveTrips = HashSet<String>()
+
     /** debug 위치 주입을 쓰는 동안 false로 두어 실제 위치 콜백을 무시한다(주입 경로와 섞이지 않게). */
     @Volatile
     var acceptRealLocation: Boolean = true
@@ -84,6 +92,29 @@ class TripEngine(
 
     init {
         publish()
+        startLoading()
+    }
+
+    private fun startLoading() {
+        try {
+            worker.execute {
+                try {
+                    uploader.load()
+                } catch (t: Throwable) {
+                    Log.w(TAG, "큐 로드 예외: ${t.javaClass.simpleName}")
+                }
+                scheduler.post { onLoaded() }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "큐 로드 작업 등록 실패: ${t.javaClass.simpleName}")
+        }
+    }
+
+    /** 큐 로드가 끝났다. 이전 프로세스가 끝내지 못한 트립에 End를 넣고(진행 중인 트립은 제외) 업로드를 시도한다. */
+    private fun onLoaded() {
+        uploader.recoverUnfinished(HashSet(liveTrips))
+        requestUpload(force = false)
+        publish()
     }
 
     private fun elapsed() = clock.elapsedMs() + clockOffsetMillis
@@ -91,15 +122,42 @@ class TripEngine(
 
     // 서비스 수명 ---------------------------------------------------------
 
-    /** 서비스가 시작될 때. 차량 정보를 열고, 이전 프로세스가 끝내지 못한 트립에 End를 넣는다. */
+    /** 서비스가 시작될 때. 차량 정보를 열고 저장된 '서비스 실패' 표시를 지운다. 미종료 트립 복구는 큐 로드가 끝날 때 한다([onLoaded]). */
     fun onServiceStart() {
         scheduler.post {
             serviceStartedElapsed = clock.elapsedMs()
             machine.reset()
+            unsupported = false
+            setServiceFailed(false)
             vehicle.start()
-            uploader.recoverUnfinished()
             requestUpload(force = false)
             publish()
+        }
+    }
+
+    /** 포그라운드 서비스를 못 띄웠다(권한·백그라운드 시작 제한 등). 상태를 저장해 다음 화면 진입 때 안내한다. */
+    fun onServiceFailed() {
+        scheduler.post {
+            setServiceFailed(true)
+            publish()
+        }
+    }
+
+    /** 이 차량은 위치 기능을 쓸 수 없다(FusedLocation 미지원·초기화 실패). 위치 콜백을 등록하지 않는다. */
+    fun onLocationUnsupported() {
+        scheduler.post {
+            unsupported = true
+            publish()
+        }
+    }
+
+    private fun setServiceFailed(failed: Boolean) {
+        if (serviceFailed == failed) return
+        serviceFailed = failed
+        try {
+            store.putString(KEY_HEALTH, if (failed) RecorderHealth.SERVICE_FAILED.name else RecorderHealth.OK.name)
+        } catch (t: Throwable) {
+            Log.w(TAG, "상태 저장 실패: ${t.javaClass.simpleName}")
         }
     }
 
@@ -115,9 +173,16 @@ class TripEngine(
     // 입구 ---------------------------------------------------------------
 
     fun onLocation(lat: Double, lon: Double, headingDeg: Float?, confidence: Float?, tsMillis: Long? = null) {
+        // 좌표가 NaN·무한대·범위 밖이면 샘플 단계에서 버린다(큐 인코딩·서버 검증까지 가면 트립 전체가 막힌다).
+        if (!lat.isFinite() || !lon.isFinite() || lat !in -90.0..90.0 || lon !in -180.0..180.0) {
+            Log.w(TAG, "유효하지 않은 좌표 샘플 버림")
+            return
+        }
+        val heading = headingDeg?.takeIf { it.isFinite() }
+        val conf = confidence?.takeIf { it.isFinite() }
         scheduler.post {
             val ts = tsMillis?.takeIf { kotlin.math.abs(it - wall()) < 24 * 3_600_000L } ?: wall()
-            handle(machine.onLocation(Sample(ts, lat, lon, headingDeg, confidence), elapsed()))
+            handle(machine.onLocation(Sample(ts, lat, lon, heading, conf), elapsed()))
             publish()
         }
     }
@@ -165,6 +230,7 @@ class TripEngine(
             failures = 0
             nextAttemptElapsed = 0
             lastUpload = UploadStatus()
+            liveTrips.clear()
             uploader.clear()
             publish()
         }
@@ -187,6 +253,7 @@ class TripEngine(
             when (e) {
                 is TripEvent.Started -> {
                     val ctx = TripCtx(UUID.randomUUID().toString(), e.startedAtMillis)
+                    liveTrips.add(ctx.localId)
                     ctx.held.addAll(e.points)
                     active = ctx
                     withOdometer { km ->
@@ -231,6 +298,7 @@ class TripEngine(
         ctx.held.clear()
         if (ctx.ended) {
             uploader.enqueue(QueueEntry.End(ctx.localId, ctx.endedAtMillis, ctx.odoEnd))
+            liveTrips.remove(ctx.localId)
             requestUpload(force = true)
         }
     }
@@ -244,6 +312,7 @@ class TripEngine(
             tryBegin(ctx, force)
         } else {
             uploader.enqueue(QueueEntry.End(ctx.localId, endedAtMillis, odoEnd))
+            liveTrips.remove(ctx.localId)
             requestUpload(force = true)
         }
         publish()
@@ -262,7 +331,7 @@ class TripEngine(
             scheduler.post {
                 if (!done) {
                     done = true
-                    block(km)
+                    block(km?.takeIf { it.isFinite() })
                     publish()
                 }
             }
@@ -272,11 +341,12 @@ class TripEngine(
     }
 
     /**
-     * 차량 ID는 VIN 해시다. VIN 콜백이 오기 전에는 UUID를 만들거나 저장하지 않고 null(업로드 보류)을 돌려준다.
-     * 서비스 시작 후 [VIN_WAIT_MILLIS]가 지나도 VIN이 없을 때만(또는 [force]) UUID로 대체해 저장한다.
+     * 차량 ID는 서버가 VIN으로 발급한 ID다(차량 앱은 VIN을 서버에 한 번 보내 받고 암호화 저장해 재사용한다).
+     * 그 ID를 받기 전에는 UUID를 만들거나 저장하지 않고 null(업로드 보류)을 돌려준다.
+     * 서비스 시작 후 [VIN_WAIT_MILLIS]가 지나도 ID가 없을 때만(또는 [force]) UUID로 대체해 저장한다(이때는 서버 등록을 하지 않는다).
      */
     private fun resolveVehicleId(force: Boolean): String? {
-        vehicle.vinHash?.let { return it }
+        vehicle.vehicleId?.let { return it }
         val waited = clock.elapsedMs() - serviceStartedElapsed >= VIN_WAIT_MILLIS
         if (!waited && !force) return null
         return store.getString(KEY_VEHICLE_ID) ?: UUID.randomUUID().toString().also { store.putString(KEY_VEHICLE_ID, it) }
@@ -334,6 +404,15 @@ class TripEngine(
             distanceM = machine.distanceM.toInt(),
             upload = lastUpload,
             pendingPoints = uploader.pendingPoints,
+            loading = !uploader.loaded,
+            health = when {
+                serviceFailed -> RecorderHealth.SERVICE_FAILED
+                unsupported -> RecorderHealth.UNSUPPORTED
+                else -> RecorderHealth.OK
+            },
+            saveFailures = uploader.saveFailures,
+            corruptLines = uploader.corruptLines,
+            discardedLines = uploader.discardedLines,
         )
         updateTimers()
     }
@@ -369,5 +448,6 @@ class TripEngine(
         const val VIN_WAIT_MILLIS = 10_000L
         const val RETRY_MILLIS = 1_000L
         const val KEY_VEHICLE_ID = "vehicleId"
+        const val KEY_HEALTH = "recorderHealth"
     }
 }
