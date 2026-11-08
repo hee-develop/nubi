@@ -14,6 +14,8 @@ import android.os.IBinder
 import android.util.Log
 import com.nubi.car.signals.CarSignals
 import com.nubi.car.trip.TripEngine
+import com.nubi.car.trip.TripEngineProvider
+import com.nubi.car.trip.coordForLog
 
 /**
  * 위치 기록 포그라운드 서비스. 화면이 사라져도 FusedLocation·차량 신호 콜백을 유지하고 [TripEngine]에 넘긴다.
@@ -31,9 +33,11 @@ class TripRecordingService : Service() {
                 Log.w(LOC_TAG, "onChanged null")
                 return
             }
-            Log.i(LOC_TAG, "onChanged lat=${location.latitude} lon=${location.longitude} heading=${location.heading} conf=${location.confidence} ts=${location.timestampMillis}")
+            Log.i(LOC_TAG, "onChanged ${coordForLog(location.latitude, location.longitude)} conf=${location.confidence}")
             if (!engine.acceptRealLocation) return
-            engine.onLocation(location.latitude, location.longitude, location.heading, location.confidence, location.timestampMillis)
+            // 에뮬레이터는 heading을 항상 0.0으로 준다(실측 docs/sdk-check.md). 실제 북쪽과 구분할 수 없으므로 0.0은 값 없음(null)으로 보낸다.
+            val heading = location.heading.takeIf { it != 0f }
+            engine.onLocation(location.latitude, location.longitude, heading, location.confidence, location.timestampMillis)
         }
 
         override fun onError(e: Exception) {
@@ -43,12 +47,13 @@ class TripRecordingService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        engine = TripEngine.get(this)
+        engine = TripEngineProvider.get(this)
         if (!startInForeground()) {
             stopSelf()
             return
         }
         started = true
+        engine.onServiceStart()
         startSources()
     }
 
@@ -57,14 +62,23 @@ class TripRecordingService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // 최근 앱에서 지워도 서비스는 유지한다.
+        // 앱이 최근 목록에서 지워졌다. 기록 중이던 트립을 마지막 채택 샘플 시각으로 끝내고 서비스도 접는다.
+        if (started) {
+            started = false
+            stopSources()
+            engine.onServiceStop()
+        }
+        stopSelf()
         super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
+        // Suspend(IGN OFF)는 Pleos SDK에 별도 콜백이 없다. 프로세스가 죽기 전 onDestroy가 오면 여기서 트립을 끝내고 차량 SDK를 해제한다.
+        // 오지 않고 프로세스가 죽는 경우는 다음 서비스 시작 때 미종료 트립 복구(Uploader.recoverUnfinished)가 End를 넣는다.
         if (started) {
+            started = false
             stopSources()
-            engine.onStop()
+            engine.onServiceStop()
         }
         super.onDestroy()
     }
@@ -88,7 +102,7 @@ class TripRecordingService : Service() {
     }
 
     private fun startSources() {
-        signals = CarSignals(this, engine::onGear, engine::onSpeedKph).also { it.start() }
+        signals = CarSignals(this, engine::onGear).also { it.start() }
         try {
             val f = FusedLocation(this)
             f.initialize()

@@ -1,38 +1,68 @@
 package com.nubi.car.trip
 
-import android.content.Context
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import com.nubi.car.BuildConfig
-import com.nubi.car.signals.VehicleInfo
-import java.io.File
 import java.util.UUID
-import java.util.concurrent.Executors
+import java.util.concurrent.Executor
+
+interface Clock {
+    /** SystemClock.elapsedRealtime(). 경과 시간 판정에만 쓴다. */
+    fun elapsedMs(): Long
+
+    /** 벽시계(epoch ms). 샘플 `ts`에만 쓴다. */
+    fun wallMs(): Long
+}
+
+fun interface Cancellable {
+    fun cancel()
+}
+
+/** 모든 엔진 로직이 도는 단일 스레드(Android에서는 메인 루퍼). */
+interface Scheduler {
+    fun post(block: () -> Unit)
+    fun postDelayed(delayMs: Long, block: () -> Unit): Cancellable
+}
+
+interface VehicleSource {
+    /** `SHA-256(pepper + VIN)`. VIN 콜백이 오기 전이거나 실패하면 null. */
+    val vinHash: String?
+    fun start()
+    fun stop()
+    fun readOdometerKm(callback: (Double?) -> Unit)
+}
+
+interface KeyValueStore {
+    fun getString(key: String): String?
+    fun putString(key: String, value: String)
+}
 
 /**
- * 프로세스 하나에 하나. 상태기계·큐·업로드를 묶는다. 서비스(위치·차량 신호 수집)와 debug 주입이 같은 입구를 쓴다.
- * 모든 입구 메서드는 메인 스레드로 넘겨 순서대로 처리한다.
+ * 상태기계·큐·업로드를 묶는 엔진. Android에 의존하지 않아 JVM에서 테스트한다([TripEngineProvider]가 실제 의존성을 꽂는다).
+ * 모든 입구 메서드는 [Scheduler]로 넘겨 순서대로 처리하고, 네트워크는 [worker]에서만 한다.
  */
-class TripEngine private constructor(private val context: Context) {
-    private val main = Handler(Looper.getMainLooper())
-    private val worker = Executors.newSingleThreadExecutor()
+class TripEngine(
+    private val clock: Clock,
+    private val scheduler: Scheduler,
+    private val worker: Executor,
+    private val vehicle: VehicleSource,
+    private val store: KeyValueStore,
+    private val uploader: Uploader,
+) {
     private val machine = TripStateMachine()
-    private val vehicleInfo = VehicleInfo(context)
-    private val uploader: Uploader
 
+    /** debug에서 `now=`로 옮긴 시계 차이. 상태기계에 넘기는 elapsed·벽시계에만 더한다(재시도 간격은 실제 시계로 잰다). */
     private var clockOffsetMillis = 0L
-    private var latestSpeedKph: Float? = null
-    private var localId: String? = null
-    private var startPending = false
-    private val heldPoints = ArrayList<TripPoint>()
+    private var active: TripCtx? = null
     private var failures = 0
-    private var nextAttemptAt = 0L
+    private var nextAttemptElapsed = 0L
     private var draining = false
     private var redrain = false
-    private var lastUpload = "없음"
+    private var lastUpload = UploadStatus()
+    private var serviceStartedElapsed = clock.elapsedMs()
+    private var tickJob: Cancellable? = null
+    private var uploadJob: Cancellable? = null
 
-    /** debug 위치 주입이 시작되면 false로 바뀌어 실제 위치 콜백을 무시한다(주입 경로와 섞이지 않게). */
+    /** debug 위치 주입을 쓰는 동안 false로 두어 실제 위치 콜백을 무시한다(주입 경로와 섞이지 않게). */
     @Volatile
     var acceptRealLocation: Boolean = true
         private set
@@ -41,91 +71,101 @@ class TripEngine private constructor(private val context: Context) {
     var status: TripStatus = TripStatus()
         private set
 
+    /** 한 트립이 서버 큐에 올라가기까지의 임시 상태. Start는 오도미터·차량 ID가 준비돼야 큐에 들어간다. */
+    private class TripCtx(val localId: String, val startedAtMillis: Long) {
+        val held = ArrayList<TripPoint>()
+        var startPending = true
+        var odoReady = false
+        var odoStart: Double? = null
+        var ended = false
+        var endedAtMillis = 0L
+        var odoEnd: Double? = null
+    }
+
     init {
-        val dir = File(context.filesDir, "trips").apply { mkdirs() }
-        uploader = Uploader(TripQueue(File(dir, "queue.jsonl")), File(dir, "server-ids.json"), HttpTripApi(BuildConfig.SERVER_URL))
-        vehicleInfo.start()
-        main.postDelayed(object : Runnable {
-            override fun run() {
-                onTick()
-                main.postDelayed(this, TICK_MILLIS)
-            }
-        }, TICK_MILLIS)
-        main.postDelayed(object : Runnable {
-            override fun run() {
-                requestUpload(force = false)
-                main.postDelayed(this, UPLOAD_INTERVAL_MILLIS)
-            }
-        }, UPLOAD_INTERVAL_MILLIS)
         publish()
     }
 
-    fun now(): Long = System.currentTimeMillis() + clockOffsetMillis
+    private fun elapsed() = clock.elapsedMs() + clockOffsetMillis
+    private fun wall() = clock.wallMs() + clockOffsetMillis
+
+    // 서비스 수명 ---------------------------------------------------------
+
+    /** 서비스가 시작될 때. 차량 정보를 열고, 이전 프로세스가 끝내지 못한 트립에 End를 넣는다. */
+    fun onServiceStart() {
+        scheduler.post {
+            serviceStartedElapsed = clock.elapsedMs()
+            machine.reset()
+            vehicle.start()
+            uploader.recoverUnfinished()
+            requestUpload(force = false)
+            publish()
+        }
+    }
+
+    /** 서비스 onDestroy·onTaskRemoved. 기록 중이면 마지막 채택 샘플 시각으로 트립을 끝내고 차량 SDK를 해제한다. */
+    fun onServiceStop() {
+        scheduler.post {
+            handle(machine.onStop(), immediate = true)
+            vehicle.stop()
+            publish()
+        }
+    }
 
     // 입구 ---------------------------------------------------------------
 
     fun onLocation(lat: Double, lon: Double, headingDeg: Float?, confidence: Float?, tsMillis: Long? = null) {
-        main.post {
-            val ts = tsMillis?.takeIf { kotlin.math.abs(it - now()) < 24 * 3_600_000L } ?: now()
-            handle(machine.onLocation(Sample(ts, lat, lon, headingDeg, confidence, latestSpeedKph)))
+        scheduler.post {
+            val ts = tsMillis?.takeIf { kotlin.math.abs(it - wall()) < 24 * 3_600_000L } ?: wall()
+            handle(machine.onLocation(Sample(ts, lat, lon, headingDeg, confidence), elapsed()))
             publish()
         }
     }
 
     fun onGear(gear: Gear?) {
-        main.post {
-            handle(machine.onGear(gear, now()))
+        scheduler.post {
+            handle(machine.onGear(gear, elapsed()))
             publish()
         }
     }
 
-    fun onSpeedKph(kph: Float?) {
-        main.post { latestSpeedKph = kph }
-    }
+    // debug 전용 훅(main에 있어도 release에서는 동작하지 않는다) ---------------------
 
-    /** 서비스 종료·Suspend. 기록 중이면 트립을 끝낸다. */
-    fun onStop() {
-        main.post {
-            handle(machine.onStop())
-            publish()
-        }
-    }
-
-    // debug 전용으로 쓰이지만 동작은 일반 기능이다 -------------------------------
-
-    /** 시계를 [epochMillis]로 맞추고(이후 now()가 그 시각에서 흐른다) 바로 한 번 확인한다. */
+    /** 시계를 [epochMillis]로 맞추고(이후 시계가 그 시각에서 흐른다) 바로 종료 조건을 확인한다. */
     fun setClock(epochMillis: Long) {
-        main.post {
-            clockOffsetMillis = epochMillis - System.currentTimeMillis()
+        if (!BuildConfig.DEBUG) return
+        scheduler.post {
+            clockOffsetMillis = epochMillis - clock.wallMs()
             onTick()
         }
     }
 
+    /** 실제 위치 콜백 수신 여부. 호출 즉시 반영한다(reset·gpx 시작과 순서가 엇갈리지 않게 큐를 거치지 않는다). */
     fun setRealLocationAccepted(accepted: Boolean) {
+        if (!BuildConfig.DEBUG) return
         acceptRealLocation = accepted
     }
 
     fun flush() {
-        main.post { requestUpload(force = true) }
+        if (!BuildConfig.DEBUG) return
+        scheduler.post { requestUpload(force = true) }
     }
 
-    /** 상태기계·큐·시계를 모두 비운다. */
+    /**
+     * 상태기계·큐·시계를 모두 비우고 실제 위치 수신을 끈다(이후 gpx·loc 주입만 받는다. 다시 켜려면 [setRealLocationAccepted]).
+     * 끄는 일은 즉시 하고, 비우는 일은 큐에 넣는다. 그래서 reset 뒤에 시작한 gpx 샘플은 비운 뒤에 처리된다.
+     */
     fun reset() {
-        main.post {
+        if (!BuildConfig.DEBUG) return
+        acceptRealLocation = false
+        scheduler.post {
             machine.reset()
-            localId = null
-            startPending = false
-            heldPoints.clear()
-            latestSpeedKph = null
+            active = null
             clockOffsetMillis = 0
             failures = 0
-            nextAttemptAt = 0
-            lastUpload = "없음"
-            acceptRealLocation = true
-            worker.execute {
-                uploader.clear()
-                main.post { publish() }
-            }
+            nextAttemptElapsed = 0
+            lastUpload = UploadStatus()
+            uploader.clear()
             publish()
         }
     }
@@ -133,65 +173,93 @@ class TripEngine private constructor(private val context: Context) {
     // 내부 ---------------------------------------------------------------
 
     private fun onTick() {
-        handle(machine.onTick(now()))
+        handle(machine.onTick(elapsed()))
         publish()
     }
 
-    private fun handle(events: List<TripEvent>) {
+    private fun handle(events: List<TripEvent>, immediate: Boolean = false) {
         for (e in events) {
             Log.i(TAG, "이벤트 ${e.javaClass.simpleName} " + when (e) {
                 is TripEvent.Started -> "points=${e.points.size}"
-                is TripEvent.PointsAccepted -> "seq=${e.points.first().seq} lat=${e.points.first().sample.lat} lon=${e.points.first().sample.lon}"
+                is TripEvent.PointsAccepted -> "seq=${e.points.first().seq} ${coordForLog(e.points.first().sample.lat, e.points.first().sample.lon)}"
                 is TripEvent.Ended -> "endedAt=${e.endedAtMillis}"
             })
             when (e) {
                 is TripEvent.Started -> {
-                    val id = UUID.randomUUID().toString()
-                    localId = id
-                    startPending = true
-                    heldPoints.clear()
-                    heldPoints.addAll(e.points)
-                    withOdometer { km -> beginTrip(id, e.startedAtMillis, km) }
+                    val ctx = TripCtx(UUID.randomUUID().toString(), e.startedAtMillis)
+                    ctx.held.addAll(e.points)
+                    active = ctx
+                    withOdometer { km ->
+                        ctx.odoStart = km
+                        ctx.odoReady = true
+                        tryBegin(ctx, force = false)
+                    }
                 }
                 is TripEvent.PointsAccepted -> {
-                    val id = localId ?: continue
-                    if (startPending) heldPoints.addAll(e.points) else enqueuePoints(id, e.points)
+                    val ctx = active ?: continue
+                    if (ctx.startPending) ctx.held.addAll(e.points) else enqueuePoints(ctx, e.points)
                 }
                 is TripEvent.Ended -> {
-                    val id = localId ?: continue
-                    withOdometer { km -> finishTrip(id, e.endedAtMillis, km) }
+                    val ctx = active ?: continue
+                    active = null
+                    if (immediate) {
+                        // 서비스가 곧 사라진다. 오도미터를 기다리지 않고 바로 큐에 남긴다.
+                        finishTrip(ctx, e.endedAtMillis, null, force = true)
+                    } else {
+                        withOdometer { km -> finishTrip(ctx, e.endedAtMillis, km, force = false) }
+                    }
                 }
             }
         }
     }
 
-    private fun beginTrip(id: String, startedAt: Long, km: Double?) {
-        if (!startPending || localId != id) return
-        startPending = false
-        val vehicleId = currentVehicleId()
-        uploader.enqueue(QueueEntry.Start(id, vehicleId, vehicleId, startedAt, km))
-        enqueuePoints(id, heldPoints.toList())
-        heldPoints.clear()
+    /**
+     * Start와 보류 중이던 점을 큐에 올린다. 오도미터를 읽었고 차량 ID가 정해졌을 때만 한다. 아니면 1초 뒤 다시 본다.
+     * 트립이 이미 끝났으면(Ended가 먼저 온 경우) 보관해 둔 종료 시각으로 End까지 이어서 올린다.
+     */
+    private fun tryBegin(ctx: TripCtx, force: Boolean) {
+        if (!ctx.startPending) return
+        if (!ctx.odoReady && !force) return
+        val vehicleId = resolveVehicleId(force)
+        if (vehicleId == null) {
+            scheduler.postDelayed(RETRY_MILLIS) { tryBegin(ctx, force = false); publish() }
+            return
+        }
+        ctx.startPending = false
+        uploader.enqueue(QueueEntry.Start(ctx.localId, vehicleId, vehicleId, ctx.startedAtMillis, ctx.odoStart))
+        enqueuePoints(ctx, ctx.held.toList())
+        ctx.held.clear()
+        if (ctx.ended) {
+            uploader.enqueue(QueueEntry.End(ctx.localId, ctx.endedAtMillis, ctx.odoEnd))
+            requestUpload(force = true)
+        }
     }
 
-    private fun finishTrip(id: String, endedAt: Long, km: Double?) {
-        if (startPending && localId == id) beginTrip(id, endedAt, null)
-        uploader.enqueue(QueueEntry.End(id, endedAt, km))
-        requestUpload(force = true)
+    private fun finishTrip(ctx: TripCtx, endedAtMillis: Long, odoEnd: Double?, force: Boolean) {
+        ctx.ended = true
+        ctx.endedAtMillis = endedAtMillis
+        ctx.odoEnd = odoEnd
+        if (ctx.startPending) {
+            // Start가 아직 큐에 못 올라갔다. 올라가는 순간 이 종료 시각으로 End를 잇는다(Start 시각과 섞지 않는다).
+            tryBegin(ctx, force)
+        } else {
+            uploader.enqueue(QueueEntry.End(ctx.localId, endedAtMillis, odoEnd))
+            requestUpload(force = true)
+        }
         publish()
     }
 
-    private fun enqueuePoints(id: String, points: List<TripPoint>) {
+    private fun enqueuePoints(ctx: TripCtx, points: List<TripPoint>) {
         if (points.isEmpty()) return
-        uploader.enqueue(*points.map { QueueEntry.Point(id, it) }.toTypedArray())
+        uploader.enqueue(*points.map { QueueEntry.Point(ctx.localId, it) }.toTypedArray())
         if (uploader.pendingPoints >= UPLOAD_BATCH_POINTS) requestUpload(force = false)
     }
 
-    /** 오도미터를 읽어 메인 스레드에서 [block]을 부른다. 2초 안에 못 읽으면 null로 진행한다. */
+    /** 오도미터를 읽어 [block]을 엔진 스레드에서 부른다. 2초 안에 못 읽으면 null로 진행한다. */
     private fun withOdometer(block: (Double?) -> Unit) {
         var done = false
         val finish: (Double?) -> Unit = { km ->
-            main.post {
+            scheduler.post {
                 if (!done) {
                     done = true
                     block(km)
@@ -199,15 +267,19 @@ class TripEngine private constructor(private val context: Context) {
                 }
             }
         }
-        vehicleInfo.readOdometerKm(finish)
-        main.postDelayed({ finish(null) }, ODOMETER_TIMEOUT_MILLIS)
+        vehicle.readOdometerKm(finish)
+        scheduler.postDelayed(ODOMETER_TIMEOUT_MILLIS) { finish(null) }
     }
 
-    private fun currentVehicleId(): String = vehicleInfo.vinHash ?: fallbackVehicleId()
-
-    private fun fallbackVehicleId(): String {
-        val prefs = context.getSharedPreferences("nubi", Context.MODE_PRIVATE)
-        return prefs.getString("vehicleId", null) ?: UUID.randomUUID().toString().also { prefs.edit().putString("vehicleId", it).apply() }
+    /**
+     * 차량 ID는 VIN 해시다. VIN 콜백이 오기 전에는 UUID를 만들거나 저장하지 않고 null(업로드 보류)을 돌려준다.
+     * 서비스 시작 후 [VIN_WAIT_MILLIS]가 지나도 VIN이 없을 때만(또는 [force]) UUID로 대체해 저장한다.
+     */
+    private fun resolveVehicleId(force: Boolean): String? {
+        vehicle.vinHash?.let { return it }
+        val waited = clock.elapsedMs() - serviceStartedElapsed >= VIN_WAIT_MILLIS
+        if (!waited && !force) return null
+        return store.getString(KEY_VEHICLE_ID) ?: UUID.randomUUID().toString().also { store.putString(KEY_VEHICLE_ID, it) }
     }
 
     private fun requestUpload(force: Boolean) {
@@ -217,49 +289,85 @@ class TripEngine private constructor(private val context: Context) {
             return
         }
         if (uploader.pendingEntries == 0) return
-        if (!force && now0() < nextAttemptAt) return
+        if (!force && clock.elapsedMs() < nextAttemptElapsed) return
         draining = true
-        worker.execute {
-            val result = uploader.drain()
-            main.post {
-                draining = false
-                val again = redrain && result.ok
-                redrain = false
-                failures = if (result.ok) 0 else failures + 1
-                nextAttemptAt = now0() + backoffMillis(failures)
-                lastUpload = "${result.message} (${java.time.LocalTime.now().withNano(0)})"
-                Log.i(TAG, "업로드 ${result.message}, 대기 ${uploader.pendingEntries}")
-                publish()
-                if (again) requestUpload(force = true)
+        try {
+            worker.execute {
+                val result = try {
+                    uploader.drain()
+                } catch (t: Throwable) {
+                    // 어떤 예외든 draining이 풀리도록 결과로 바꿔 넘긴다.
+                    Log.w(TAG, "drain 예외: ${t.javaClass.simpleName}")
+                    DrainResult(DrainKind.RETRY, 0, "RETRY ${t.javaClass.simpleName}")
+                }
+                scheduler.post { finishDrain(result) }
             }
+        } catch (t: Throwable) {
+            Log.w(TAG, "업로드 작업 등록 실패: ${t.javaClass.simpleName}")
+            draining = false
         }
     }
 
-    /** 재시도 간격은 가짜 시계가 아니라 실제 시계로 잰다. */
-    private fun now0(): Long = System.currentTimeMillis()
+    private fun finishDrain(result: DrainResult) {
+        try {
+            val again = redrain && result.ok
+            redrain = false
+            failures = if (result.ok) 0 else failures + 1
+            nextAttemptElapsed = clock.elapsedMs() + backoffMillis(failures)
+            lastUpload = when (result.kind) {
+                DrainKind.OK -> UploadStatus(UploadKind.OK, result.uploadedPoints)
+                DrainKind.RETRY -> UploadStatus(UploadKind.FAILED)
+                DrainKind.HELD -> UploadStatus(UploadKind.HELD)
+            }
+            Log.i(TAG, "업로드 ${result.message}, 대기 ${uploader.pendingEntries}")
+            publish()
+            if (again) requestUpload(force = true)
+        } finally {
+            draining = false
+        }
+    }
 
     private fun publish() {
         status = TripStatus(
             state = machine.state,
             sampleCount = machine.sampleCount,
             distanceM = machine.distanceM.toInt(),
-            lastUpload = lastUpload,
+            upload = lastUpload,
             pendingPoints = uploader.pendingPoints,
-            vehicleId = currentVehicleId(),
         )
+        updateTimers()
+    }
+
+    /** 5초 tick은 기록 중일 때만, 60초 업로드 타이머는 큐에 미전송분이 있을 때만 돈다(놀 때는 아무것도 깨우지 않는다). */
+    private fun updateTimers() {
+        if (machine.state == TripState.RECORDING) {
+            if (tickJob == null) tickJob = scheduler.postDelayed(TICK_MILLIS) { tickJob = null; onTick() }
+        } else {
+            tickJob?.cancel()
+            tickJob = null
+        }
+        if (uploader.pendingEntries > 0) {
+            if (uploadJob == null) {
+                uploadJob = scheduler.postDelayed(UPLOAD_INTERVAL_MILLIS) {
+                    uploadJob = null
+                    requestUpload(force = false)
+                    publish()
+                }
+            }
+        } else {
+            uploadJob?.cancel()
+            uploadJob = null
+        }
     }
 
     companion object {
         private const val TAG = "NubiTrip"
-        private const val TICK_MILLIS = 5_000L
-        private const val UPLOAD_INTERVAL_MILLIS = 60_000L
-        private const val UPLOAD_BATCH_POINTS = 100
-        private const val ODOMETER_TIMEOUT_MILLIS = 2_000L
-
-        @Volatile
-        private var instance: TripEngine? = null
-
-        fun get(context: Context): TripEngine =
-            instance ?: synchronized(this) { instance ?: TripEngine(context.applicationContext).also { instance = it } }
+        const val TICK_MILLIS = 5_000L
+        const val UPLOAD_INTERVAL_MILLIS = 60_000L
+        const val UPLOAD_BATCH_POINTS = 100
+        const val ODOMETER_TIMEOUT_MILLIS = 2_000L
+        const val VIN_WAIT_MILLIS = 10_000L
+        const val RETRY_MILLIS = 1_000L
+        const val KEY_VEHICLE_ID = "vehicleId"
     }
 }

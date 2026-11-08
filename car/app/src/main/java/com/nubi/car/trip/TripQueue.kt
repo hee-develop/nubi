@@ -2,6 +2,8 @@ package com.nubi.car.trip
 
 import org.json.JSONObject
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.time.Instant
 
 /** 로컬 큐 항목. 파일에는 한 줄에 하나씩 JSON(JSON Lines)으로 저장한다. */
@@ -42,7 +44,6 @@ object QueueCodec {
                 o.put("lon", s.lon)
                 o.put("heading", s.headingDeg?.toDouble() ?: JSONObject.NULL)
                 o.put("conf", s.confidence?.toDouble() ?: JSONObject.NULL)
-                o.put("speed", s.speedKph?.toDouble() ?: JSONObject.NULL)
                 o.put("gear", s.gear?.name ?: JSONObject.NULL)
             }
             is QueueEntry.End -> {
@@ -70,7 +71,6 @@ object QueueCodec {
                         o.getDouble("lon"),
                         o.optDoubleOrNull("heading")?.toFloat(),
                         o.optDoubleOrNull("conf")?.toFloat(),
-                        o.optDoubleOrNull("speed")?.toFloat(),
                         if (o.isNull("gear")) null else Gear.valueOf(o.getString("gear")),
                     ),
                 ),
@@ -87,26 +87,37 @@ object QueueCodec {
 
 fun isoOf(millis: Long): String = Instant.ofEpochMilli(millis).toString()
 
-/** 앱 내부 저장소의 JSON Lines 파일. 동기화는 호출자(Uploader)가 맡는다. */
-class TripQueue(private val file: File) {
-    fun load(): MutableList<QueueEntry> {
-        if (!file.exists()) return mutableListOf()
-        return file.readLines().mapNotNull { if (it.isBlank()) null else QueueCodec.decode(it) }.toMutableList()
+/**
+ * 줄 단위로 암호화한 JSON Lines 파일. 복호화에 실패한 줄(키 변경·손상)은 건너뛴다. 동기화는 호출자(Uploader)가 맡는다.
+ * 파일은 append 전용이고, 보낸 항목 제거는 호출자가 [rewrite](컴팩션)로 한다.
+ */
+class EncryptedLines(private val file: File, private val cipher: LineCipher) {
+    fun readAll(): List<String> {
+        if (!file.exists()) return emptyList()
+        return file.readLines().mapNotNull { if (it.isBlank()) null else cipher.decrypt(it) }
     }
 
-    fun append(entries: List<QueueEntry>) {
-        if (entries.isEmpty()) return
-        file.appendText(entries.joinToString("") { QueueCodec.encode(it) + "\n" })
+    fun append(lines: List<String>) {
+        if (lines.isEmpty()) return
+        file.appendText(lines.joinToString("") { cipher.encrypt(it) + "\n" })
     }
 
-    fun rewrite(entries: List<QueueEntry>) {
+    /** 임시 파일에 쓰고 바꿔치기한다. */
+    fun rewrite(lines: List<String>) {
         val tmp = File(file.parentFile, file.name + ".tmp")
-        tmp.writeText(entries.joinToString("") { QueueCodec.encode(it) + "\n" })
-        if (!tmp.renameTo(file)) {
-            file.writeText(tmp.readText())
-            tmp.delete()
-        }
+        tmp.writeText(lines.joinToString("") { cipher.encrypt(it) + "\n" })
+        Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING)
     }
+}
+
+class TripQueue(file: File, cipher: LineCipher) {
+    private val lines = EncryptedLines(file, cipher)
+
+    fun load(): MutableList<QueueEntry> = lines.readAll().mapNotNull { QueueCodec.decode(it) }.toMutableList()
+
+    fun append(entries: List<QueueEntry>) = lines.append(entries.map { QueueCodec.encode(it) })
+
+    fun rewrite(entries: List<QueueEntry>) = lines.rewrite(entries.map { QueueCodec.encode(it) })
 }
 
 /** 재시도 간격: 2초에서 시작해 두 배씩, 최대 5분. */

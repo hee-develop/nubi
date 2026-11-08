@@ -10,12 +10,12 @@
     <uses-permission android:name="pleos.car.permission.CAR_INFO" />
     <uses-permission android:name="pleos.car.permission.CAR_DRIVE" />
 
-    <!-- AAOS CarPropertyManager: 기어(GEAR_SELECTION), 속도(PERF_VEHICLE_SPEED) -->
+    <!-- AAOS CarPropertyManager: 기어(GEAR_SELECTION). 속도는 수집하지 않으므로 CAR_SPEED는 요청하지 않는다 -->
     <uses-permission android:name="android.car.permission.CAR_POWERTRAIN" />
-    <uses-permission android:name="android.car.permission.CAR_SPEED" />
 
-    <!-- Android 14는 location 타입 포그라운드 서비스를 시작하려면 위치 권한이 있어야 한다(Pleos 위치 권한으로는 부족, 실측 docs/sdk-check.md).
-         위치 값은 Pleos FusedLocation에서만 받고 이 권한으로 LocationManager를 쓰지 않는다 -->
+    <!-- 유지하는 이유: Android 14는 location 타입 포그라운드 서비스를 시작하려면 ACCESS_COARSE/FINE_LOCATION 중 하나가 있어야 한다.
+         Pleos 위치 권한(FUSED_LOCATION)만으로는 SecurityException으로 앱이 죽는다(실측 docs/sdk-check.md §3).
+         위치 값은 Pleos FusedLocation에서만 받고 이 권한으로 LocationManager를 쓰지 않는다. 정밀 위치(FINE)는 요구하지 않는다 -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

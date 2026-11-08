@@ -11,17 +11,15 @@ import android.util.Log
 import com.nubi.car.trip.Gear
 
 /**
- * AAOS CarPropertyManager로 기어(GEAR_SELECTION)와 속도(PERF_VEHICLE_SPEED)를 읽는다.
- * 권한 거부·미지원이면 해당 신호만 조용히 건너뛴다(앱은 죽지 않는다). 속도는 m/s로 오므로 kph로 바꿔 넘긴다.
+ * AAOS CarPropertyManager로 기어(GEAR_SELECTION)만 읽는다. 속도는 수집하지 않는다(CAR_SPEED 권한도 요청하지 않는다).
+ * 권한 거부·미지원이면 조용히 건너뛴다(앱은 죽지 않는다).
  */
 class CarSignals(
     private val context: Context,
     private val onGear: (Gear?) -> Unit,
-    private val onSpeedKph: (Float?) -> Unit,
 ) {
     private var car: Car? = null
     private var pm: CarPropertyManager? = null
-    private var speedLogged = false
 
     private val callback = object : CarPropertyManager.CarPropertyEventCallback {
         override fun onChangeEvent(value: CarPropertyValue<*>) = handle(value.propertyId, value.value)
@@ -38,7 +36,7 @@ class CarSignals(
             car = c
             val manager = c.getCarManager(Car.PROPERTY_SERVICE) as CarPropertyManager
             pm = manager
-            listOf(VehiclePropertyIds.GEAR_SELECTION, VehiclePropertyIds.PERF_VEHICLE_SPEED).forEach { id ->
+            listOf(VehiclePropertyIds.GEAR_SELECTION).forEach { id ->
                 try {
                     val config = manager.getCarPropertyConfig(id)
                     if (config == null) {
@@ -83,13 +81,6 @@ class CarSignals(
             VehiclePropertyIds.GEAR_SELECTION -> (value as? Int)?.let {
                 Log.i(TAG, "기어 $it")
                 onGear(gearOf(it))
-            }
-            VehiclePropertyIds.PERF_VEHICLE_SPEED -> (value as? Float)?.let {
-                if (!speedLogged) {
-                    speedLogged = true
-                    Log.i(TAG, "속도 첫 값 ${it}m/s")
-                }
-                onSpeedKph(it * 3.6f)
             }
         }
     }
