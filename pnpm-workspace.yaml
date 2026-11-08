@@ -1,0 +1,5 @@
+packages:
+  - phone
+  - server
+onlyBuiltDependencies:
+  - esbuild

@@ -1,0 +1,16 @@
+{
+  "name": "nubi",
+  "private": true,
+  "packageManager": "pnpm@10.34.9",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "server:dev": "pnpm --filter @nubi/server dev",
+    "server:test": "pnpm --filter @nubi/server test",
+    "phone:start": "pnpm --filter @nubi/phone start",
+    "phone:test": "pnpm --filter @nubi/phone test",
+    "typecheck": "pnpm -r --workspace-concurrency=1 exec tsc --noEmit",
+    "car:test": "cd car && ./gradlew :app:testDebugUnitTest"
+  }
+}
