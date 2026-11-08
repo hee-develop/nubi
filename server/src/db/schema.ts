@@ -30,4 +30,7 @@ CREATE TABLE IF NOT EXISTS trip_points (
 `;
 
 /** local_id 열이 없던 기존 DB를 위한 후속 DDL. SQLite의 UNIQUE 인덱스는 NULL을 여러 개 허용한다. */
-export const LOCAL_ID_INDEX = 'CREATE UNIQUE INDEX IF NOT EXISTS idx_trips_local_id ON trips (local_id)';
+export const LEGACY_LOCAL_ID_INDEX = 'idx_trips_local_id';
+
+/** localId는 차량 앱이 만든 UUID지만 서버는 믿지 않는다. 다른 차량의 localId와 겹쳐도 서로 영향이 없도록 (vehicle_id, local_id)로 유일하게 한다. */
+export const LOCAL_ID_INDEX = 'CREATE UNIQUE INDEX IF NOT EXISTS idx_trips_vehicle_local_id ON trips (vehicle_id, local_id)';

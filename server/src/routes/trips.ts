@@ -154,13 +154,13 @@ export const tripsRoutes = (db: Db) =>
       const parsed = startBody.safeParse(await readJson(c.req.raw));
       if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
       const b = parsed.data;
-      // 같은 localId로 다시 오면(재시도·응답 유실) 새로 만들지 않고 기존 tripId를 돌려준다.
+      // 같은 (vehicleId, localId)로 다시 오면(재시도·응답 유실) 새로 만들지 않고 기존 tripId를 돌려준다.
       const r = db
         .prepare(
           'INSERT OR IGNORE INTO trips (id, local_id, vehicle_id, driver_id, started_at, odometer_start_km, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
         )
         .run(randomUUID(), b.localId, b.vehicleId, b.driverId, toUtc(b.startedAt), b.odometerStartKm ?? null, new Date().toISOString());
-      const row = db.prepare('SELECT id FROM trips WHERE local_id = ?').get(b.localId) as { id: string };
+      const row = db.prepare('SELECT id FROM trips WHERE vehicle_id = ? AND local_id = ?').get(b.vehicleId, b.localId) as { id: string };
       return c.json({ tripId: row.id }, Number(r.changes) > 0 ? 201 : 200);
     })
     .post('/:tripId/points', async (c) => {
@@ -201,8 +201,8 @@ export const tripsRoutes = (db: Db) =>
       if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
       const tripId = c.req.param('tripId');
       if (!tripExists(db, tripId)) return c.json({ error: 'not_found' }, 404);
-      // 이미 종료된 트립은 그대로 둔다(멱등).
-      db.prepare('UPDATE trips SET ended_at = ?, odometer_end_km = ? WHERE id = ? AND ended_at IS NULL').run(
+      // 멱등: 이미 종료된 트립의 종료 시각은 그대로 둔다. 다만 처음 End(복구 End 등)에 오도미터가 없었고 이번 요청에 있으면 채운다.
+      db.prepare('UPDATE trips SET ended_at = COALESCE(ended_at, ?), odometer_end_km = COALESCE(odometer_end_km, ?) WHERE id = ?').run(
         toUtc(parsed.data.endedAt),
         parsed.data.odometerEndKm ?? null,
         tripId,
