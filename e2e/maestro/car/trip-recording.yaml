@@ -1,0 +1,48 @@
+# 주행 기록 E2E. 서버가 떠 있고 debug 앱이 설치된 emulator-5554에서 돈다(scripts/e2e-car.sh가 서버·설치·권한 부여를 맡는다).
+# 신호·위치는 debug 빌드의 nubi-debug://signal 주소로 넣는다(reset, gear, speed, gpx, now, flush).
+# 스크린샷은 ${SHOT_DIR} 아래에 남긴다. CLOCK_PLUS_6MIN(env 기본값을 두면 -e보다 우선해 0이 되므로 두지 않는다)은 스크립트가 넘기는 "지금 + 6분"(epoch ms)이다.
+# 글자 검증은 정규식(전체 일치)이다. clearState는 쓰지 않는다(앱이 사용자 10에서 돌아 데이터가 지워지지 않는다). 초기화는 reset=1로 한다.
+appId: com.nubi.car
+name: 주행 기록
+env:
+  SHOT_DIR: e2e/output/car
+---
+# 1. 앱을 켜고(권한은 스크립트가 pm grant로 미리 줌) 상태를 비운다 → 대기
+- launchApp
+- openLink: nubi-debug://signal?reset=1
+- extendedWaitUntil:
+    visible: '대기'
+    timeout: 20000
+- assertNotVisible: '권한 필요'
+- takeScreenshot: ${SHOT_DIR}/01-idle
+
+# 2. 기어 D + 속도 40 → 위치 30점(약 725m)을 1초 간격으로 재생
+- openLink: nubi-debug://signal?gear=D&speed=40
+- openLink: nubi-debug://signal?gpx=e2e-north.gpx
+- extendedWaitUntil:
+    visible: '기록 중'
+    timeout: 30000
+- takeScreenshot: ${SHOT_DIR}/02-recording
+
+# 3. 샘플이 20 이상으로 늘고 거리가 500m 이상이 된다
+- extendedWaitUntil:
+    visible: '샘플 (2[0-9]|[3-9][0-9]|[0-9]{3,})'
+    timeout: 45000
+- extendedWaitUntil:
+    visible: '거리 (5[0-9][0-9]|[6-9][0-9][0-9]|[0-9]{4,})m'
+    timeout: 20000
+# 재생이 끝날 때까지(30점) 기다린다
+- extendedWaitUntil:
+    visible: '샘플 30'
+    timeout: 30000
+- takeScreenshot: ${SHOT_DIR}/03-samples
+
+# 4. 기어 P 뒤 시계를 6분 뒤로 옮긴다 → 종료됨. flush로 서버에 전량 올린다
+- openLink: nubi-debug://signal?gear=P&now=${CLOCK_PLUS_6MIN}&flush=1
+- extendedWaitUntil:
+    visible: '종료됨'
+    timeout: 20000
+- extendedWaitUntil:
+    visible: '마지막 업로드: 성공.*'
+    timeout: 30000
+- takeScreenshot: ${SHOT_DIR}/04-ended

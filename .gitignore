@@ -30,3 +30,6 @@ e2e/output/
 
 # 서버 DB 파일
 server/data/
+
+# Pleos 가이드 원문 사본(재배포 허용 미확인, 로컬 전용. pleos-guide-checker가 참고)
+.claude/pleos-guide-snapshot/

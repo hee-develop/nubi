@@ -11,6 +11,7 @@
     "phone:start": "pnpm --filter @nubi/phone start",
     "phone:test": "pnpm --filter @nubi/phone test",
     "typecheck": "pnpm -r --workspace-concurrency=1 exec tsc --noEmit",
-    "car:test": "cd car && ./gradlew :app:testDebugUnitTest"
+    "car:test": "cd car && ./gradlew :app:testDebugUnitTest",
+    "e2e:car": "bash scripts/e2e-car.sh"
   }
 }
