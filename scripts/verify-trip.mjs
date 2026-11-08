@@ -68,7 +68,11 @@ const probeVin = process.env.E2E_PROBE_VIN;
 if (registerPath && probeVin) {
   const reg = JSON.parse(readFileSync(registerPath, 'utf8'));
   const key = process.env.NUBI_VEHICLE_HMAC_KEY;
-  check(Object.keys(reg).join() === 'vehicleId', `register 응답은 vehicleId만 가져야 함: ${Object.keys(reg)}`);
+  // 표준 17자 형식이 아닌 VIN은 vinFormat: 'nonstandard' 표시만 추가로 허용한다(VIN 자체는 응답에 없어야 한다).
+  check(
+    Object.keys(reg).every((k) => k === 'vehicleId' || (k === 'vinFormat' && reg[k] === 'nonstandard')) && 'vehicleId' in reg,
+    `register 응답은 vehicleId(와 vinFormat: nonstandard)만 가져야 함: ${JSON.stringify(Object.keys(reg))}`,
+  );
   if (key) check(reg.vehicleId === createHmac('sha256', key).update(probeVin).digest('hex'), 'register 응답이 HMAC-SHA256(키, VIN)과 다름');
   check(!JSON.stringify(reg).includes(probeVin), 'register 응답에 VIN이 있음');
   for (const p of [detailPath, listPath].filter(Boolean)) {

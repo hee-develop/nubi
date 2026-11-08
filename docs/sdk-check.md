@@ -79,7 +79,7 @@ SecurityException: Starting FGS with type location ... requires permissions:
 
 | 항목 | 결과 |
 |---|---|
-| VIN (`CarInfo.getVINInfo`) | 성공, 길이 9의 문자열(에뮬레이터 더미로 보임). VIN을 서버(`POST /vehicles/register`)에 보내 `HMAC-SHA256(서버 키, VIN)` 차량 ID를 받아 암호화 저장·재사용(앱 pepper 방식은 폐기). 서버는 VIN을 저장·로그하지 않음. 원문은 앱 로그에 길이만 남김. ID를 받기 전에는 UUID를 저장하지 않고 업로드를 보류. 2026-11-08 E2E: 등록 성공, 서버 저장 트립의 vehicleId가 hex 64자 |
+| VIN (`CarInfo.getVINInfo`) | 성공, 길이 9의 문자열(에뮬레이터 더미로 보임). VIN을 서버(`POST /vehicles/register`)에 보내 `HMAC-SHA256(서버 키, VIN)` 차량 ID를 받아 암호화 저장·재사용(앱 pepper 방식은 폐기). 서버는 VIN을 저장·로그하지 않음. 원문은 앱 로그에 길이만 남김. ID를 받기 전에는 UUID를 저장하지 않고 업로드를 보류. 서버 ID를 UUID 대체 뒤에 받으면 `POST /vehicles/alias`로 이어 준다. 서버는 VIN을 정규화(trim·대문자)해 `[A-Z0-9]{1,64}`만 받으며 9자 더미도 통과하고, 표준 17자 형식이 아니면 응답에 `vinFormat: nonstandard`만 표시한다(2026-11-08 E2E 2회 통과). 2026-11-08 E2E: 등록 성공, 서버 저장 트립의 vehicleId가 hex 64자 |
 | `FusedLocation.isSupported()` | 에뮬레이터에서 `true`(logcat `NubiLoc isSupported=true`). false면 앱은 UNSUPPORTED로 두고 콜백을 등록하지 않음(실차 미확인) |
 | 오도미터 (`Odometer.getCurrentDistanceDriven`) | 성공, `0.0`(트립 시작·종료 모두). 단위는 km로 가정(에뮬레이터 값이 0이라 단위 확인 못 함) |
 | 기어 (`GEAR_SELECTION`) | 4(`VehicleGear.GEAR_PARK`). 차곡과 같은 방식으로 읽힘 |

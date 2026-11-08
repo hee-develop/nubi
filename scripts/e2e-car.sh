@@ -64,7 +64,7 @@ done
 
 # 차량 ID 발급용 서버 비밀키(E2E 전용 값). VIN을 보내면 이 키로 HMAC한 ID를 돌려받는다
 HMAC_KEY="e2e-vehicle-hmac-key"
-PROBE_VIN="E2E-PROBE-VIN-0001"
+PROBE_VIN="E2EPROBEVIN0001"
 echo "== 서버 시작 (포트 $PORT, 메모리 DB)"
 mkdir -p "$RUN_DIR"
 # watch 없이 한 번만 띄운다. 서브셸이 곧 프로세스 그룹 리더라 그룹 전체(tsx와 자식 node)를 함께 종료한다.

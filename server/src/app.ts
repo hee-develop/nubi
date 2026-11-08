@@ -8,6 +8,6 @@ export const createApp = (db: Db = openDb(), options: { vehicleHmacKey?: string 
   new Hono()
     .get('/health', (c) => c.json({ ok: true as const }))
     .route('/trips', tripsRoutes(db))
-    .route('/vehicles', vehiclesRoutes(options.vehicleHmacKey ?? resolveVehicleHmacKey()));
+    .route('/vehicles', vehiclesRoutes(options.vehicleHmacKey ?? resolveVehicleHmacKey(), db));
 
 export type AppType = ReturnType<typeof createApp>;

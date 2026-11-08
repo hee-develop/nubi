@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { openDb } from '../src/db/index.js';
+import { resolveVehicleHmacKey } from '../src/routes/vehicles.js';
 
 const json = (body: unknown) => ({ method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 const KEY = 'test-key';
@@ -30,7 +31,16 @@ describe('vehicles', () => {
 
   it('잘못된 요청은 400이고 입력 값을 응답에 되돌려 주지 않는다', async () => {
     const app = createApp(openDb(':memory:'), { vehicleHmacKey: KEY });
-    for (const body of [{}, { vin: '' }, { vin: 123 }, { vin: 'x'.repeat(65) }]) {
+    for (const body of [
+      {},
+      { vin: '' },
+      { vin: '   ' },
+      { vin: 123 },
+      { vin: 'X'.repeat(65) },
+      { vin: 'E2E-PROBE' },
+      { vin: 'A B' },
+      { vin: 'ÀBC' },
+    ]) {
       const res = await app.request('/vehicles/register', json(body));
       expect(res.status).toBe(400);
       expect(await res.json()).toEqual({ error: 'invalid_body' });
@@ -61,6 +71,90 @@ describe('vehicles', () => {
     expect(list).not.toContain(VIN);
     for (const s of spies) expect(JSON.stringify(s.mock.calls)).not.toContain(VIN);
     spies.forEach((s) => s.mockRestore());
+  });
+});
+
+describe('VIN 정규화·형식', () => {
+  it('trim·대문자로 정규화한 값으로 HMAC하고, 표준 17자가 아니면 vinFormat만 표시한다', async () => {
+    const app = createApp(openDb(':memory:'), { vehicleHmacKey: KEY });
+    const post = async (vin: string) => app.request('/vehicles/register', json({ vin }));
+    const expected = createHmac('sha256', KEY).update(VIN).digest('hex');
+    const messy = await post(`  ${VIN.toLowerCase()} \n`);
+    expect(messy.status).toBe(200);
+    expect(await messy.json()).toEqual({ vehicleId: expected }); // 표준 형식이면 표시 없음
+    // 에뮬레이터 더미 VIN(9자)은 통과하되 비표준으로 표시한다
+    const dummy = await post('emu123456');
+    expect(dummy.status).toBe(200);
+    expect(await dummy.json()).toEqual({
+      vehicleId: createHmac('sha256', KEY).update('EMU123456').digest('hex'),
+      vinFormat: 'nonstandard',
+    });
+    // 17자여도 I·O·Q가 있으면 비표준
+    const withI = (await (await post('KMHABCDEI2345678I')).json()) as { vinFormat?: string };
+    expect(withI.vinFormat).toBe('nonstandard');
+    // 64자는 통과, 65자는 거부
+    expect((await post('A'.repeat(64))).status).toBe(200);
+    expect((await post('A'.repeat(65))).status).toBe(400);
+  });
+});
+
+describe('NUBI_VEHICLE_HMAC_KEY', () => {
+  it('production에서 키가 없으면 시작을 거부하고, 개발에서는 경고하고 기본 키를 쓴다', () => {
+    expect(() => resolveVehicleHmacKey(undefined, 'production')).toThrow(/NUBI_VEHICLE_HMAC_KEY/);
+    expect(() => resolveVehicleHmacKey('', 'production')).toThrow(/NUBI_VEHICLE_HMAC_KEY/);
+    expect(resolveVehicleHmacKey('prod-key', 'production')).toBe('prod-key');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(resolveVehicleHmacKey(undefined, 'development').length).toBeGreaterThan(10);
+    expect(resolveVehicleHmacKey(undefined, undefined).length).toBeGreaterThan(10);
+    expect(warn).toHaveBeenCalledTimes(2);
+    warn.mockRestore();
+  });
+});
+
+describe('vehicle alias', () => {
+  const startAs = (app: ReturnType<typeof createApp>, vehicleId: string, localId: string) =>
+    app.request('/trips', json({ localId, vehicleId, driverId: vehicleId, startedAt: '2026-11-08T00:00:00Z' }));
+  const list = async (app: ReturnType<typeof createApp>, vehicleId: string) =>
+    ((await (await app.request(`/trips?vehicleId=${vehicleId}`)).json()) as { trips: { localId: string }[] }).trips.map((t) => t.localId);
+
+  it('alias로 이어진 트립을 서버 ID 조회에 함께 돌려주고, 같은 요청은 멱등이다', async () => {
+    const app = createApp(openDb(':memory:'), { vehicleHmacKey: KEY });
+    await startAs(app, 'uuid-1', 'a');
+    await startAs(app, 'server-1', 'b');
+    await startAs(app, 'other', 'c');
+    expect(await list(app, 'server-1')).toEqual(['b']); // alias 전
+    const first = await app.request('/vehicles/alias', json({ fromVehicleId: 'uuid-1', toVehicleId: 'server-1' }));
+    expect(first.status).toBe(201);
+    const again = await app.request('/vehicles/alias', json({ fromVehicleId: 'uuid-1', toVehicleId: 'server-1' }));
+    expect(again.status).toBe(200);
+    expect((await list(app, 'server-1')).sort()).toEqual(['a', 'b']);
+    expect(await list(app, 'uuid-1')).toEqual(['a']); // 거꾸로 이어지지는 않는다
+    expect(await list(app, 'other')).toEqual(['c']);
+  });
+
+  it('이미 다른 차량에 이어진 alias는 409, 잘못된 입력은 400이며 입력을 되돌려 주지 않는다', async () => {
+    const app = createApp(openDb(':memory:'), { vehicleHmacKey: KEY });
+    await app.request('/vehicles/alias', json({ fromVehicleId: 'uuid-1', toVehicleId: 'server-1' }));
+    const conflict = await app.request('/vehicles/alias', json({ fromVehicleId: 'uuid-1', toVehicleId: 'server-2' }));
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toEqual({ error: 'alias_conflict' });
+    for (const body of [
+      {},
+      { fromVehicleId: 'x' },
+      { fromVehicleId: 'x', toVehicleId: 'x' },
+      { fromVehicleId: '', toVehicleId: 'y' },
+      { fromVehicleId: 'a'.repeat(129), toVehicleId: 'y' },
+    ]) {
+      const res = await app.request('/vehicles/alias', json(body));
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'invalid_body' });
+    }
+  });
+
+  it('alias 테이블이 없던 기존 DB를 열어도 만들어진다', () => {
+    const db = openDb(':memory:');
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'vehicle_alias'").get()).toBeDefined();
+    db.close();
   });
 });
 

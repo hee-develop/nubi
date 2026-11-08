@@ -224,9 +224,15 @@ export const tripsRoutes = (db: Db) =>
       const limit = Number.isInteger(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
       const rows = (
         vehicleId
-          ? db
-              .prepare(summaryQuery('SELECT * FROM trips WHERE vehicle_id = ? ORDER BY started_at DESC, created_at DESC LIMIT ?'))
-              .all(vehicleId, limit)
+          ? // alias(UUID로 대체해 올린 트립)로 연결된 트립도 함께 돌려준다.
+            db
+              .prepare(
+                summaryQuery(
+                  `SELECT * FROM trips WHERE vehicle_id = ? OR vehicle_id IN (SELECT alias_id FROM vehicle_alias WHERE vehicle_id = ?)
+                   ORDER BY started_at DESC, created_at DESC LIMIT ?`,
+                ),
+              )
+              .all(vehicleId, vehicleId, limit)
           : db.prepare(summaryQuery('SELECT * FROM trips ORDER BY started_at DESC, created_at DESC LIMIT ?')).all(limit)
       ) as TripRow[];
       return c.json({ trips: rows.map(toSummary) }, 200);

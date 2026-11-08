@@ -14,6 +14,14 @@ CREATE TABLE IF NOT EXISTS trips (
 
 CREATE INDEX IF NOT EXISTS idx_trips_vehicle_started ON trips (vehicle_id, started_at DESC);
 
+-- 차량 앱이 UUID로 대체해 쓰던 차량 ID(alias_id)를 나중에 받은 서버 발급 ID(vehicle_id)에 잇는다. 한 단계만 따라간다.
+CREATE TABLE IF NOT EXISTS vehicle_alias (
+  alias_id TEXT PRIMARY KEY,
+  vehicle_id TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_vehicle_alias_vehicle ON vehicle_alias (vehicle_id);
+
 -- speed_kph는 과거 호환용 컬럼이다. 차량 앱은 속도를 수집하지 않으므로 항상 NULL로 남는다.
 CREATE TABLE IF NOT EXISTS trip_points (
   trip_id TEXT NOT NULL REFERENCES trips (id),

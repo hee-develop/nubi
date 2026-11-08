@@ -16,9 +16,10 @@
 | 업로드 멱등 | `POST /trips`에 클라이언트 `localId`(UUID)를 보내고 서버는 `(vehicle_id, local_id)` 복합 UNIQUE로 `INSERT OR IGNORE` 후 **기존 tripId를 반환**(처음 만들면 201, 이미 있으면 200). 점은 `(tripId, seq)`, End는 이미 종료됐으면 같은 요약으로 멱등 |
 | 4xx·오류 처리 | 아래 표. Start 4xx 등 보류는 **그 트립만** 보류 집합에 넣고 다른 트립은 계속 올리며 보류 트립은 백오프 뒤 재시도 |
 | 로컬 큐 | 상한 **50,000점**. 넘으면 가장 오래된 **종료 트립**부터 통째로 제거하고 로그. 점 수는 카운터(O(1)). 파일은 append 전용이고 보낸 항목 제거는 1,000개마다·drain 종료 때 컴팩션(그 사이 죽어도 서버가 멱등이라 재전송 안전). 컴팩션·상한 정리는 lock 안에서 목록 스냅샷만 뜨고 암호화·임시 파일 쓰기·**fsync**는 lock 밖에서 한 뒤 **rename** 순간만 lock(컴팩션 중 들어온 항목은 암호화된 꼬리로 모아 잇는다. 실측: 큐 5,000줄 컴팩션 중 enqueue 1ms 미만, 단위 테스트 기준 50ms). 큐 로드·복호화는 워커에서 하고 그동안 화면은 '불러오는 중'. 상한 정리는 메모리에서 바로 하고 파일은 다음 컴팩션에서 줄인다. dead-letter 파일은 5,000줄 상한 |
-| 저장 암호화 | 큐·`dead-letter.jsonl`·server-ids·차량 ID 파일은 **앱 프로세스 안의 AES-256-GCM 데이터 키(DEK)로 줄 단위 암호화**한다(줄마다 Keystore IPC를 만들지 않으려고). DEK는 **Android Keystore AES-GCM 키로 감싸(wrap) `dek.bin`에 저장**하고 시작 때 unwrap 1회만 한다(Jetpack Security는 deprecated). 복호화에 실패한 줄(손상)은 건너뛰며 개수를 세어 화면에 '손상 n줄'. unwrap이 실패하면(Keystore 키 소실·파일 손상) 예외 없이 새 DEK를 만들고 읽을 수 없게 된 기존 큐·dead-letter는 폐기하며 폐기한 줄 수를 화면에 남긴다. 파일 교체는 fsync 뒤 rename |
+| 저장 암호화 | 큐·`dead-letter.jsonl`·server-ids·차량 ID 파일은 **앱 프로세스 안의 AES-256-GCM 데이터 키(DEK)로 줄 단위 암호화**한다(줄마다 Keystore IPC를 만들지 않으려고). DEK는 **Android Keystore AES-GCM 키로 감싸(wrap) `dek.bin`에 저장**하고 시작 때 unwrap 1회만 한다(Jetpack Security는 deprecated). 복호화에 실패한 줄(손상)은 건너뛰며 개수를 세어 화면에 '손상 n줄'. unwrap 실패는 **영구 손실과 일시 오류를 구분**한다. 재생성·파일 폐기는 **영구 손실일 때만**(`dek.bin` 없음, `getKey`가 null, `AEADBadTagException`, Base64·길이 손상): 예외 없이 새 DEK를 만들고 읽을 수 없게 된 기존 큐·dead-letter는 폐기하며 폐기한 줄 수를 화면에 남긴다(새 DEK를 못 저장하면 옛 `dek.bin`을 `dek.bin.stale`로 옮겨 다음 실행 혼선을 막는다). 그 밖의 예외(`KeyStoreException`·`ProviderException`·`UnrecoverableKeyException` 등 일시 오류)는 unwrap을 **1초·3초·5초 간격으로 3회 재시도**하고, 그래도 실패하면 **파일을 지우지 않고** 이번 실행만 메모리 임시 키로 동작한다(`persistent=false`): 기존 파일은 읽지도 쓰지도 않고(손상으로 세지 않음), 새 줄은 디스크에 쓰지 않고 메모리 큐에만 두어 업로드하며, 화면에 '저장 보류(키 오류)'를 보인다. 다음 실행에서 다시 unwrap을 시도한다. 파일 교체는 fsync 뒤 rename. 큐 컴팩션은 `queue.compact.tmp`를 쓰고(`clear()`의 임시 파일과 분리), lock 안에서는 rename만, 디렉터리 fsync는 lock 밖에서 한다 |
 | 저장 실패 | `enqueue`의 JSON 인코딩(NaN 등)·파일 쓰기 예외는 잡아 '저장 실패 n건'으로 화면에 보이고 크래시하지 않는다(쓰기 실패 항목은 메모리에 남아 이번 실행에서는 업로드). 좌표·오도미터가 NaN·무한대·범위 밖이면 샘플 단계에서 버린다 |
-| 차량 ID | **서버 발급 ID**. 차량 앱이 Vehicle SDK `CarInfo.getVINInfo`(권한 `CAR_INFO`)로 읽은 VIN을 `POST /vehicles/register { vin }`(release는 TLS 필수)으로 보내면 서버가 `vehicleId = HMAC-SHA256(서버 비밀키 NUBI_VEHICLE_HMAC_KEY, vin)`(hex)을 돌려준다. **서버는 VIN을 저장·로그·응답하지 않는다.** 앱은 받은 ID를 암호화 저장해 재사용하고 이후 서버를 부르지 않는다. 앱 고정 pepper(`BuildConfig.VIN_PEPPER`)는 없앴다(17자 VIN 공간은 pepper를 알면 역산 가능했다). 비밀키가 없으면 개발용 기본값과 경고 로그. ID를 받기 전에는 UUID를 만들지 않고 Start 업로드를 보류하며, 서비스 시작 후 10초가 지나도 ID가 없을 때만 UUID로 대체해 저장(이때 register는 호출하지 않음. 이전에 받아 둔 ID가 있으면 VIN 없이도 그것을 쓴다) |
+| 차량 ID | **서버 발급 ID**. 차량 앱이 Vehicle SDK `CarInfo.getVINInfo`(권한 `CAR_INFO`)로 읽은 VIN을 `POST /vehicles/register { vin }`(release는 TLS 필수)으로 보내면 서버가 `vehicleId = HMAC-SHA256(서버 비밀키 NUBI_VEHICLE_HMAC_KEY, vin)`(hex)을 돌려준다. **서버는 VIN을 저장·로그·응답하지 않는다.** 앱은 받은 ID를 암호화 저장해 재사용하고 이후 서버를 부르지 않는다. 앱 고정 pepper(`BuildConfig.VIN_PEPPER`)는 없앴다(17자 VIN 공간은 pepper를 알면 역산 가능했다). 비밀키가 없으면 `NODE_ENV=production`에서는 **시작 거부**(명확한 오류 메시지), 그 밖에는 개발용 기본값과 경고 로그. 서버는 VIN을 `trim().toUpperCase()`로 정규화한 뒤 `^[A-Z0-9]{1,64}$`만 받고(에뮬레이터 더미 VIN 9자도 통과), 표준 17자 형식(`^[A-HJ-NPR-Z0-9]{17}$`)이 아니면 응답에 `vinFormat: 'nonstandard'`만 덧붙인다. release에서 http라 등록을 막는 예외는 재시도하지 않는 영구 실패다. ID를 받기 전에는 UUID를 만들지 않고 Start 업로드를 보류하며, 서비스 시작 후 10초가 지나도 ID가 없을 때만 UUID로 대체해 저장(이때 register는 호출하지 않음. 이전에 받아 둔 ID가 있으면 VIN 없이도 그것을 쓴다) |
+| UUID → 서버 ID 전환 | UUID로 대체한 뒤 서버 ID를 **나중에 받으면**(서비스 시작·큐 로드 직후·기록 중 tick에서 확인) 엔진이 `Alias(from=<uuid>, to=<서버 ID>)` 항목을 큐에 넣고 저장된 UUID를 서버 ID로 바꾼다. 큐에 넣는 순간 ① 큐에 남은 **미전송 Start의 vehicleId(와 같은 값의 driverId)를 서버 ID로 바꾸고**(재시작 때도 저장된 Alias를 다시 적용) ② 업로더가 `POST /vehicles/alias { fromVehicleId, toVehicleId }`를 **1회** 보낸다(큐 항목이라 재시도 가능, 일시 오류는 항목 유지, 404는 보류, 그 밖 4xx는 `dead-letter.jsonl` 격리). 이미 서버에 올라간 UUID 트립은 서버의 alias가 잇는다 |
 | 운전자 ID | 이번 단계에서는 차량 ID와 동일(계정·게스트는 뒤 단계) |
 | 오도미터 | 트립 시작·종료 때 `Odometer.getCurrentDistanceDriven`(권한 `pleos.car.permission.CAR_DRIVE`) 값을 km로 저장. 실패·2초 초과면 null |
 | 속도 | **수집하지 않는다**(2026-11-08 결정). `CAR_SPEED` 권한 요청·`PERF_VEHICLE_SPEED` 읽기·`speedKph` 전송 코드가 없다. 정차·주행 판정은 기어와 위치 변화만 쓴다. 서버 스키마의 `speed_kph` 컬럼은 nullable로 남기고 항상 NULL |
@@ -36,6 +37,9 @@
 | Start 4xx(그 밖), 점·End의 그 밖 4xx | 폐기하지 않고 **보류**하며 백오프. 화면에 '업로드 보류' 표시 |
 | End 400·413·422 | `dead-letter.jsonl`로 격리하고 그 트립의 등록(registration)도 지운다(복구 루프 방지) |
 | 트립 정보가 없는 점(고아) | `dead-letter.jsonl`로 격리 |
+| Create 성공 직후 상한 정리로 항목이 사라진 경우 | 서버에는 트립이 생겼으므로 등록(registration)은 저장한다. 다음 시작의 미종료 트립 복구가 End를 보낸다 |
+| 암호화 키를 못 풀어 메모리 모드 | 위 '저장 암호화'. 큐·server-ids·dead-letter·차량 ID 파일을 읽지도 쓰지도 않는다 |
+| alias 4xx(404 제외) | `dead-letter.jsonl`로 격리(큐를 막지 않음). 404는 보류 |
 
 ## 결정 근거
 
@@ -54,18 +58,19 @@ Hono + `node:sqlite`(Node 22.13+ 내장), 검증은 `zod`. DB 경로는 `NUBI_DB
 
 | 메서드·경로 | 요청 | 응답 |
 |---|---|---|
-| `POST /vehicles/register` | `{ vin }`(1~64자) | `200 { vehicleId }`(HMAC-SHA256 hex). VIN은 저장·로그·응답하지 않음. 오류 응답은 입력을 되돌려 주지 않음 |
+| `POST /vehicles/register` | `{ vin }`(trim·대문자 정규화 뒤 `^[A-Z0-9]{1,64}$`) | `200 { vehicleId }`(HMAC-SHA256 hex). 표준 17자 형식이 아니면 `{ vehicleId, vinFormat: 'nonstandard' }`. VIN은 저장·로그·응답하지 않음. 오류 응답은 입력을 되돌려 주지 않음 |
+| `POST /vehicles/alias` | `{ fromVehicleId, toVehicleId }`(1~128자, 서로 다름) | 새로 이으면 `201 { ok }`, 같은 연결이면 `200`(멱등), 이미 다른 차량에 이어졌으면 `409 { error: 'alias_conflict' }`. `vehicle_alias(alias_id PRIMARY KEY, vehicle_id)`에 저장 |
 | `POST /trips` | `{ localId, vehicleId, driverId, startedAt(ISO), odometerStartKm?: number\|null }` (id류는 1~128자) | 새로 만들면 `201 { tripId }`, 같은 `(vehicleId, localId)`가 이미 있으면 `200 { tripId }`(기존 것) |
 | `POST /trips/:tripId/points` | `{ points: [{ seq:int, ts:ISO, lat, lon, headingDeg?: 0~360, confidence?, speedKph?(과거 호환, 앱은 안 보냄), gear?: 'P'\|'R'\|'N'\|'D'\|null }] }` | `200 { accepted, duplicated }`. `(tripId, seq)` 중복은 무시(멱등). 최대 500점, 초과 400. **종료된 트립에도 점을 받는다**(재시도 순서상 End보다 늦게 올 수 있음) |
 | `POST /trips/:tripId/end` | `{ endedAt, odometerEndKm?: number\|null }` | `200 { tripId, pointCount, distanceM(하버사인 합), durationS }`. 이미 종료된 트립은 200으로 같은 요약(멱등). 종료 시각은 유지하되 `odometerEndKm`이 null이었고 요청에 값이 있으면 채움 |
 | `GET /trips/:tripId` | | 요약(`localId` 포함) + `points` |
-| `GET /trips?vehicleId=&limit=` | | `{ trips: [요약] }` 최신순 |
+| `GET /trips?vehicleId=&limit=` | | `{ trips: [요약] }` 최신순. `vehicleId`가 alias 대상이면 그 alias로 이어진 트립(UUID로 올린 것)도 함께(한 단계만) |
 
 요약의 점 수·거리는 저장하지 않고 **조회 때 SQL 한 번**(`LAG` 윈도우 + 하버사인)으로 계산한다. 그래서 종료 뒤에 도착한 점도 응답·상세·목록에 항상 일치하게 반영되고, 목록 조회도 트립 수와 상관없이 쿼리 1회다(N+1 없음).
 
 ### 인증은 범위 밖 — 공개 배포 전 필수
 
-현재 서버에는 인증·인가가 없습니다. `vehicleId`만 알면 누구나 위치 이력을 읽고 쓸 수 있습니다. **공개 배포 전에 반드시** 인증(기기·계정 토큰), 트립 소유 검증, rate limit, TLS 종단을 붙여야 합니다. 이번 단계는 로컬·에뮬레이터 검증용이며 `HOST` 기본값도 `127.0.0.1`입니다.
+현재 서버에는 인증·인가가 없습니다. `vehicleId`만 알면 누구나 위치 이력을 읽고 쓸 수 있습니다. **공개 배포 전에 반드시** 인증(기기·계정 토큰), 트립 소유 검증, rate limit, TLS 종단을 붙여야 합니다. 여기에는 **`POST /vehicles/register`(VIN으로 ID 발급·사전 대입 표면)와 `POST /vehicles/alias`(누구나 임의 차량 ID를 이어 남의 이력을 조회할 수 있는 표면)의 인증과 rate limit**이 포함됩니다. 이번 단계는 로컬·에뮬레이터 검증용이며 `HOST` 기본값도 `127.0.0.1`입니다.
 
 ## 차량 앱 (`car/`)
 
