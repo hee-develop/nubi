@@ -29,6 +29,7 @@ class TripEngine private constructor(private val context: Context) {
     private var failures = 0
     private var nextAttemptAt = 0L
     private var draining = false
+    private var redrain = false
     private var lastUpload = "없음"
 
     /** debug 위치 주입이 시작되면 false로 바뀌어 실제 위치 콜백을 무시한다(주입 경로와 섞이지 않게). */
@@ -138,6 +139,11 @@ class TripEngine private constructor(private val context: Context) {
 
     private fun handle(events: List<TripEvent>) {
         for (e in events) {
+            Log.i(TAG, "이벤트 ${e.javaClass.simpleName} " + when (e) {
+                is TripEvent.Started -> "points=${e.points.size}"
+                is TripEvent.PointsAccepted -> "seq=${e.points.first().seq} lat=${e.points.first().sample.lat} lon=${e.points.first().sample.lon}"
+                is TripEvent.Ended -> "endedAt=${e.endedAtMillis}"
+            })
             when (e) {
                 is TripEvent.Started -> {
                     val id = UUID.randomUUID().toString()
@@ -205,18 +211,26 @@ class TripEngine private constructor(private val context: Context) {
     }
 
     private fun requestUpload(force: Boolean) {
-        if (draining || uploader.pendingEntries == 0) return
+        if (draining) {
+            // 업로드 중에 들어온 강제 요청은 끝나는 대로 한 번 더 돈다.
+            if (force) redrain = true
+            return
+        }
+        if (uploader.pendingEntries == 0) return
         if (!force && now0() < nextAttemptAt) return
         draining = true
         worker.execute {
             val result = uploader.drain()
             main.post {
                 draining = false
+                val again = redrain && result.ok
+                redrain = false
                 failures = if (result.ok) 0 else failures + 1
                 nextAttemptAt = now0() + backoffMillis(failures)
                 lastUpload = "${result.message} (${java.time.LocalTime.now().withNano(0)})"
                 Log.i(TAG, "업로드 ${result.message}, 대기 ${uploader.pendingEntries}")
                 publish()
+                if (again) requestUpload(force = true)
             }
         }
     }

@@ -21,6 +21,7 @@ class CarSignals(
 ) {
     private var car: Car? = null
     private var pm: CarPropertyManager? = null
+    private var speedLogged = false
 
     private val callback = object : CarPropertyManager.CarPropertyEventCallback {
         override fun onChangeEvent(value: CarPropertyValue<*>) = handle(value.propertyId, value.value)
@@ -83,7 +84,13 @@ class CarSignals(
                 Log.i(TAG, "기어 $it")
                 onGear(gearOf(it))
             }
-            VehiclePropertyIds.PERF_VEHICLE_SPEED -> (value as? Float)?.let { onSpeedKph(it * 3.6f) }
+            VehiclePropertyIds.PERF_VEHICLE_SPEED -> (value as? Float)?.let {
+                if (!speedLogged) {
+                    speedLogged = true
+                    Log.i(TAG, "속도 첫 값 ${it}m/s")
+                }
+                onSpeedKph(it * 3.6f)
+            }
         }
     }
 

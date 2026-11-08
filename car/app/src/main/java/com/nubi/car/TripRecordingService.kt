@@ -23,6 +23,7 @@ class TripRecordingService : Service() {
     private lateinit var engine: TripEngine
     private var fused: FusedLocation? = null
     private var signals: CarSignals? = null
+    private var started = false
 
     private val listener = object : FusedLocationListener {
         override fun onChanged(location: LocationData?) {
@@ -43,7 +44,11 @@ class TripRecordingService : Service() {
     override fun onCreate() {
         super.onCreate()
         engine = TripEngine.get(this)
-        startInForeground()
+        if (!startInForeground()) {
+            stopSelf()
+            return
+        }
+        started = true
         startSources()
     }
 
@@ -57,12 +62,14 @@ class TripRecordingService : Service() {
     }
 
     override fun onDestroy() {
-        stopSources()
-        engine.onStop()
+        if (started) {
+            stopSources()
+            engine.onStop()
+        }
         super.onDestroy()
     }
 
-    private fun startInForeground() {
+    private fun startInForeground(): Boolean {
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel(CHANNEL_ID, getString(R.string.notification_channel), NotificationManager.IMPORTANCE_LOW))
         val notification = Notification.Builder(this, CHANNEL_ID)
@@ -70,11 +77,13 @@ class TripRecordingService : Service() {
             .setContentTitle(getString(R.string.notification_title))
             .setOngoing(true)
             .build()
-        try {
+        return try {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
+            true
         } catch (e: Exception) {
+            // 권한이 빠졌을 때 앱이 죽지 않도록 서비스만 접는다. 화면은 "권한 필요"를 보인다.
             Log.w(TAG, "startForeground(location) 실패: ${e.javaClass.simpleName} ${e.message}")
-            throw e
+            false
         }
     }
 

@@ -57,7 +57,7 @@ class MainActivity : Activity() {
         render()
     }
 
-    private fun hasLocationPermission() = checkSelfPermission(FUSED_LOCATION) == PackageManager.PERMISSION_GRANTED
+    private fun hasLocationPermission() = REQUIRED.all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
 
     private fun startService() {
         try {
@@ -69,7 +69,7 @@ class MainActivity : Activity() {
 
     private fun requestPermissions() {
         // 속도(CAR_SPEED)는 거부돼도 기록은 계속된다. 같이 묻되 필수는 위치뿐이다.
-        val wanted = listOf(FUSED_LOCATION, CAR_SPEED).filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        val wanted = (REQUIRED + CAR_SPEED).filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
         requestPermissions(wanted.toTypedArray(), REQUEST_CODE)
     }
 
@@ -125,6 +125,8 @@ class MainActivity : Activity() {
     private companion object {
         const val REQUEST_CODE = 1
         const val FUSED_LOCATION = "pleos.car.permission.FUSED_LOCATION"
+        const val COARSE = "android.permission.ACCESS_COARSE_LOCATION"
         const val CAR_SPEED = "android.car.permission.CAR_SPEED"
+        val REQUIRED = listOf(FUSED_LOCATION, COARSE)
     }
 }
