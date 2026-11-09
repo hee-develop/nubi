@@ -1,19 +1,61 @@
-// E2E 서버 검증: GET /trips/:id 응답(첫째 인자)을 GPX(둘째 인자)의 기준값과 대조한다. 셋째 인자는 목록 응답(트립이 1건뿐인지 확인).
-// 넷째 인자는 DB 스키마(schema.ts), 다섯째는 POST /vehicles/register 응답이다. 서버가 VIN을 저장·응답하지 않는지와 차량 ID 발급(HMAC)을 확인한다.
+// E2E 서버 검증(실행 방법은 scripts/e2e-car.sh).
+//  - 기본 모드: GET /trips/:id 응답(첫째 인자)을 GPX(둘째 인자)의 기준값과 대조한다. 셋째 인자는 목록 응답(VIN 누출 확인용)이다.
+//    넷째 인자는 DB 스키마(schema.ts), 다섯째는 POST /vehicles/register 응답이다. 서버가 VIN을 저장·응답하지 않는지와 차량 ID 발급(HMAC)을 확인한다.
+//  - --pick <서버 주소> <gpx> [대기 초]: 이번 실행의 트립 ID를 골라 출력한다. 트립 수가 아니라 GPX의 **점 수·첫/끝 좌표**가 맞는 종료된 트립을 고르고,
+//    같은 GPX 후보가 여럿이면(Maestro 재시도 등) 가장 먼저 시작한 것을 쓴다. 후보가 없으면 아무것도 출력하지 않는다.
+//  - --road-coloring <north.gpx> <sejong.gpx>: 사양 02 8장 도로 색칠 단언. 서버 주소는 환경변수 E2E_BASE_URL.
 // 실패하면 이유를 stderr에 쓰고 종료 코드 1로 끝난다.
 import { createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 /**
- * 1회 실측(2026-11-09, 전국 도로 DB·Valhalla 3.5.1: 세종대로 newKm 1.245, e2e-north newKm 0.163, 누적 drivenKm 1.41)에 ±10%를 둔 기대값.
- * 실제 Valhalla 응답은 결정적이다. 완료율은 분모가 도로 DB마다 달라 값 대신 drivenKm/totalKm과의 일치로 본다.
+ * 1회 실측(2026-11-10, 전국 도로 DB 재빌드 뒤·Valhalla 3.5.1)에 ±10%를 둔 기대값. 값은 아래 EXPECT 갱신 이력과 docs/sdk-check.md 7-1에 있다.
+ * 실제 Valhalla 응답은 결정적이다. newKm은 전국 달린 길이 증가분(묶음별 상한 적용 후)이다.
  */
 const EXPECT = {
   newKm: { min: 1.12, max: 1.37 },
   drivenKm: { min: 1.27, max: 1.55 },
 };
+/** nationalPercentAfter − Before ≈ newKm / totalKm: 소수 4자리 반올림 오차로 ±1e-6(비율)이 상한이고, newKm·totalKm 반올림 여유를 1% 더한다. */
+const PERCENT_TOLERANCE = 1.01e-6;
 
-// 도로 색칠 검증 모드(사양 02 8장): verify-trip.mjs --road-coloring <trips.json> <e2e-sejong.gpx>. 서버 주소는 E2E_BASE_URL.
+const readGpx = (path) =>
+  [...readFileSync(path, 'utf8').matchAll(/<trkpt\s+lat="([-\d.]+)"\s+lon="([-\d.]+)"/g)].map((m) => ({
+    lat: Number(m[1]),
+    lon: Number(m[2]),
+  }));
+const nearPt = (p, q, tol = 0.0005) => Boolean(p && q) && Math.abs(p.lat - q.lat) <= tol && Math.abs(p.lon - q.lon) <= tol;
+
+async function fetchJson(base, path) {
+  const res = await fetch(base + path);
+  return { status: res.status, body: await res.json() };
+}
+
+/** 이번 실행의 GPX와 점 수·첫/끝 좌표가 맞는 종료된 트립(상세 응답)을 고른다. 없으면 null. */
+async function pickTrip(base, gpxPath, timeoutS = 30) {
+  const gpx = readGpx(gpxPath);
+  for (let i = 0; i <= timeoutS; i++) {
+    const list = (await fetchJson(base, '/trips?limit=200')).body.trips ?? [];
+    const found = [];
+    for (const t of list) {
+      if (!t.endedAt || t.pointCount !== gpx.length) continue;
+      const d = (await fetchJson(base, `/trips/${t.tripId}`)).body;
+      const pts = d.points ?? [];
+      if (pts.length === gpx.length && nearPt(pts[0], gpx[0]) && nearPt(pts.at(-1), gpx.at(-1))) found.push(d);
+    }
+    if (found.length > 0) return found.sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)))[0];
+    if (i < timeoutS) await new Promise((r) => setTimeout(r, 1000));
+  }
+  return null;
+}
+
+if (process.argv[2] === '--pick') {
+  const trip = await pickTrip(process.argv[3], process.argv[4], Number(process.argv[5] ?? 30));
+  if (trip) process.stdout.write(trip.tripId);
+  process.exit(0);
+}
+
+// 도로 색칠 검증 모드(사양 02 8장). 서버 주소는 E2E_BASE_URL.
 if (process.argv[2] === '--road-coloring') {
   await verifyRoadColoring(process.argv[3], process.argv[4]);
   process.exit(0);
@@ -21,10 +63,7 @@ if (process.argv[2] === '--road-coloring') {
 
 const [detailPath, gpxPath, listPath, schemaPath, registerPath] = process.argv.slice(2);
 const trip = JSON.parse(readFileSync(detailPath, 'utf8'));
-const gpx = [...readFileSync(gpxPath, 'utf8').matchAll(/<trkpt\s+lat="([-\d.]+)"\s+lon="([-\d.]+)"/g)].map((m) => ({
-  lat: Number(m[1]),
-  lon: Number(m[2]),
-}));
+const gpx = readGpx(gpxPath);
 
 const failures = [];
 const check = (ok, message) => {
@@ -34,8 +73,11 @@ const near = (a, b, tol) => Math.abs(a - b) <= tol;
 
 check(gpx.length === 30, `GPX 기준 점이 30개여야 하는데 ${gpx.length}개`);
 if (listPath) {
-  const list = JSON.parse(readFileSync(listPath, 'utf8'));
-  check(list.trips.length === 1, `트립이 1건이어야 하는데 ${list.trips.length}건`);
+  // 트립 수는 보지 않는다(재시도·앞 실행 잔여와 무관하게). 이번 실행의 트립이 목록에 있고 localId가 하나뿐이면 된다.
+  const list = JSON.parse(readFileSync(listPath, 'utf8')).trips;
+  const mine = list.filter((t) => t.tripId === trip.tripId);
+  check(mine.length === 1, `목록에 이번 트립(${trip.tripId})이 ${mine.length}건`);
+  check(list.filter((t) => t.localId === trip.localId).length === 1, `localId ${trip.localId}가 목록에 여러 건`);
 }
 check(trip.pointCount === 30, `pointCount ${trip.pointCount} != 30`);
 check(Array.isArray(trip.points) && trip.points.length === 30, `points.length ${trip.points?.length} != 30`);
@@ -67,6 +109,12 @@ check(typeof trip.localId === 'string' && trip.localId.length > 0, 'localId 없�
 // 차량 ID는 서버가 VIN으로 발급한 HMAC-SHA256(소문자 hex 64자)이어야 한다. UUID 대체(하이픈 포함)나 앱이 만든 해시가 아니다.
 check(/^[0-9a-f]{64}$/.test(trip.vehicleId ?? ''), `vehicleId가 서버 발급 HMAC(hex 64자)가 아님: ${trip.vehicleId}`);
 check(trip.driverId === trip.vehicleId, 'driverId가 vehicleId와 같아야 함(이번 단계)');
+// 앱에 주입한 VIN(debug vin= 신호)으로 서버가 발급한 ID여야 한다
+if (process.env.E2E_APP_VIN && process.env.NUBI_VEHICLE_HMAC_KEY)
+  check(
+    trip.vehicleId === createHmac('sha256', process.env.NUBI_VEHICLE_HMAC_KEY).update(process.env.E2E_APP_VIN).digest('hex'),
+    'vehicleId가 HMAC-SHA256(키, 주입한 VIN)과 다름',
+  );
 
 // 서버는 VIN을 저장·응답하지 않는다: 응답 JSON에 vin 키가 없고, DB 스키마에 vin 열이 없다.
 const hasVinKey = (value) =>
@@ -103,22 +151,20 @@ console.log(
   `OK trip=${trip.tripId} localId=${trip.localId} pointCount=${trip.pointCount} distanceM=${trip.distanceM} durationS=${trip.durationS} odometer=${trip.odometerStartKm}->${trip.odometerEndKm}`,
 );
 
-/** 사양 02 8장 단언. 두 트립(e2e-north 30점, e2e-sejong 60점)을 모두 조회한다. 기대값은 1회 실측 후 ±10%로 고정한다. */
-async function verifyRoadColoring(listFile, sejongGpx) {
+/** 사양 02 8장 단언. 두 트립(e2e-north 30점, e2e-sejong 60점)을 이번 실행의 GPX(점 수·첫/끝 좌표)로 골라 조회한다. 기대값은 1회 실측 후 ±10%로 고정한다. */
+async function verifyRoadColoring(northGpx, sejongGpx) {
   const base = process.env.E2E_BASE_URL;
   const fails = [];
   const ok = (cond, msg) => {
     if (!cond) fails.push(msg);
   };
-  const get = async (path) => {
-    const res = await fetch(base + path);
-    return { status: res.status, body: await res.json() };
-  };
-  const trips = JSON.parse(readFileSync(listFile, 'utf8')).trips;
-  ok(trips.length === 2, `트립이 2건이어야 하는데 ${trips.length}건`);
-  const north = trips.find((t) => t.pointCount === 30);
-  const sejong = trips.find((t) => t.pointCount === 60);
-  ok(north && sejong, `e2e-north(30점)·e2e-sejong(60점) 트립을 찾지 못함: ${JSON.stringify(trips.map((t) => t.pointCount))}`);
+  const get = (path) => fetchJson(base, path);
+  const north = await pickTrip(base, northGpx);
+  const sejong = await pickTrip(base, sejongGpx);
+  ok(
+    north && sejong,
+    `이번 실행의 e2e-north·e2e-sejong 트립을 점 수·첫/끝 좌표로 찾지 못함 (north=${north?.tripId}, sejong=${sejong?.tripId})`,
+  );
   if (!north || !sejong) return finish(fails);
 
   // 매칭은 종료 직후 비동기로 돈다. done이 될 때까지 최대 60초 기다린다.
@@ -154,19 +200,22 @@ async function verifyRoadColoring(listFile, sejongGpx) {
     summary.drivenKm >= EXPECT.drivenKm.min && summary.drivenKm <= EXPECT.drivenKm.max,
     `drivenKm ${summary.drivenKm} not in ${EXPECT.drivenKm.min}~${EXPECT.drivenKm.max}`,
   );
-  const pct = (summary.drivenKm / summary.totalKm) * 100;
-  ok(
-    Math.abs(summary.nationalPercent - pct) <= pct * 0.01 + 0.00006,
-    `nationalPercent ${summary.nationalPercent} != drivenKm/totalKm ${pct}`,
-  );
   ok(summary.roadsStarted >= 1, `roadsStarted ${summary.roadsStarted}`);
 
-  const pts = [...readFileSync(sejongGpx, 'utf8').matchAll(/<trkpt\s+lat="([-\d.]+)"\s+lon="([-\d.]+)"/g)].map((m) => [
-    Number(m[1]),
-    Number(m[2]),
-  ]);
-  const lats = pts.map((p) => p[0]);
-  const lons = pts.map((p) => p[1]);
+  // 사양 2장: newKm은 전국 달린 길이 증가분이라 완료율 증가분과 맞물린다. (after − before)[%] / 100 ≈ newKm / totalKm.
+  const consistency = (label, m) => {
+    const r = m.result ?? {};
+    const lhs = (r.nationalPercentAfter - r.nationalPercentBefore) / 100;
+    const rhs = r.newKm / summary.totalKm;
+    ok(Math.abs(lhs - rhs) <= PERCENT_TOLERANCE, `${label}: (after−before)/100 ${lhs} != newKm/totalKm ${rhs} (±${PERCENT_TOLERANCE})`);
+    return { lhs, rhs };
+  };
+  const cSejong = consistency('세종대로', mSejong);
+  consistency('e2e-north', mNorth);
+
+  const pts = readGpx(sejongGpx);
+  const lats = pts.map((p) => p.lat);
+  const lons = pts.map((p) => p.lon);
   const pad = 0.002;
   const bbox = [Math.min(...lons) - pad, Math.min(...lats) - pad, Math.max(...lons) + pad, Math.max(...lats) + pad].join(',');
   const seg = (await get(`/coverage/segments?vehicleId=${v}&bbox=${bbox}`)).body;
@@ -174,7 +223,7 @@ async function verifyRoadColoring(listFile, sejongGpx) {
 
   const ms = Date.parse(mSejong.finishedAt) - Date.parse(mSejong.startedAt);
   console.log(
-    `MEASURED newKm=${newKm} nationalPercent=${summary.nationalPercent} matchingMs=${ms} segments=${(seg.features ?? []).length} roadsStarted=${summary.roadsStarted} northNewKm=${mNorth.result?.newKm} snapshot=${summary.snapshotMonth} totalKm=${summary.totalKm}`,
+    `MEASURED newKm=${newKm} before=${mSejong.result?.nationalPercentBefore} after=${mSejong.result?.nationalPercentAfter} pctDelta/100=${cSejong.lhs} newKm/totalKm=${cSejong.rhs} nationalPercent=${summary.nationalPercent} drivenKm=${summary.drivenKm} matchingMs=${ms} segments=${(seg.features ?? []).length} roadsStarted=${summary.roadsStarted} northNewKm=${mNorth.result?.newKm} snapshot=${summary.snapshotMonth} totalKm=${summary.totalKm} sejongLocalId=${sejong.localId} northLocalId=${north.localId}`,
   );
   finish(fails);
 }
