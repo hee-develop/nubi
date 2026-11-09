@@ -4,16 +4,14 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { pointInMulti } from './build-regions.mjs';
+import { makeLocator } from './geo-utils.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const db = new DatabaseSync(resolve(process.argv[2] ?? join(ROOT, 'server/data/regions/regions.sqlite')), { readOnly: true });
-const q = db.prepare(`SELECT r.code, r.name, r.sido_name, r.geom_json FROM regions_rtree t JOIN regions r ON r.rowid = t.region_id
-  WHERE t.minlon <= ? AND t.maxlon >= ? AND t.minlat <= ? AND t.maxlat >= ?`);
+const loc = makeLocator(db); // 폴리곤 안(code 순) → 없으면 50m 이내 가장 가까운 시군구(서버와 같은 규칙)
 export const locate = (lon, lat) => {
-  for (const r of q.all(lon, lon, lat, lat))
-    if (pointInMulti(lon, lat, JSON.parse(r.geom_json).coordinates)) return `${r.sido_name} ${r.name} (${r.code})`;
-  return null;
+  const r = loc.locate(lon, lat);
+  return r ? `${r.sido_name} ${r.display_name} (${r.code})` : null;
 };
 const gpx = [
   ...readFileSync(join(ROOT, 'car/app/src/debug/assets/e2e-sejong.gpx'), 'utf8').matchAll(/<trkpt lat="([\d.]+)" lon="([\d.]+)"/g),

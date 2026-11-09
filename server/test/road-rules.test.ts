@@ -44,21 +44,21 @@ describe('classify (사양 6-1)', () => {
 });
 
 describe('지역 접두 (사양 03 1·3장)', () => {
-  const jung = { sgg: '11140', sggName: '중구', sido: '11', sidoName: '서울특별시' };
+  const jung = { sgg: '11140', sggDisplay: '서울 중구', sido: '11', sidoShort: '서울' };
   const c = (tags: Record<string, string>, region?: typeof jung | null) => classify(tags, 1, region);
 
-  it('도로명은 nm:{시군구}:{이름}, 표시는 "{시군구명} {도로명}"', () => {
-    expect(c({ highway: 'primary', name: '세종대로' }, jung)).toEqual({ key: 'nm:11140:세종대로', display: '중구 세종대로' });
+  it('도로명은 nm:{시군구}:{이름}, 표시는 "{시군구 표시 이름} {도로명}"', () => {
+    expect(c({ highway: 'primary', name: '세종대로' }, jung)).toEqual({ key: 'nm:11140:세종대로', display: '서울 중구 세종대로' });
     expect(c({ highway: 'residential', name: '세종 대로' }, jung).key).toBe('nm:11140:세종대로');
     // 같은 이름이라도 시군구가 다르면 다른 도로(동명이로 해소)
     expect(
-      c({ highway: 'residential', name: '중앙로' }, { ...jung, sgg: '27110', sggName: '중구', sido: '27', sidoName: '대구광역시' }).key,
+      c({ highway: 'residential', name: '중앙로' }, { ...jung, sgg: '27110', sggDisplay: '대구 중구', sido: '27', sidoShort: '대구' }).key,
     ).toBe('nm:27110:중앙로');
   });
 
-  it('지방도는 lr:{시도}:{ref}, 표시는 "{시도명} 지방도 {ref}호선"', () => {
-    expect(c({ highway: 'secondary', ref: '7' }, jung)).toEqual({ key: 'lr:11:7', display: '서울특별시 지방도 7호선' });
-    expect(c({ highway: 'tertiary', ref: '7' }, { ...jung, sido: '41', sidoName: '경기도' }).key).toBe('lr:41:7');
+  it('지방도는 lr:{시도}:{ref}, 표시는 "{시도 단축명} 지방도 {ref}호선"', () => {
+    expect(c({ highway: 'secondary', ref: '7' }, jung)).toEqual({ key: 'lr:11:7', display: '서울 지방도 7호선' });
+    expect(c({ highway: 'tertiary', ref: '7' }, { ...jung, sido: '41', sidoShort: '경기' }).key).toBe('lr:41:7');
   });
 
   it('고속도로(mw:)·국도(nr:)·unnamed는 지역과 무관하다', () => {
@@ -85,7 +85,7 @@ describe('지역 접두 (사양 03 1·3장)', () => {
       jung,
     );
     expect(w.key).toBe('nm:11140:세종대로');
-    expect(w.display).toBe('중구 세종대로');
+    expect(w.display).toBe('서울 중구 세종대로');
     const seen: number[][] = [];
     const locate = (lon: number, lat: number) => {
       seen.push([lon, lat]);

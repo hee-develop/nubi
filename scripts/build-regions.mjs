@@ -11,6 +11,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, readFileSync, rmSync, statSync, renameSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { pointInRing, regionDisplayName } from './geo-utils.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -53,7 +54,7 @@ export const REGION_ALIAS = {
 };
 
 const SCHEMA_SQL = `
-CREATE TABLE regions(code TEXT PRIMARY KEY, sido_code TEXT NOT NULL, name TEXT NOT NULL, sido_name TEXT NOT NULL,
+CREATE TABLE regions(code TEXT PRIMARY KEY, sido_code TEXT NOT NULL, name TEXT NOT NULL, display_name TEXT NOT NULL, sido_name TEXT NOT NULL,
   depop_89 INTEGER NOT NULL DEFAULT 0, depop_92 INTEGER NOT NULL DEFAULT 0, area_km2 REAL NOT NULL, polygons INTEGER NOT NULL,
   minlon REAL, minlat REAL, maxlon REAL, maxlat REAL, geom_json TEXT NOT NULL);
 CREATE VIRTUAL TABLE regions_rtree USING rtree(region_id, minlon, maxlon, minlat, maxlat);
@@ -83,30 +84,6 @@ const ringBbox = (r) => {
   }
   return [a, b, c, d];
 };
-export function pointInRing(x, y, r) {
-  let inside = false;
-  for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
-    const [xi, yi] = r[i],
-      [xj, yj] = r[j];
-    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
-  }
-  return inside;
-}
-/** MultiPolygon 좌표(폴리곤 배열) 안 판정: 폴리곤 any, 바깥 고리 안 + 구멍 밖. */
-export function pointInMulti(x, y, polys) {
-  for (const p of polys) {
-    if (!pointInRing(x, y, p[0])) continue;
-    let hole = false;
-    for (let k = 1; k < p.length; k++)
-      if (pointInRing(x, y, p[k])) {
-        hole = true;
-        break;
-      }
-    if (!hole) return true;
-  }
-  return false;
-}
-
 /** 행정동 고리들을 병합: 바깥 CCW·구멍 CW로 정규화 → 반대 방향으로 겹치는 간선 상쇄 → 남은 간선을 이어 고리 복원 → 폴리곤 조립. */
 function dissolve(polygons) {
   const edges = new Map(); // "a>b" -> [pa, pb]
@@ -309,7 +286,7 @@ function main() {
   const db = new DatabaseSync(tmpOut);
   db.exec('PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;');
   db.exec(SCHEMA_SQL);
-  const insR = db.prepare('INSERT INTO regions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)');
+  const insR = db.prepare('INSERT INTO regions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
   const insT = db.prepare('INSERT INTO regions_rtree VALUES (?,?,?,?,?)');
   const insA = db.prepare('INSERT INTO region_alias VALUES (?,?,?,?,?)');
   let nRegions = 0,
@@ -320,6 +297,13 @@ function main() {
     d89 = 0,
     d92 = 0;
   const bySido = {};
+  // 표시 이름(사양 03 3장): 유일성은 `--codes`로 줄이기 전 전국 전체(새 코드 기준) 이름으로 판단한다.
+  const allRegions = [...groups].map(([oldCode, g]) => ({
+    code: REGION_ALIAS[oldCode] ?? oldCode,
+    name: g.name,
+    sidoCode: REGION_ALIAS[oldCode] ? NEW_SIDO.code : g.sido,
+  }));
+  const display = new Map(allRegions.map((r) => [r.code, regionDisplayName(r, allRegions)]));
   db.exec('BEGIN');
   for (const [oldCode, g] of [...groups].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
     const newCode = REGION_ALIAS[oldCode] ?? oldCode;
@@ -359,7 +343,22 @@ function main() {
     const geom = JSON.stringify({ type: 'MultiPolygon', coordinates: polys });
     const is89 = depop89.has(oldCode) ? 1 : 0,
       is92 = depop92.has(oldCode) ? 1 : 0;
-    const info = insR.run(newCode, sidoCode, g.name, sidoName, is89, is92, +area.toFixed(3), polys.length, a, b, c, d, geom);
+    const info = insR.run(
+      newCode,
+      sidoCode,
+      g.name,
+      display.get(newCode),
+      sidoName,
+      is89,
+      is92,
+      +area.toFixed(3),
+      polys.length,
+      a,
+      b,
+      c,
+      d,
+      geom,
+    );
     insT.run(Number(info.lastInsertRowid), a, c, b, d);
     if (aliased) insA.run(oldCode, newCode, g.name, NEW_SIDO.code, NEW_SIDO.name);
     nRegions++;

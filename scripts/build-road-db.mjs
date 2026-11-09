@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 도로 DB 빌드(사양 3-2): osmium tags-filter → osmium export(GeoJSONSeq) → SQLite.
 // 사용: node scripts/build-road-db.mjs <pbf> <YYYYMM> [--bbox minlon,minlat,maxlon,maxlat] [--out <path>] [--stats-json <path>] [--regions <regions.sqlite>]
-//  --regions: 시군구 DB(사양 03). 주면 way 중심점의 시군구로 도로 키에 지역 접두를 붙인다(`nm:{sgg}:{name}`, `lr:{sido}:{ref}`). 안 주면 옛 키.
+//  --regions: 시군구 DB(사양 03). way 중간 정점의 시군구로 도로 키에 지역 접두를 붙인다(`nm:{sgg}:{name}`, `lr:{sido}:{ref}`). 전국 빌드에서는 필수(--bbox 소형 빌드만 생략 가능, 옛 키). snapshot.regions_month에 지역 DB 월을 기록한다.
 //  --bbox : 이 범위와 겹치는 way만 담는다(테스트용 소형 DB). osmium extract(complete_ways)로 먼저 자른다.
 //  --out  : 기본 server/data/roads-<YYYYMM>.sqlite
 // 외부 npm 의존성 없음(Node 22 node:sqlite). osmium-tool 필요(brew install osmium-tool).
@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HIGHWAYS, RoadAccumulator, SCHEMA_SQL, haversine, locateWay, normalize, wayRecord, wayRowValues } from './road-rules.mjs';
-import { pointInMulti } from './build-regions.mjs';
+import { SIDO_SHORT, makeLocator } from './geo-utils.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -35,23 +35,22 @@ if (!pbfArg || !/^\d{6}$/.test(month ?? '')) {
 const pbf = resolve(pbfArg);
 const out = resolve(outArg ?? join(ROOT, 'server/data', `roads-${month}.sqlite`));
 const bbox = bboxArg ? bboxArg.split(',').map(Number) : null;
+if (!bbox && !regionsArg) {
+  console.error('전국 빌드(--bbox 없음)에는 --regions <regions.sqlite>가 필수입니다(도로 키 지역 접두, 사양 03).');
+  process.exit(2);
+}
 if (bbox && (bbox.length !== 4 || bbox.some(Number.isNaN))) throw new Error('--bbox 형식 오류');
 
-// 시군구 판정기: R-tree bbox 후보 → ray casting. 폴리곤은 처음 쓸 때 파싱해 캐시한다.
+// 시군구 판정기(scripts/geo-utils.mjs 공용): 폴리곤 안 → 50m 이내 가장 가까운 시군구. 전국 빌드는 --regions 필수.
 let locate;
+let regionsMonth = null;
 if (regionsArg) {
   const rdb = new DatabaseSync(resolve(regionsArg), { readOnly: true });
-  const cand = rdb.prepare(`SELECT r.code, r.name, r.sido_code, r.sido_name FROM regions_rtree t JOIN regions r ON r.rowid = t.region_id
-    WHERE t.minlon <= ? AND t.maxlon >= ? AND t.minlat <= ? AND t.maxlat >= ? ORDER BY r.code`);
-  const geomOf = rdb.prepare('SELECT geom_json FROM regions WHERE code = ?');
-  const polys = new Map();
+  regionsMonth = rdb.prepare('SELECT month FROM snapshot ORDER BY month DESC LIMIT 1').get()?.month ?? null;
+  const loc = makeLocator(rdb);
   locate = (lon, lat) => {
-    for (const r of cand.all(lon, lon, lat, lat)) {
-      let g = polys.get(r.code);
-      if (!g) polys.set(r.code, (g = JSON.parse(geomOf.get(r.code).geom_json).coordinates));
-      if (pointInMulti(lon, lat, g)) return { sgg: r.code, sggName: r.name, sido: r.sido_code, sidoName: r.sido_name };
-    }
-    return null;
+    const r = loc.locate(lon, lat);
+    return r ? { sgg: r.code, sggDisplay: r.display_name, sido: r.sido_code, sidoShort: SIDO_SHORT[r.sido_code] ?? r.sido_name } : null;
   };
 }
 
@@ -155,7 +154,7 @@ for (const r of acc.rows()) {
     }
   }
 }
-db.prepare('INSERT INTO snapshot VALUES (?,?,?,?,?,?,?)').run(
+db.prepare('INSERT INTO snapshot VALUES (?,?,?,?,?,?,?,?)').run(
   month,
   new Date().toISOString(),
   basename(pbf),
@@ -163,6 +162,7 @@ db.prepare('INSERT INTO snapshot VALUES (?,?,?,?,?,?,?)').run(
   totalNamed,
   totalAll,
   JSON.stringify(byClass),
+  regionsMonth,
 );
 db.exec('COMMIT');
 db.exec('ANALYZE');
@@ -200,6 +200,7 @@ const regionKeyStats = regionsArg
 const stats = {
   out,
   regionKeys: regionKeyStats,
+  regionsMonth,
   bbox,
   month,
   pbfTimestamp,

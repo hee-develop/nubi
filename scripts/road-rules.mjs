@@ -28,7 +28,7 @@ export const normalize = (s) => s.normalize('NFKC').replace(/\s+/g, '');
 /**
  * 도로 키·표시 이름(사양 02 6-1, 사양 03 1·3장 지역 접두).
  * [region]: `undefined`면 지역 접두를 쓰지 않는 옛 규칙(`nm:{name}`, `lr:{ref}`), `null`이면 지역을 알 수 없어 접두 `00`,
- * `{ sgg, sggName, sido, sidoName }`이면 `nm:{sgg}:{name}`(표시 "{시군구명} {도로명}")·`lr:{sido}:{ref}`(표시 "{시도명} 지방도 {ref}호선").
+ * `{ sgg, sggDisplay, sido, sidoShort }`이면 `nm:{sgg}:{name}`(표시 "{시군구 표시 이름} {도로명}", 예 "서울 중구 세종대로")·`lr:{sido}:{ref}`(표시 "{시도 단축명} 지방도 {ref}호선").
  * 고속도로(`mw:`)·국도(`nr:`)는 전국 단일 키라 지역과 무관하다.
  */
 export function classify(tags, wayId, region) {
@@ -40,13 +40,13 @@ export function classify(tags, wayId, region) {
   if (ref && (major === 'secondary' || major === 'tertiary')) {
     if (region === undefined) return { key: `lr:${normalize(ref)}`, display: `지방도 ${ref}호선` };
     if (region === null) return { key: `lr:${NO_REGION}:${normalize(ref)}`, display: `지방도 ${ref}호선` };
-    return { key: `lr:${region.sido}:${normalize(ref)}`, display: `${region.sidoName} 지방도 ${ref}호선` };
+    return { key: `lr:${region.sido}:${normalize(ref)}`, display: `${region.sidoShort} 지방도 ${ref}호선` };
   }
   // ref가 있어도 위 등급이 아니면(unclassified·residential) 이름 규칙으로 넘어간다
   if (name) {
     if (region === undefined) return { key: `nm:${normalize(name)}`, display: name };
     if (region === null) return { key: `nm:${NO_REGION}:${normalize(name)}`, display: name };
-    return { key: `nm:${region.sgg}:${normalize(name)}`, display: `${region.sggName} ${name}` };
+    return { key: `nm:${region.sgg}:${normalize(name)}`, display: `${region.sggDisplay} ${name}` };
   }
   return { key: `unnamed:${wayId}`, display: null };
 }
@@ -137,7 +137,7 @@ CREATE VIRTUAL TABLE ways_rtree USING rtree(way_id, minlon, maxlon, minlat, maxl
 CREATE TABLE roads(road_key TEXT PRIMARY KEY, display_name TEXT NOT NULL, highway_major TEXT NOT NULL,
   total_length_m REAL NOT NULL, split_length_m REAL NOT NULL, way_count INTEGER NOT NULL, names_json TEXT NOT NULL DEFAULT '[]');
 CREATE TABLE snapshot(month TEXT PRIMARY KEY, built_at TEXT NOT NULL, pbf_name TEXT NOT NULL, pbf_timestamp TEXT,
-  total_named_length_m REAL NOT NULL, total_all_length_m REAL NOT NULL, by_class_json TEXT NOT NULL);
+  total_named_length_m REAL NOT NULL, total_all_length_m REAL NOT NULL, by_class_json TEXT NOT NULL, regions_month TEXT);
 `;
 
 /** way 행 삽입 쿼리의 열 순서에 맞는 값 배열. */
