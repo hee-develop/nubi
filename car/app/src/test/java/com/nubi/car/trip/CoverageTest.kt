@@ -147,6 +147,21 @@ class CoverageTest {
 
     private val direct = Executor { it.run() }
 
+    /** 예약을 모아 두었다가 [runAll]로 한 번에 돌리는 가짜 타이머. */
+    private class FakeTimer {
+        val delays = mutableListOf<Long>()
+        private val pending = mutableListOf<() -> Unit>()
+        fun schedule(delay: Long, block: () -> Unit) {
+            delays += delay
+            pending += block
+        }
+        fun runAll() {
+            val now = pending.toList()
+            pending.clear()
+            now.forEach { it() }
+        }
+    }
+
     @Test
     fun 트래커는_종료_알림을_받으면_결과와_전국_완료율을_갱신한다() {
         val api = FakeApi(listOf({ done("counted", newKm = 1.2, before = 0.0, after = 0.0011) }))
@@ -162,10 +177,14 @@ class CoverageTest {
     @Test
     fun 전국_완료율은_차량_ID를_기다렸다_1회_받고_실패하면_값이_없다() {
         var id: String? = null
-        val sleeps = mutableListOf<Long>()
+        val timer = FakeTimer()
         val api = FakeApi(listOf({ null }), { 3.5 })
-        val t = CoverageTracker(api, direct, { id.also { if (sleeps.size == 2) id = "v" } }, poller(api), { sleeps += it })
+        val t = CoverageTracker(api, direct, { id }, poller(api), timer::schedule)
         t.refreshNational()
+        assertEquals("ID가 없으면 예약만 하고 executor를 붙잡지 않는다", listOf(1_000L), timer.delays)
+        timer.runAll()
+        id = "v"
+        timer.runAll()
         assertEquals(3.5, t.nationalPercent!!, 1e-9)
 
         val failing = object : CoverageApi {
@@ -183,7 +202,7 @@ class CoverageTest {
     fun 전국_완료율은_성공한_마지막_값을_저장해_다음_실행이나_실패_때도_보인다() {
         val store = MapStore()
         val ok = FakeApi(listOf({ null }), { 0.0123 })
-        val first = CoverageTracker(ok, direct, { "v" }, poller(ok), cache = store, sleep = {})
+        val first = CoverageTracker(ok, direct, { "v" }, poller(ok), cache = store, schedule = { _, _ -> })
         assertNull(first.nationalPercent)
         first.refreshNational()
         assertEquals(0.0123, first.nationalPercent!!, 1e-9)
@@ -193,7 +212,7 @@ class CoverageTest {
             override fun getMatching(tripId: String): MatchingResponse? = null
             override fun getNationalPercent(vehicleId: String): Double = throw IOException("down")
         }
-        val second = CoverageTracker(down, direct, { "v" }, poller(down), cache = store, sleep = {})
+        val second = CoverageTracker(down, direct, { "v" }, poller(down), cache = store, schedule = { _, _ -> })
         assertEquals(0.0123, second.nationalPercent!!, 1e-9)
         second.refreshNational()
         assertEquals("실패해도 저장값 유지", 0.0123, second.nationalPercent!!, 1e-9)
@@ -201,7 +220,7 @@ class CoverageTest {
 
     @Test
     fun 조회가_실패하면_30초_뒤_한_번만_다시_시도한다() {
-        val sleeps = mutableListOf<Long>()
+        val timer = FakeTimer()
         var calls = 0
         val api = object : CoverageApi {
             override fun getMatching(tripId: String): MatchingResponse? = null
@@ -211,10 +230,12 @@ class CoverageTest {
                 return 2.5
             }
         }
-        val t = CoverageTracker(api, direct, { "v" }, poller(api), sleep = { sleeps += it })
+        val t = CoverageTracker(api, direct, { "v" }, poller(api), timer::schedule)
         t.refreshNational()
+        assertEquals(1, calls)
+        assertEquals(listOf(30_000L), timer.delays)
+        timer.runAll()
         assertEquals(2, calls)
-        assertEquals(listOf(30_000L), sleeps)
         assertEquals(2.5, t.nationalPercent!!, 1e-9)
 
         // 두 번 다 실패하면 더 시도하지 않는다
@@ -226,8 +247,11 @@ class CoverageTest {
                 throw IOException("down")
             }
         }
-        val t2 = CoverageTracker(failing, direct, { "v" }, poller(failing), sleep = {})
+        val timer2 = FakeTimer()
+        val t2 = CoverageTracker(failing, direct, { "v" }, poller(failing), timer2::schedule)
         t2.refreshNational()
+        timer2.runAll()
+        timer2.runAll()
         assertEquals(2, calls)
         assertNull(t2.nationalPercent)
     }
@@ -237,7 +261,7 @@ class CoverageTest {
         var tracker: CoverageTracker? = null
         // 폴링 도중(응답을 받는 순간) 새 트립이 시작된 상황
         val api = FakeApi(listOf({ tracker!!.onTripStarted(); done("counted", newKm = 1.0, after = 0.5) }), { 1.0 })
-        tracker = CoverageTracker(api, direct, { "v" }, poller(api), sleep = {})
+        tracker = CoverageTracker(api, direct, { "v" }, poller(api), schedule = { _, _ -> })
         tracker.onTripEnded("old")
         assertEquals("이전 트립 결과는 반영되지 않는다", MatchingLine.None, tracker.matching)
     }
@@ -245,7 +269,7 @@ class CoverageTest {
     @Test
     fun 종료_줄이_떠_있다가_새_트립이_시작되면_사라진다() {
         val api = FakeApi(listOf({ done("counted", newKm = 1.0, after = 0.5) }), { 1.0 })
-        val t = CoverageTracker(api, direct, { "v" }, poller(api), sleep = {})
+        val t = CoverageTracker(api, direct, { "v" }, poller(api), schedule = { _, _ -> })
         t.onTripEnded("t1")
         assertTrue(t.matching is MatchingLine.Counted)
         t.onTripStarted()

@@ -16,8 +16,8 @@ class RegionsTest {
 
     @Test
     fun 대기_화면_한_줄은_시군구와_인구감소지역_도감이다() {
-        assertEquals("시군구 2/229 · 인구감소지역 0/89", formatRegionsLine(RegionsSummary(2, 229, 0, 89), lineFmt))
-        assertEquals("시군구 31/229 · 인구감소지역 12/89", formatRegionsLine(RegionsSummary(31, 229, 12, 89), lineFmt))
+        assertEquals("시군구 2/229 · 인구감소지역 0/92", formatRegionsLine(RegionsSummary(2, 229, 0, 92), lineFmt))
+        assertEquals("시군구 31/229 · 인구감소지역 12/92", formatRegionsLine(RegionsSummary(31, 229, 12, 92), lineFmt))
         assertNull(formatRegionsLine(null, lineFmt))
     }
 
@@ -42,12 +42,12 @@ class RegionsTest {
 
     @Test
     fun 서버_응답을_읽고_캐시_문자열로_왕복한다() {
-        val json = """{"total":229,"colored":2,"byLevel":{"1":1,"2":1,"3":0},"depop":{"total89":89,"colored89":0,"total92":92,"colored92":0},
+        val json = """{"total":229,"colored":2,"byLevel":{"1":1,"2":1,"3":0},"depop":{"total":92,"colored":0,"total89":89,"colored89":0},
             "lastEvent":{"kind":"visit","code":"11140","name":"중구","sidoName":"서울특별시","at":"2026-11-09T01:00:00.000Z","tripId":"t"},"attribution":"x"}"""
         val s = RegionsSummary.fromJson(json)
-        assertEquals(RegionsSummary(2, 229, 0, 89, RegionEvent("visit", "중구", 1_794_186_000_000L)), s)
+        assertEquals(RegionsSummary(2, 229, 0, 92, RegionEvent("visit", "중구", 1_794_186_000_000L)), s)
         assertEquals(s, RegionsSummary.decode(s.encode()))
-        val none = RegionsSummary.fromJson("""{"total":229,"colored":0,"depop":{"total89":89,"colored89":0},"lastEvent":null}""")
+        val none = RegionsSummary.fromJson("""{"total":229,"colored":0,"depop":{"total":92,"colored":0},"lastEvent":null}""")
         assertNull(none.lastEvent)
         assertEquals(none, RegionsSummary.decode(none.encode()))
         assertNull(RegionsSummary.decode("broken"))
@@ -65,30 +65,33 @@ class RegionsTest {
     }
 
     private fun tracker(api: CoverageApi, store: KeyValueStore? = null) =
-        CoverageTracker(api, direct, { "v" }, MatchingPoller(api, {}, 3_000, 60_000, { 0L }), sleep = {}, cache = store)
+        CoverageTracker(api, direct, { "v" }, MatchingPoller(api, {}, 3_000, 60_000, { 0L }), schedule = { _, _ -> }, cache = store)
 
     @Test
     fun 서비스_시작_때_도감을_받아_캐시하고_실패해도_저장값이_남는다() {
         val store = MapStore()
-        val api = Api({ RegionsSummary(2, 229, 1, 89) })
+        val api = Api({ RegionsSummary(2, 229, 1, 92) })
         val t = tracker(api, store)
         assertNull(t.regions)
-        t.refreshNational()
-        assertEquals(RegionsSummary(2, 229, 1, 89), t.regions)
+        t.refreshRegions()
+        assertEquals(RegionsSummary(2, 229, 1, 92), t.regions)
         // 다시 뜬 프로세스: 서버가 죽어 있어도 저장값이 보인다. 실패하면 30초 뒤 1회만 다시 시도한다(2번 호출).
         val down = Api({ throw IOException("down") })
-        val t2 = tracker(down, store)
-        assertEquals(RegionsSummary(2, 229, 1, 89), t2.regions)
-        t2.refreshNational()
+        val queued = mutableListOf<() -> Unit>()
+        val t2 = CoverageTracker(down, direct, { "v" }, MatchingPoller(down, {}, 3_000, 60_000, { 0L }), { _, b -> queued += b }, store)
+        assertEquals(RegionsSummary(2, 229, 1, 92), t2.regions)
+        t2.refreshRegions()
+        assertEquals(1, down.regionCalls)
+        queued.toList().also { queued.clear() }.forEach { it() }
         assertEquals(2, down.regionCalls)
-        assertEquals(RegionsSummary(2, 229, 1, 89), t2.regions)
+        assertEquals(RegionsSummary(2, 229, 1, 92), t2.regions)
     }
 
     @Test
     fun 종료_결과의_처음_지난_곳은_매칭이_집계하지_않아도_보이고_끝나면_도감을_다시_받는다() {
         val matching = MatchingResponse("done", null, "skipped", "too_short", 0.0, 0.0, 0.0, listOf("종로구", "중구"))
         var n = 0
-        val api = Api({ RegionsSummary(++n, 229, 0, 89) }, matching)
+        val api = Api({ RegionsSummary(++n, 229, 0, 92) }, matching)
         val t = tracker(api)
         t.onTripEnded("t1")
         assertEquals(listOf("종로구", "중구"), t.newRegions)

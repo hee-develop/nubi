@@ -194,7 +194,8 @@ class CoverageTracker(
     private val executor: Executor,
     private val vehicleId: () -> String?,
     private val poller: MatchingPoller = MatchingPoller(api),
-    private val sleep: (Long) -> Unit = { Thread.sleep(it) },
+    /** 지연 예약. 기본은 데몬 스케줄러 스레드 하나(콜백은 곧바로 [executor]로 넘어가 짧게 끝난다). 테스트는 가짜를 꽂는다. */
+    private val schedule: (Long, () -> Unit) -> Unit = defaultSchedule,
     private val cache: KeyValueStore? = null,
     private val retryDelayMs: Long = 30_000,
 ) {
@@ -252,23 +253,20 @@ class CoverageTracker(
         refreshNational()
     }
 
-    /** 서비스 시작 때. 차량 ID가 아직 없으면 최대 [waitIdMs] 기다린다. 실패하면 캐시 값을 그대로 두고(크래시 금지) 30초 뒤 1회만 다시 시도한다. */
-    fun refreshNational(waitIdMs: Long = 15_000) {
+    /** 서비스 시작 때 전국 완료율을 받는다. 차량 ID가 아직 없으면 최대 [waitIdMs] 동안 1초 간격으로 **예약**해 다시 본다(executor를 붙잡고 자지 않는다). */
+    fun refreshNational(waitIdMs: Long = 15_000) = refreshWhenIdKnown(waitIdMs, 0L, ::fetchNational)
+
+    /** 서비스 시작 때 시군구 도감을 받는다(재시도 규칙은 [refreshNational]과 같다). */
+    fun refreshRegions(waitIdMs: Long = 15_000) = refreshWhenIdKnown(waitIdMs, 0L, ::fetchRegions)
+
+    /** 차량 ID가 있으면 [fetch]를 돌리고, 실패하면 [retryDelayMs] 뒤 1회만 다시 예약한다. 대기·재시도 모두 [schedule]로 예약하고 실제 호출만 [executor]에서 한다. */
+    private fun refreshWhenIdKnown(waitIdMs: Long, waited: Long, fetch: (String) -> Boolean) {
         run {
-            var waited = 0L
-            var id = vehicleId()
-            while (id == null && waited < waitIdMs) {
-                sleep(1_000)
-                waited += 1_000
-                id = vehicleId()
-            }
-            if (id != null && !fetchNational(id)) {
-                sleep(retryDelayMs)
-                fetchNational(id)
-            }
-            if (id != null && !fetchRegions(id)) {
-                sleep(retryDelayMs)
-                fetchRegions(id)
+            val id = vehicleId()
+            if (id == null) {
+                if (waited < waitIdMs) schedule(ID_POLL_MS) { refreshWhenIdKnown(waitIdMs, waited + ID_POLL_MS, fetch) }
+            } else if (!fetch(id)) {
+                schedule(retryDelayMs) { run { fetch(id) } }
             }
         }
     }
@@ -327,6 +325,11 @@ class CoverageTracker(
     }
 
     private companion object {
+        const val ID_POLL_MS = 1_000L
+        val timer: java.util.concurrent.ScheduledExecutorService by lazy {
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "nubi-coverage-timer").apply { isDaemon = true } }
+        }
+        val defaultSchedule: (Long, () -> Unit) -> Unit = { delay, block -> timer.schedule(block, delay, java.util.concurrent.TimeUnit.MILLISECONDS) }
         const val KEY_NATIONAL = "nationalPercent"
         const val KEY_REGIONS = "regionsSummary"
     }

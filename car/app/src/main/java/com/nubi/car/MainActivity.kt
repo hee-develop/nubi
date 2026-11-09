@@ -24,11 +24,13 @@ import com.nubi.car.trip.TripEngine
 import com.nubi.car.trip.TripEngineProvider
 import com.nubi.car.trip.TripState
 import com.nubi.car.trip.UploadKind
+import com.nubi.car.trip.foldLines
 import com.nubi.car.trip.formatMatchingLine
 import com.nubi.car.trip.formatNationalLine
 import com.nubi.car.trip.formatNewRegions
 import com.nubi.car.trip.formatRegionEvent
 import com.nubi.car.trip.formatRegionsLine
+import com.nubi.car.trip.limitText
 import com.nubi.car.trip.numbersVisible
 
 /**
@@ -53,6 +55,7 @@ class MainActivity : Activity() {
     private lateinit var permissionCard: LinearLayout
     private lateinit var permissionConfirm: Button
     private lateinit var permissionSettings: Button
+    private var rootLayout: LinearLayout? = null
     private val handler = Handler(Looper.getMainLooper())
 
     private var car: Car? = null
@@ -185,9 +188,36 @@ class MainActivity : Activity() {
         maxStringLength = r.maxRestrictedStringLength
     }
 
-    /** DO 중에는 규제 길이를 넘는 문자열을 자른다. */
-    private fun limited(text: String): String =
-        if (distractionOptimized && maxStringLength > 0 && text.length > maxStringLength) text.take(maxStringLength) else text
+    /** 상태 문구: DO 중 규제 길이를 넘으면 자른다(항상 보여야 한다). */
+    private fun limited(text: String): String = limitText(text, distractionOptimized, maxStringLength, statusLine = true)!!
+
+    /** 숫자·이름 줄: 규제 길이를 넘으면 중간에서 자르지 않고 줄을 숨긴다. [text]가 null이어도 숨긴다. */
+    private fun setLine(view: TextView, text: String?) {
+        val t = text?.let { limitText(it, distractionOptimized, maxStringLength, statusLine = false) }
+        view.visibility = if (t == null) View.GONE else View.VISIBLE
+        view.text = t ?: ""
+    }
+
+    /**
+     * 높이가 모자라면(가로 2-window 등) 낮은 순위 줄부터 접는다. 순위: 상태(상태·건강·저장·업로드) > 집계 > 시군구 > 처음 지난 곳 > 이벤트 > 전국 > 샘플 > 거리.
+     * 이미 보이기로 정한 줄만 대상이다. 화면 크기가 아직 정해지지 않았으면(0) 아무것도 접지 않는다.
+     */
+    private fun foldToFit() {
+        val root = rootLayout ?: return
+        val width = root.width - root.paddingLeft - root.paddingRight
+        val available = root.height - root.paddingTop - root.paddingBottom
+        if (width <= 0 || available <= 0) return
+        val fixed = listOf<View>(restartButton, permissionCard).filter { it.visibility == View.VISIBLE }
+        val ordered = listOf(stateText, healthText, storageText, uploadText, matchingText, regionsText, newRegionsText, eventText, nationalText, samplesText, distanceText)
+        fun h(v: View): Int {
+            if (v.visibility != View.VISIBLE) return 0
+            v.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+            return v.measuredHeight
+        }
+        val reserved = fixed.sumOf { h(it) }
+        val show = foldLines(ordered.map { h(it) }, available - reserved, pinned = 4)
+        ordered.forEachIndexed { i, v -> if (!show[i]) v.visibility = View.GONE }
+    }
 
     // 그리기 ------------------------------------------------------------------
 
@@ -225,14 +255,11 @@ class MainActivity : Activity() {
         storageText.text = limited(storage.joinToString(" · "))
         // 숫자(완료율·새 도로·샘플·거리)는 기어가 P일 때만 보인다(사양 02 7장). 기어를 못 읽는 차량은 기록 중이 아닐 때만. 상태 문구와 마지막 업로드 결과는 항상 보인다.
         val showNumbers = numbersVisible(s.gear, s.state)
-        samplesText.visibility = if (showNumbers) View.VISIBLE else View.GONE
-        distanceText.visibility = if (showNumbers) View.VISIBLE else View.GONE
-        samplesText.text = limited(getString(R.string.samples_format, s.sampleCount))
-        distanceText.text = limited(getString(R.string.distance_format, s.distanceM))
+        setLine(samplesText, if (showNumbers) getString(R.string.samples_format, s.sampleCount) else null)
+        setLine(distanceText, if (showNumbers) getString(R.string.distance_format, s.distanceM) else null)
         // 도로 색칠 결과: 전국 완료율은 대기·종료 화면, 이번 주행 결과는 종료 화면. 둘 다 숫자라 기어 규칙을 따른다.
         val national = if (showNumbers) formatNationalLine(coverage.nationalPercent, getString(R.string.national_percent)) else null
-        nationalText.visibility = if (national == null) View.GONE else View.VISIBLE
-        nationalText.text = limited(national ?: "")
+        setLine(nationalText, national)
         val matching = if (showNumbers && s.state == TripState.ENDED) {
             formatMatchingLine(
                 coverage.matching,
@@ -244,22 +271,18 @@ class MainActivity : Activity() {
         } else {
             null
         }
-        matchingText.visibility = if (matching == null) View.GONE else View.VISIBLE
-        matchingText.text = limited(matching ?: "")
+        setLine(matchingText, matching)
         // 시군구 도감(사양 03 6장): 대기·종료 화면 한 줄, 종료 화면 '처음 지난 곳', 마지막 방문·숙박 이벤트(24시간 내). 모두 숫자·문구라 기어 P 규칙을 따른다.
         val regionsLine = if (showNumbers) formatRegionsLine(coverage.regions, getString(R.string.regions_line)) else null
-        regionsText.visibility = if (regionsLine == null) View.GONE else View.VISIBLE
-        regionsText.text = limited(regionsLine ?: "")
+        setLine(regionsText, regionsLine)
         val newRegions = if (showNumbers && s.state == TripState.ENDED) formatNewRegions(coverage.newRegions, getString(R.string.regions_new)) else null
-        newRegionsText.visibility = if (newRegions == null) View.GONE else View.VISIBLE
-        newRegionsText.text = limited(newRegions ?: "")
+        setLine(newRegionsText, newRegions)
         val event = if (showNumbers) {
             formatRegionEvent(coverage.regions?.lastEvent, engine.nowMillis(), getString(R.string.region_event_visit), getString(R.string.region_event_stay))
         } else {
             null
         }
-        eventText.visibility = if (event == null) View.GONE else View.VISIBLE
-        eventText.text = limited(event ?: "")
+        setLine(eventText, event)
         val upload = when (s.upload.kind) {
             UploadKind.NONE -> getString(R.string.upload_none)
             UploadKind.OK -> getString(R.string.upload_ok, s.upload.points)
@@ -269,6 +292,7 @@ class MainActivity : Activity() {
         }
         // 보류는 사용자가 알아야 하므로 '마지막 업로드:' 접두 없이 그대로 보인다.
         uploadText.text = limited(if (s.upload.kind == UploadKind.HELD) upload else getString(R.string.upload_format, upload))
+        foldToFit()
     }
 
     private fun buildUi(): View {
@@ -311,6 +335,7 @@ class MainActivity : Activity() {
             addView(permissionSettings)
         }
         return LinearLayout(this).apply {
+            rootLayout = this
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.parseColor("#14181F"))
             setPadding(48, 48, 48, 48)

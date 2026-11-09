@@ -7,17 +7,17 @@ import java.util.Locale
 /** 시군구 방문·숙박 이벤트(서버 `lastEvent`). [atMs]는 서버가 기록한 시각(다음 트립 시작)의 epoch ms. */
 data class RegionEvent(val kind: String, val name: String, val atMs: Long)
 
-/** `GET /regions/summary`의 필요한 부분(사양 03 6장). 인구감소지역 분모는 서버가 주는 89곳 통계 기준이다. */
+/** `GET /regions/summary`의 필요한 부분(사양 03 6장). 인구감소지역 분모는 현행 지정 92곳(서버 `depop.total`, 89곳은 통계 인용용 참고 필드)이다. */
 data class RegionsSummary(
     val colored: Int,
     val total: Int,
-    val colored89: Int,
-    val total89: Int,
+    val coloredDepop: Int,
+    val totalDepop: Int,
     val lastEvent: RegionEvent? = null,
 ) {
     /** 캐시(SharedPreferences) 직렬화. 이름에 쓰지 않는 `|`로 나눈다. */
     fun encode(): String =
-        listOf(colored, total, colored89, total89, lastEvent?.kind ?: "", lastEvent?.name?.replace("|", " ") ?: "", lastEvent?.atMs ?: 0L)
+        listOf(colored, total, coloredDepop, totalDepop, lastEvent?.kind ?: "", lastEvent?.name?.replace("|", " ") ?: "", lastEvent?.atMs ?: 0L)
             .joinToString("|")
 
     companion object {
@@ -42,17 +42,17 @@ data class RegionsSummary(
             return RegionsSummary(
                 colored = o.getInt("colored"),
                 total = o.getInt("total"),
-                colored89 = depop.getInt("colored89"),
-                total89 = depop.getInt("total89"),
+                coloredDepop = depop.getInt("colored"),
+                totalDepop = depop.getInt("total"),
                 lastEvent = ev?.let { RegionEvent(it.getString("kind"), it.getString("name"), Instant.parse(it.getString("at")).toEpochMilli()) },
             )
         }
     }
 }
 
-/** 대기·종료 화면 한 줄: `시군구 {colored}/{total} · 인구감소지역 {colored89}/{total89}`. 값이 없으면(조회 실패) null이라 생략한다. */
+/** 대기·종료 화면 한 줄: `시군구 {colored}/{total} · 인구감소지역 {coloredDepop}/{totalDepop}`. 값이 없으면(조회 실패) null이라 생략한다. */
 fun formatRegionsLine(s: RegionsSummary?, format: String): String? =
-    s?.let { String.format(Locale.US, format, it.colored, it.total, it.colored89, it.total89) }
+    s?.let { String.format(Locale.US, format, it.colored, it.total, it.coloredDepop, it.totalDepop) }
 
 /** 종료 화면 `처음 지난 곳: {name}(, {name})` 최대 3개. 없으면 null. */
 fun formatNewRegions(names: List<String>, format: String): String? =
