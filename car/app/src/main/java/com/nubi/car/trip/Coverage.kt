@@ -19,6 +19,8 @@ data class MatchingResponse(
     val newKm: Double,
     val percentBefore: Double,
     val percentAfter: Double,
+    /** 이번 트립으로 처음 칠한 시군구 이름(사양 03 4장 `regions`). */
+    val newRegions: List<String> = emptyList(),
 )
 
 interface CoverageApi {
@@ -27,6 +29,9 @@ interface CoverageApi {
 
     /** 전국 완료율(%). */
     fun getNationalPercent(vehicleId: String): Double
+
+    /** 시군구 도감 요약(사양 03 5장). 구현하지 않으면 값 없음. */
+    fun getRegions(vehicleId: String): RegionsSummary? = null
 }
 
 class HttpCoverageApi(private val baseUrl: String) : CoverageApi {
@@ -48,6 +53,7 @@ class HttpCoverageApi(private val baseUrl: String) : CoverageApi {
                 newKm = r?.optDouble("newKm", 0.0) ?: 0.0,
                 percentBefore = r?.optDouble("nationalPercentBefore", 0.0) ?: 0.0,
                 percentAfter = r?.optDouble("nationalPercentAfter", 0.0) ?: 0.0,
+                newRegions = r?.optJSONObject("regions")?.optJSONArray("newPassedNames")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList(),
             )
         } catch (e: Exception) {
             throw IOException("응답 형식 오류 matching")
@@ -60,6 +66,15 @@ class HttpCoverageApi(private val baseUrl: String) : CoverageApi {
             JSONObject(text).getDouble("nationalPercent")
         } catch (e: Exception) {
             throw IOException("응답 형식 오류 summary")
+        }
+    }
+
+    override fun getRegions(vehicleId: String): RegionsSummary {
+        val text = getText(baseUrl, "/regions/summary?vehicleId=${enc(vehicleId)}")
+        return try {
+            RegionsSummary.fromJson(text)
+        } catch (e: Exception) {
+            throw IOException("응답 형식 오류 regions")
         }
     }
 
@@ -86,10 +101,10 @@ sealed interface MatchingLine {
     /** 아직 없음(트립 전, 폴링 중, 시간 초과). 화면에 아무것도 보이지 않는다. */
     data object None : MatchingLine
 
-    data class Counted(val newKm: Double, val percentAfter: Double, val delta: Double) : MatchingLine
+    data class Counted(val newKm: Double, val percentAfter: Double, val delta: Double, val newRegions: List<String> = emptyList()) : MatchingLine
 
-    /** 집계되지 않음. [reason]은 debug 빌드에서만 괄호로 보인다. */
-    data class NotCounted(val reason: String) : MatchingLine
+    /** 집계되지 않음. [reason]은 debug 빌드에서만 괄호로 보인다. 시군구는 집계와 별개로 판정되므로 [newRegions]는 있을 수 있다. */
+    data class NotCounted(val reason: String, val newRegions: List<String> = emptyList()) : MatchingLine
 }
 
 /**
@@ -127,8 +142,8 @@ class MatchingPoller(
         if (r == null) return null
         return when (r.status) {
             "done" -> when (r.outcome) {
-                "counted" -> MatchingLine.Counted(r.newKm, r.percentAfter, r.percentAfter - r.percentBefore)
-                else -> MatchingLine.NotCounted(r.reason ?: r.outcome ?: "done")
+                "counted" -> MatchingLine.Counted(r.newKm, r.percentAfter, r.percentAfter - r.percentBefore, r.newRegions)
+                else -> MatchingLine.NotCounted(r.reason ?: r.outcome ?: "done", r.newRegions)
             }
             "failed" -> if (r.error?.startsWith("permanent") == true) MatchingLine.NotCounted(r.error) else null
             else -> null
@@ -195,6 +210,23 @@ class CoverageTracker(
     }
         private set
 
+    /** 시군구 도감 요약. 마지막으로 성공한 값을 캐시해 오프라인에서도 보인다(전국 완료율과 같은 패턴). */
+    @Volatile
+    var regions: RegionsSummary? = try {
+        RegionsSummary.decode(cache?.getString(KEY_REGIONS))
+    } catch (t: Throwable) {
+        null
+    }
+        private set
+
+    /** 이번 종료 화면의 `처음 지난 곳`. */
+    val newRegions: List<String>
+        get() = when (val m = matching) {
+            is MatchingLine.Counted -> m.newRegions
+            is MatchingLine.NotCounted -> m.newRegions
+            MatchingLine.None -> emptyList()
+        }
+
     @Volatile
     private var generation = 0
 
@@ -207,6 +239,8 @@ class CoverageTracker(
             if (gen == generation) {
                 matching = line
                 if (line is MatchingLine.Counted) setNational(line.percentAfter)
+                // 방문·숙박은 이 트립의 Start 때 확정됐을 수 있으니(사양 03 4장) 매칭이 끝난 뒤 도감을 다시 받는다.
+                if (line != MatchingLine.None) vehicleId()?.let { fetchRegions(it) }
             }
         }
     }
@@ -232,7 +266,27 @@ class CoverageTracker(
                 sleep(retryDelayMs)
                 fetchNational(id)
             }
+            if (id != null && !fetchRegions(id)) {
+                sleep(retryDelayMs)
+                fetchRegions(id)
+            }
         }
+    }
+
+    private fun fetchRegions(id: String): Boolean = try {
+        val s = api.getRegions(id)
+        if (s != null) {
+            regions = s
+            try {
+                cache?.putString(KEY_REGIONS, s.encode())
+            } catch (t: Throwable) {
+                Log.w("NubiCoverage", "시군구 요약 저장 실패: ${t.javaClass.simpleName}")
+            }
+        }
+        true
+    } catch (e: Exception) {
+        Log.w("NubiCoverage", "시군구 요약 조회 실패: ${e.javaClass.simpleName}")
+        false
     }
 
     private fun fetchNational(id: String): Boolean = try {
@@ -274,5 +328,6 @@ class CoverageTracker(
 
     private companion object {
         const val KEY_NATIONAL = "nationalPercent"
+        const val KEY_REGIONS = "regionsSummary"
     }
 }

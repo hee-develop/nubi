@@ -26,6 +26,9 @@ import com.nubi.car.trip.TripState
 import com.nubi.car.trip.UploadKind
 import com.nubi.car.trip.formatMatchingLine
 import com.nubi.car.trip.formatNationalLine
+import com.nubi.car.trip.formatNewRegions
+import com.nubi.car.trip.formatRegionEvent
+import com.nubi.car.trip.formatRegionsLine
 import com.nubi.car.trip.numbersVisible
 
 /**
@@ -40,6 +43,9 @@ class MainActivity : Activity() {
     private lateinit var uploadText: TextView
     private lateinit var nationalText: TextView
     private lateinit var matchingText: TextView
+    private lateinit var newRegionsText: TextView
+    private lateinit var regionsText: TextView
+    private lateinit var eventText: TextView
     private lateinit var coverage: CoverageTracker
     private lateinit var healthText: TextView
     private lateinit var storageText: TextView
@@ -240,6 +246,20 @@ class MainActivity : Activity() {
         }
         matchingText.visibility = if (matching == null) View.GONE else View.VISIBLE
         matchingText.text = limited(matching ?: "")
+        // 시군구 도감(사양 03 6장): 대기·종료 화면 한 줄, 종료 화면 '처음 지난 곳', 마지막 방문·숙박 이벤트(24시간 내). 모두 숫자·문구라 기어 P 규칙을 따른다.
+        val regionsLine = if (showNumbers) formatRegionsLine(coverage.regions, getString(R.string.regions_line)) else null
+        regionsText.visibility = if (regionsLine == null) View.GONE else View.VISIBLE
+        regionsText.text = limited(regionsLine ?: "")
+        val newRegions = if (showNumbers && s.state == TripState.ENDED) formatNewRegions(coverage.newRegions, getString(R.string.regions_new)) else null
+        newRegionsText.visibility = if (newRegions == null) View.GONE else View.VISIBLE
+        newRegionsText.text = limited(newRegions ?: "")
+        val event = if (showNumbers) {
+            formatRegionEvent(coverage.regions?.lastEvent, engine.nowMillis(), getString(R.string.region_event_visit), getString(R.string.region_event_stay))
+        } else {
+            null
+        }
+        eventText.visibility = if (event == null) View.GONE else View.VISIBLE
+        eventText.text = limited(event ?: "")
         val upload = when (s.upload.kind) {
             UploadKind.NONE -> getString(R.string.upload_none)
             UploadKind.OK -> getString(R.string.upload_ok, s.upload.points)
@@ -264,6 +284,9 @@ class MainActivity : Activity() {
         uploadText = text(18f)
         nationalText = text(22f)
         matchingText = text(22f, bold = true)
+        newRegionsText = text(22f, bold = true)
+        regionsText = text(22f)
+        eventText = text(22f)
         healthText = text(20f, bold = true)
         storageText = text(18f)
         restartButton = Button(this).apply {
@@ -297,6 +320,9 @@ class MainActivity : Activity() {
             addView(uploadText)
             addView(matchingText)
             addView(nationalText)
+            addView(newRegionsText)
+            addView(regionsText)
+            addView(eventText)
             addView(storageText)
             addView(healthText)
             addView(restartButton)
