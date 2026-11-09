@@ -101,3 +101,41 @@ SecurityException: Starting FGS with type location ... requires permissions:
 ## 6. 주입 도구 (debug 전용)
 
 `nubi-debug://signal?reset=1&real=1&gear=P|R|N|D&loc=<lat>,<lon>[,<heading>]&gpx=<파일명>&now=<epoch ms>&flush=1` (`android.permission.DUMP` 호출자만, 속도 주입은 제거됨). `reset=1`은 상태·큐를 비우고 **실제 위치 수신을 끈다**(이후 `loc`·`gpx`만 받는다. 다시 켜려면 `real=1`). 끄는 일은 즉시, 비우는 일은 엔진 큐로 처리하므로 reset 뒤에 시작한 gpx 샘플이 비우기보다 먼저 처리되지 않는다(이전에는 reset이 실제 위치를 다시 켜 `gpx`와 순서가 엇갈릴 수 있었다). `now`는 기어 처리 뒤에 시계를 옮기며(`gear=P&now=+6분`으로 P 5분 종료를 건너뜀) 상태기계에 넘기는 elapsedRealtime·벽시계에만 더해지고 서버 재시도 간격·VIN 대기에는 쓰이지 않는다. 엔진의 `setClock`·`reset`·`flush`는 `BuildConfig.DEBUG`일 때만 동작한다.
+
+## 7. 맵매칭 인프라 실측 (feat/02, 2026-11-09, Apple Silicon arm64)
+
+설치: Colima 0.10.3(`--cpu 4 --memory 6 --disk 40`, aarch64 VM, Docker 서버 29.5.2), docker CLI 29.9.3, osmium-tool 1.19.1(도로 DB 빌드용, brew로 추가 설치). 모두 brew.
+
+| 항목 | 값 |
+|---|---|
+| Valhalla 이미지 | `ghcr.io/gis-ops/docker-valhalla/valhalla:3.5.1`(멀티아크, arm64 매니페스트 확인. 태그 목록에 3.5.1이 가장 새 버전 번호라 고정, `latest` 미사용) |
+| pbf | `south-korea-latest.osm.pbf` 291,304,615 B(278 MB), OSM 타임스탬프 2026-11-08T21:21:00Z, way 3,859,299개. 다운로드 약 2분 40초 |
+| 타일 빌드 | 약 3분(컨테이너 생성부터 `/status` 200까지 183초). `server/data/valhalla` 1.7 GB = `valhalla_tiles/` 746 MB + `valhalla_tiles.tar` 669 MB + admin 8 MB(디렉터리는 빌드 중간 산출물이지만 이미지가 둘 다 남김). 타일 595개 |
+| 컨테이너 메모리 | 빌드 중 최대 약 4.3 GiB(VM 5.77 GiB 중), 서빙 대기 약 110~155 MiB |
+| 도로 DB | `roads-202611.sqlite` 351 MB(350,756,864 B), 빌드 11.4초(osmium 필터·export 포함), 최대 RSS 2.1 GB |
+| 멱등성 | `setup-valhalla.sh` 재실행 0.3초(기존 컨테이너 재사용), `valhalla-up.sh` 정지 상태에서 2.2초 |
+
+도로 DB 통계(전국, 사양 3-2 등급): way 734,533개, road_key 79,478개(`nm:` 78,811), 총 길이 227,980 km, 이름·번호 있는 길이 140,444 km(분모). 이름·번호 없는 way 377,897개(51.4%), 길이로 38.4%(87,536 km).
+
+| highway | km | way |
+|---|---|---|
+| residential | 76,048 | 351,321 |
+| tertiary | 41,363 | 82,061 |
+| unclassified | 37,927 | 109,413 |
+| secondary | 25,538 | 49,911 |
+| primary | 15,622 | 33,399 |
+| trunk | 11,046 | 25,207 |
+| motorway | 10,656 | 20,414 |
+| trunk_link | 3,368 | 17,096 |
+| motorway_link | 2,997 | 11,604 |
+| primary_link | 1,584 | 13,309 |
+| secondary_link | 1,093 | 11,155 |
+| tertiary_link | 740 | 9,643 |
+
+동명이로: `nm:` 키 78,811개 중 way 중심점 범위의 대각선이 50 km를 넘는 키가 3,668개(4.7%, 해당 way 50,574개). 사양 6-1의 '알려진 한계' 규모.
+
+스모크(E2E GPX 30점, `POST /trace_attributes`, 사양 3-1 파라미터): 응답 `server/test/fixtures/valhalla-e2e-north.json`. edge 17개·합계 851 m(GPS 725 m), unmatched 1점(첫 점), matched 29점. 문제·주의:
+- GPX 궤적(경도 126.978 고정)이 세종대로 차로 위가 아니라 인접 골목(세종대로20·22길, 청계천로, 종로1길 등)으로 붙었다. 세종대로 이름이 붙은 edge는 way 378453707 하나(23 m)뿐이고 이 way는 `ref=31`이 있어 6-1 규칙으로 road_key가 `nr:31`('국도 31호선')이 된다. 종로 way(474532059)도 `nr:6`. 따라서 **사양 8장 E2E 단언 'coverage/roads에 displayName이 세종대로를 포함'은 이 궤적으로는 성립하지 않는다**(`nm:세종대로` road는 DB에 있으나 궤적이 지나지 않음). 궤적 좌표를 세종대로 차로 중심선으로 옮기거나 단언을 바꿔야 한다.
+- edge 중 way 221974030·1551642275(`service_other`)는 도로 DB(service 제외)에 없어 `ignored_ways`로 센다. 이름 없는 way(`unnamed:*`) 5개(primary_link 2·residential 3)는 분자·분모에서 빠진다.
+- Valhalla `edge.length` 단위는 km(응답 `units: kilometers`)다. 미터 환산 필요.
+- 타일 빌드 중 북한 행정구역 relation 경고(`missing way member`)가 나오나 무시해도 된다.
