@@ -235,21 +235,19 @@ export const tripsRoutes = (db: Db, onEnded: (tripId: string) => void = () => {}
       return c.json({ ...summary, points }, 200);
     })
     .get('/', (c) => {
+      // 전체 열거 차단: 차량 ID 없이 목록을 주지 않는다(공개 배포 전 인증·소유권 확인 필수 — 사양 03 10장).
       const vehicleId = c.req.query('vehicleId');
+      if (!vehicleId) return c.json({ error: 'vehicleId_required' as const }, 400);
       const limitRaw = Number(c.req.query('limit') ?? 50);
       const limit = Number.isInteger(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
-      const rows = (
-        vehicleId
-          ? // alias(UUID로 대체해 올린 트립)로 연결된 트립도 함께 돌려준다.
-            db
-              .prepare(
-                summaryQuery(
-                  `SELECT * FROM trips WHERE vehicle_id = ? OR vehicle_id IN (SELECT alias_id FROM vehicle_alias WHERE vehicle_id = ?)
-                   ORDER BY started_at DESC, created_at DESC LIMIT ?`,
-                ),
-              )
-              .all(vehicleId, vehicleId, limit)
-          : db.prepare(summaryQuery('SELECT * FROM trips ORDER BY started_at DESC, created_at DESC LIMIT ?')).all(limit)
-      ) as TripRow[];
+      // alias(UUID로 대체해 올린 트립)로 연결된 트립도 함께 돌려준다.
+      const rows = db
+        .prepare(
+          summaryQuery(
+            `SELECT * FROM trips WHERE vehicle_id = ? OR vehicle_id IN (SELECT alias_id FROM vehicle_alias WHERE vehicle_id = ?)
+             ORDER BY started_at DESC, created_at DESC LIMIT ?`,
+          ),
+        )
+        .all(vehicleId, vehicleId, limit) as TripRow[];
       return c.json({ trips: rows.map(toSummary) }, 200);
     });

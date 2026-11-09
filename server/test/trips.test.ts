@@ -75,6 +75,12 @@ describe('trips', () => {
   it('잘못된 body는 400, 없는 트립은 404', async () => {
     const app = newApp();
     expect((await app.request('/trips', json({ vehicleId: 'v1' }))).status).toBe(400);
+    // 전체 열거 차단: vehicleId 없이 목록을 요청하면 400(공개 배포 전 인증·소유권 확인은 별도 필수)
+    for (const path of ['/trips', '/trips?limit=5', '/trips?vehicleId=']) {
+      const res = await app.request(path);
+      expect(res.status, path).toBe(400);
+      expect(await res.json()).toEqual({ error: 'vehicleId_required' });
+    }
     expect((await app.request('/trips', json({ localId: 'a', vehicleId: 'v1', driverId: 'v1', startedAt: 'x' }))).status).toBe(400);
     expect((await app.request('/trips', { method: 'POST', body: 'not json' })).status).toBe(400);
     const tripId = await startTrip(app);
@@ -94,7 +100,7 @@ describe('trips', () => {
     expect(b.status).toBe(200);
     const idA = ((await a.json()) as { tripId: string }).tripId;
     expect(((await b.json()) as { tripId: string }).tripId).toBe(idA);
-    expect(((await (await app.request('/trips')).json()) as { trips: unknown[] }).trips).toHaveLength(1);
+    expect(((await (await app.request('/trips?vehicleId=v1')).json()) as { trips: unknown[] }).trips).toHaveLength(1);
     const detail = (await (await app.request(`/trips/${idA}`)).json()) as { localId: string };
     expect(detail.localId).toBe('local-1');
   });
@@ -155,7 +161,7 @@ describe('trips', () => {
     const late = await app.request(`/trips/${tripId}/points`, json({ points: [point(2), point(3)] }));
     expect(await late.json()).toEqual({ accepted: 2, duplicated: 0 });
     const detail = (await (await app.request(`/trips/${tripId}`)).json()) as { pointCount: number; distanceM: number; points: unknown[] };
-    const list = (await (await app.request('/trips')).json()) as { trips: { pointCount: number; distanceM: number }[] };
+    const list = (await (await app.request('/trips?vehicleId=v1')).json()) as { trips: { pointCount: number; distanceM: number }[] };
     expect(detail.pointCount).toBe(4);
     expect(detail.points).toHaveLength(4);
     expect(list.trips[0].pointCount).toBe(4);
@@ -175,7 +181,7 @@ describe('trips', () => {
         await counted.request(`/trips/${tripId}/points`, json({ points: [point(0), point(1)] }));
       }
       prepare.mockClear();
-      const res = await counted.request('/trips?limit=50');
+      const res = await counted.request('/trips?vehicleId=v1&limit=50');
       const body = (await res.json()) as { trips: { pointCount: number }[] };
       expect(body.trips.every((t) => t.pointCount === 2)).toBe(true);
       return prepare.mock.calls.length;

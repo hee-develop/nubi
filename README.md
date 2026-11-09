@@ -16,3 +16,7 @@ Pleos Connect(현대차그룹 AAOS 기반 인포테인먼트) 차량 앱 프로�
 - 폰 앱: `pnpm phone:start` / `pnpm phone:test`
 - 타입체크: `pnpm typecheck`
 - 차량 앱: `cd car && ./gradlew :app:assembleDebug` / `pnpm car:test`
+
+## 공개 배포 전 필수 (보안)
+
+서버에는 아직 인증·인가가 없습니다. `/regions/*`·`/coverage/*`·`/trips`(그리고 `/vehicles/*`)는 `vehicleId`만 알면 누구나 읽을 수 있으므로 **공개 배포 전에 인증(기기·계정 토큰)과 소유권 확인, rate limit, TLS 종단을 반드시 붙여야** 합니다(사양 01·03). 현재 조치는 `GET /trips`의 전체 열거 차단(`vehicleId` 없으면 400)뿐입니다.
