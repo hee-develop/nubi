@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { openDb } from '../src/db/index.js';
 import { pointInMulti, pointInRing } from '../src/regions/index.js';
-import { regionDisplayName } from '../../scripts/geo-utils.mjs';
+import { regionDisplayName } from '../src/shared/geo-utils.mjs';
 import { thinSamples } from '../src/regions/judge.js';
 import { fakeValhalla, getJson, json, newApp, REGIONS_TEST_DB, ROADS_TEST_DB, type TestApp } from './helpers.js';
 
@@ -776,5 +776,130 @@ describe('/regions/geo 캐시', () => {
     const b = (await getJson(app, `/regions/geo?vehicleId=other&bbox=126.95,37.0,127.15,37.1`)).body;
     expect(b.features.map((f: any) => f.geometry)).toEqual(a.features.map((f: any) => f.geometry));
     expect(b.features.find((f: any) => f.properties.code === '11111').properties.level).toBe(0);
+  });
+});
+
+describe('재리뷰 잔여: 잠정 방문 취소·region_jobs·alias 조회·열 검사', () => {
+  const A_START = Date.parse('2026-11-09T12:00:00Z');
+  const counts = (db: ReturnType<typeof openDb>, v: string, code: string) =>
+    db.prepare('SELECT level, visits, stays, first_at, last_at FROM visited_regions WHERE vehicle_id = ? AND code = ?').get(v, code) as {
+      level: number;
+      visits: number;
+      stays: number;
+      first_at: string;
+      last_at: string;
+    };
+
+  it('잠정 방문 취소: 다른 방문이 없는 시군구는 level 1·visits 0이고 last_at이 남은 이벤트로 돌아간다', async () => {
+    const db = openDb(':memory:');
+    const clock = { t: CLOCK0 };
+    const app = regionsApp({ db, clock }) as unknown as TestApp & { regionsBatch: (n: number) => number };
+    const a = await tripAt(app, 'v', A_START, [IN.A, IN.A]);
+    expect(app.regionsBatch(ms(a.endedAt) + 25 * H)).toBe(1); // 잠정 방문(시각 = 종료 + 24시간)
+    expect(counts(db, 'v', '11111')).toMatchObject({ level: 2, visits: 1, last_at: new Date(ms(a.endedAt) + DAY).toISOString() });
+    clock.t = ms(a.endedAt) + 26 * H;
+    await tripAt(app, 'v', ms(a.endedAt) + 5 * 60_000, [IN.B, IN.B]); // 5분 뒤 시작, 다른 시군구(B)에서 하루 늦게 업로드
+    const c = counts(db, 'v', '11111');
+    expect(c).toMatchObject({ level: 1, visits: 0, stays: 0 });
+    // 방문 시각(종료 + 24시간)이 first_at/last_at에 남지 않는다: 남은 이벤트는 통과(트립 시작 시각)뿐
+    expect(c.last_at).toBe(new Date(A_START).toISOString());
+    expect(c.first_at).toBe(new Date(A_START).toISOString());
+  });
+
+  it('잠정 방문 취소: 남은 다른 방문이 있으면 그 시각으로 돌아가고 단계는 방문(2)', async () => {
+    const db = openDb(':memory:');
+    const clock = { t: CLOCK0 };
+    const app = regionsApp({ db, clock }) as unknown as TestApp & { regionsBatch: (n: number) => number };
+    const first = await tripAt(app, 'v', Date.parse('2026-11-09T01:00:00Z'), [IN.A, IN.A]);
+    await tripAt(app, 'v', ms(first.endedAt) + 30 * 60_000, [IN.A, IN.A]); // 30분 뒤: 첫 트립의 방문(2)이 확정됨
+    const a = await tripAt(app, 'v', A_START, [IN.A, IN.A]);
+    expect(app.regionsBatch(ms(a.endedAt) + 25 * H)).toBeGreaterThan(0);
+    const before = counts(db, 'v', '11111');
+    expect(before.last_at).toBe(new Date(ms(a.endedAt) + DAY).toISOString());
+    clock.t = ms(a.endedAt) + 26 * H;
+    await tripAt(app, 'v', ms(a.endedAt) + 5 * 60_000, [IN.B, IN.B]);
+    const after = counts(db, 'v', '11111');
+    expect(after.level).toBe(2);
+    expect(after.visits).toBe(before.visits - 1);
+    expect(after.last_at < before.last_at).toBe(true);
+  });
+
+  it('region_jobs는 7일을 넘기면 failed로 포기하고 result.regions를 failed로 남긴다(7일 직전까지는 재시도 대기)', async () => {
+    const db = openDb(':memory:');
+    const clock = { t: CLOCK0 };
+    const app = createApp(db, {
+      vehicleHmacKey: 'k',
+      roadsPath: ROADS_TEST_DB,
+      regionsPath: null,
+      retryDelayMs: 60_000,
+      now: () => clock.t,
+    });
+    const t = await trip(app as unknown as TestApp, 'v', '2026-11-09T01:00:00Z', [IN.A, IN.A]);
+    const status = () => db.prepare('SELECT status, error FROM region_jobs WHERE trip_id = ?').get(t.tripId);
+    const regionsOf = async () => (await getJson(app as unknown as TestApp, `/trips/${t.tripId}/matching`)).body.result.regions;
+    expect(await regionsOf()).toBe('pending');
+    clock.t = CLOCK0 + 7 * DAY - 1;
+    app.matching.runRegionJob(t.tripId);
+    expect(status()).toMatchObject({ status: 'queued' });
+    clock.t = CLOCK0 + 7 * DAY;
+    app.matching.runRegionJob(t.tripId);
+    expect(status()).toEqual({ status: 'failed', error: 'retry_exhausted' });
+    expect(await regionsOf()).toBe('failed');
+    app.matching.stop();
+  });
+
+  it('재기동 복구는 region_jobs를 트립 시작 순으로 처리한다(업로드 순서와 무관)', async () => {
+    const file = join(tmp(), 'order.sqlite');
+    const clock = { t: CLOCK0 };
+    const app1 = createApp(openDb(file), {
+      vehicleHmacKey: 'k',
+      roadsPath: ROADS_TEST_DB,
+      regionsPath: null,
+      retryDelayMs: 60_000,
+      now: () => clock.t,
+    });
+    // 나중에 시작한 트립(A)이 먼저 올라오고(queued_at 빠름), 일찍 시작한 트립(B)이 나중에 올라온다
+    await trip(app1 as unknown as TestApp, 'v', '2026-11-09T03:00:00Z', [IN.A, IN.A]);
+    clock.t += 1000;
+    await trip(app1 as unknown as TestApp, 'v', '2026-11-09T01:00:00Z', [IN.B, IN.B]);
+    app1.matching.stop();
+    const db2 = openDb(file);
+    const app2 = regionsApp({ db: db2, clock }) as unknown as TestApp & { matching: { start: () => void } };
+    app2.matching.start();
+    const order = db2.prepare("SELECT code FROM region_events WHERE kind = 'pass' ORDER BY id").all();
+    expect(order).toEqual([{ code: '11112' }, { code: '11111' }]); // B(01:00 시작) → A(03:00 시작)
+    app2.matching.stop();
+  });
+
+  it('alias(UUID)로 조회해도 정본 기록을 합산한다(summary·list·geo·neighbors)', async () => {
+    const db = openDb(':memory:');
+    db.prepare('INSERT INTO vehicle_alias VALUES (?, ?)').run('a-uuid', 'm-srv');
+    const app = regionsApp({ db }) as unknown as TestApp;
+    await trip(app, 'm-srv', '2026-11-09T01:00:00Z', [IN.A, IN.A]); // 정본으로 A
+    await trip(app, 'a-uuid', '2026-11-09T01:05:00Z', [IN.B, IN.B]); // alias로 B(간격 5분: 방문 없음)
+    for (const v of ['m-srv', 'a-uuid']) {
+      expect((await getJson(app, `/regions/summary?vehicleId=${v}`)).body.colored).toBe(2);
+      expect(await level(app, v, '11111')).toBe(1);
+      expect(await level(app, v, '11112')).toBe(1);
+      const geo = (await getJson(app, `/regions/geo?vehicleId=${v}&bbox=126.95,37.0,127.15,37.1`)).body.features;
+      expect(geo.find((f: any) => f.properties.code === '11111').properties.level).toBe(1);
+      const nb = (await getJson(app, `/regions/neighbors?code=11111&vehicleId=${v}`)).body.items;
+      expect(nb.find((i: any) => i.code === '11112').level).toBe(1);
+    }
+  });
+
+  it('display_name 열이 없는 옛 지역 DB는 열지 않고(DETACH) 지역 API는 503', async () => {
+    const path = join(tmp(), 'old.sqlite');
+    makeRegionsDb(path, LAYOUT);
+    const old = new DatabaseSync(path);
+    old.exec('ALTER TABLE regions DROP COLUMN display_name');
+    old.close();
+    const db = openDb(':memory:');
+    const app = createApp(db, { vehicleHmacKey: 'k', roadsPath: ROADS_TEST_DB, regionsPath: path, retryDelayMs: 60_000 });
+    const r = await getJson(app as unknown as TestApp, '/regions/summary?vehicleId=v');
+    expect(r.status).toBe(503);
+    expect(r.body).toMatchObject({ error: 'regions_db_unavailable' });
+    expect((db.prepare('PRAGMA database_list').all() as { name: string }[]).map((d) => d.name)).not.toContain('rg');
+    app.matching.stop();
   });
 });

@@ -182,6 +182,7 @@ SecurityException: Starting FGS with type location ... requires permissions:
 | 픽스처 | `server/test/fixtures/regions-test.sqlite` 90,112 B: 종로·중·용산·성동 + 홍천·양구·인제 |
 | 판정 확인 | `node scripts/verify-regions.mjs`: 세종대로 GPX 첫 점(37.575162,126.977065) = 종로구(11110), 끝 점(37.562023,126.976073) = 중구(11140). 시도 도청 좌표 17곳 전부 해당 시군구로 판정, 동해 한가운데는 없음 |
 | 한계 | 행정동 병합 경계라 해안선·섬이 SGIS 수준(30m 단순화 추가). 시군구 간 경계는 각자 단순화돼 최대 약 30m 틈·겹침이 있을 수 있음(판정은 폴리곤 any) |
+| 재리뷰 반영(2026-11-10) | `geo-utils.mjs`를 `server/src/shared/`로 옮기고 서버 `build`가 `dist/shared/`로 복사(`node dist/regions/index.js` import 확인). 서버 단위 123개·차량 단위 통과, E2E 세 flow 재시도 없이 2회 연속 통과(`retried` 없음, 시군구 2/229·인구감소지역 0/92·서울 중구 하룻밤) |
 
 
 ## 9. 시군구 판정·도로 키 지역 접두 실측 (feat/03, 2026-11-10)

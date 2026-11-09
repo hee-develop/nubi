@@ -117,6 +117,17 @@ export const createMatchingWorker = (deps: WorkerDeps) => {
         exhausted ? iso() : null,
         tripId,
       );
+      if (exhausted) {
+        // 7일을 넘겨 포기: 조회하는 쪽이 pending으로 오해하지 않도록 매칭 결과에 failed를 남긴다
+        const m = db.prepare('SELECT result_json FROM trip_matching WHERE trip_id = ?').get(tripId) as
+          { result_json: string | null } | undefined;
+        if (m?.result_json) {
+          db.prepare('UPDATE trip_matching SET result_json = ? WHERE trip_id = ?').run(
+            JSON.stringify({ ...JSON.parse(m.result_json), regions: 'failed' }),
+            tripId,
+          );
+        }
+      }
       if (!exhausted && !stopped) {
         const t = setTimeout(() => {
           timers.delete(t);
@@ -188,7 +199,12 @@ export const createMatchingWorker = (deps: WorkerDeps) => {
         )
         .all() as { trip_id: string }[];
       for (const r of rows) enqueue(r.trip_id);
-      const jobs = db.prepare("SELECT trip_id FROM region_jobs WHERE status = 'queued'").all() as { trip_id: string }[];
+      const jobs = db
+        .prepare(
+          // 오프라인 큐로 늦게 올라온 트립이 방문·숙박 판정 순서를 뒤바꾸지 않게 트립 시작 순으로 처리한다
+          "SELECT j.trip_id FROM region_jobs j LEFT JOIN trips t ON t.id = j.trip_id WHERE j.status = 'queued' ORDER BY t.started_at, j.queued_at",
+        )
+        .all() as { trip_id: string }[];
       for (const j of jobs) processRegionJob(j.trip_id);
     },
     /** 지금 돌고 있는 작업이 끝날 때까지(재시도 타이머는 기다리지 않는다). `stop()` 뒤에는 남은 큐를 비우므로 곧 돌아온다. 테스트용. */

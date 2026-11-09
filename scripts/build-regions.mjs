@@ -11,7 +11,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, readFileSync, rmSync, statSync, renameSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { pointInRing, regionDisplayName } from './geo-utils.mjs';
+import { pointInRing, regionDisplayName } from '../server/src/shared/geo-utils.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 

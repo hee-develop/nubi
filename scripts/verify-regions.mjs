@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { makeLocator } from './geo-utils.mjs';
+import { makeLocator } from '../server/src/shared/geo-utils.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const db = new DatabaseSync(resolve(process.argv[2] ?? join(ROOT, 'server/data/regions/regions.sqlite')), { readOnly: true });

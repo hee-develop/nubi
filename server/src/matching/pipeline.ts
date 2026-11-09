@@ -35,7 +35,7 @@ export type MatchResult = {
   matchedKm?: number;
   unmatchedRatio?: number;
   /** 시군구 판정(사양 03 4장). 매칭과 분리된 작업이라 매칭이 끝난 시점에는 `'pending'`이고 워커가 완료 시 결과로 갱신한다. 지역 판정을 안 쓰거나 의심(suspect) 트립이면 없다. */
-  regions?: RegionsResult | 'pending';
+  regions?: RegionsResult | 'pending' | 'failed';
 };
 
 type TripRow = {

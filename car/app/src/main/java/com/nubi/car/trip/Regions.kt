@@ -15,20 +15,24 @@ data class RegionsSummary(
     val totalDepop: Int,
     val lastEvent: RegionEvent? = null,
 ) {
-    /** 캐시(SharedPreferences) 직렬화. 이름에 쓰지 않는 `|`로 나눈다. */
+    /** 캐시(SharedPreferences) 직렬화. 이름에 쓰지 않는 `|`로 나누고 맨 앞에 포맷 버전([CACHE_VERSION])을 둔다. */
     fun encode(): String =
-        listOf(colored, total, coloredDepop, totalDepop, lastEvent?.kind ?: "", lastEvent?.name?.replace("|", " ") ?: "", lastEvent?.atMs ?: 0L)
+        listOf(CACHE_VERSION, colored, total, coloredDepop, totalDepop, lastEvent?.kind ?: "", lastEvent?.name?.replace("|", " ") ?: "", lastEvent?.atMs ?: 0L)
             .joinToString("|")
 
     companion object {
+        /** 캐시 포맷 버전. 필드 의미가 바뀌면(예: 인구감소지역 분모 89 → 92) 올려 옛 캐시를 무효화한다. */
+        const val CACHE_VERSION = "v2"
+
         fun decode(text: String?): RegionsSummary? {
             val p = text?.split("|") ?: return null
-            if (p.size != 7) return null
+            // 버전 키가 없거나 다르면(분모 89 시절 캐시 등) 버린다
+            if (p.size != 8 || p[0] != CACHE_VERSION) return null
             return try {
-                val kind = p[4]
+                val kind = p[5]
                 RegionsSummary(
-                    p[0].toInt(), p[1].toInt(), p[2].toInt(), p[3].toInt(),
-                    if (kind.isEmpty()) null else RegionEvent(kind, p[5], p[6].toLong()),
+                    p[1].toInt(), p[2].toInt(), p[3].toInt(), p[4].toInt(),
+                    if (kind.isEmpty()) null else RegionEvent(kind, p[6], p[7].toLong()),
                 )
             } catch (e: NumberFormatException) {
                 null

@@ -22,8 +22,13 @@ class CoverageTest {
     /** 호출마다 미리 정한 응답(또는 null=404, 예외)을 순서대로 돌려주는 가짜 서버. */
     private class FakeApi(private val script: List<() -> MatchingResponse?>, private val percent: () -> Double = { 1.0 }) : CoverageApi {
         var calls = 0
+        var regionCalls = 0
         override fun getMatching(tripId: String): MatchingResponse? = script[minOf(calls++, script.size - 1)]()
         override fun getNationalPercent(vehicleId: String): Double = percent()
+        override fun getRegions(vehicleId: String): RegionsSummary? {
+            regionCalls++
+            return null
+        }
     }
 
     /** 가짜 시계: sleep이 시계를 그만큼 흘리고, 가짜 서버 호출은 [latencyMs]만큼 걸린다. */
@@ -272,7 +277,9 @@ class CoverageTest {
         val t = CoverageTracker(api, direct, { "v" }, poller(api), schedule = { _, _ -> })
         t.onTripEnded("t1")
         assertTrue(t.matching is MatchingLine.Counted)
+        val before = api.regionCalls
         t.onTripStarted()
         assertEquals(MatchingLine.None, t.matching)
+        assertEquals("새 트립 시작 때 시군구 도감도 다시 받는다", before + 1, api.regionCalls)
     }
 }

@@ -99,17 +99,28 @@ const applyStage = (db: Db, vehicleId: string, code: string, kind: 'visit' | 'st
   return true;
 };
 
-/** 잠정 방문 취소: 늦게 도착한 Start가 간격 10분 미만임을 알려 줬을 때. 이벤트를 지우고 횟수를 되돌리고 단계를 횟수에서 다시 구한다. */
+/** 잠정 방문 취소: 늦게 도착한 Start가 간격 10분 미만임을 알려 줬을 때. 이벤트를 지우고 횟수를 되돌리고 단계를 횟수에서, first_at/last_at을 남은 이벤트에서 다시 구한다. */
 const retractStage = (db: Db, vehicleId: string, code: string, kind: 'visit' | 'stay', tripId: string) => {
-  const r = db
-    .prepare('DELETE FROM region_events WHERE vehicle_id = ? AND code = ? AND kind = ? AND trip_id = ?')
-    .run(vehicleId, code, kind, tripId);
-  if (Number(r.changes) === 0) return;
+  const gone = db
+    .prepare('SELECT at FROM region_events WHERE vehicle_id = ? AND code = ? AND kind = ? AND trip_id = ?')
+    .get(vehicleId, code, kind, tripId) as { at: string } | undefined;
+  if (!gone) return;
+  db.prepare('DELETE FROM region_events WHERE vehicle_id = ? AND code = ? AND kind = ? AND trip_id = ?').run(vehicleId, code, kind, tripId);
   const col = kind === 'visit' ? 'visits' : 'stays';
   db.prepare(`UPDATE visited_regions SET ${col} = MAX(0, ${col} - 1) WHERE vehicle_id = ? AND code = ?`).run(vehicleId, code);
   db.prepare(
     `UPDATE visited_regions SET level = MAX(1, CASE WHEN stays > 0 THEN 3 WHEN visits > 0 THEN 2 ELSE 1 END) WHERE vehicle_id = ? AND code = ?`,
   ).run(vehicleId, code);
+  // 지운 이벤트가 first_at/last_at의 끝이었다면 남은 이벤트에서 다시 구한다(남은 이벤트가 없으면 통과 시각 등 알 수 없으니 그대로 둔다).
+  const rest = db
+    .prepare('SELECT MIN(at) AS lo, MAX(at) AS hi FROM region_events WHERE vehicle_id = ? AND code = ?')
+    .get(vehicleId, code) as { lo: string | null; hi: string | null };
+  if (rest.lo && rest.hi) {
+    db.prepare(
+      `UPDATE visited_regions SET first_at = CASE WHEN first_at = ? THEN ? ELSE first_at END, last_at = CASE WHEN last_at = ? THEN ? ELSE last_at END
+       WHERE vehicle_id = ? AND code = ?`,
+    ).run(gone.at, rest.lo, gone.at, rest.hi, vehicleId, code);
+  }
 };
 
 /**

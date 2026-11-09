@@ -61,8 +61,8 @@ export function makeLocator(db, { schema = '', maxGapM = GAP_FIX_M } = {}) {
   const cols = 'r.code, r.name, r.display_name, r.sido_code, r.sido_name';
   const rtree = (where) =>
     db.prepare(`SELECT ${cols} FROM ${p}regions_rtree t JOIN ${p}regions r ON r.rowid = t.region_id WHERE ${where} ORDER BY r.code`);
-  const exact = rtree('t.minlon <= ? AND t.maxlon >= ? AND t.minlat <= ? AND t.maxlat >= ?');
-  const near = rtree('t.minlon <= ? AND t.maxlon >= ? AND t.minlat <= ? AND t.maxlat >= ?');
+  // 점 질의(exact)와 이웃 탐색(near)은 같은 bbox 교차 쿼리이고 인자만 다르다. prepare는 한 번.
+  const byBox = rtree('t.minlon <= ? AND t.maxlon >= ? AND t.minlat <= ? AND t.maxlat >= ?');
   const geomOf = db.prepare(`SELECT geom_json FROM ${p}regions WHERE code = ?`);
   const cache = new Map();
   const polygons = (code) => {
@@ -75,7 +75,7 @@ export function makeLocator(db, { schema = '', maxGapM = GAP_FIX_M } = {}) {
     return g;
   };
   const locate = (lon, lat) => {
-    for (const r of exact.all(lon, lon, lat, lat)) {
+    for (const r of byBox.all(lon, lon, lat, lat)) {
       const g = polygons(r.code);
       if (g && pointInMulti(lon, lat, g)) return r;
     }
@@ -84,7 +84,7 @@ export function makeLocator(db, { schema = '', maxGapM = GAP_FIX_M } = {}) {
       dLon = dLat / Math.max(0.1, Math.cos((lat * Math.PI) / 180));
     let best = null,
       bestD = Infinity;
-    for (const r of near.all(lon + dLon, lon - dLon, lat + dLat, lat - dLat)) {
+    for (const r of byBox.all(lon + dLon, lon - dLon, lat + dLat, lat - dLat)) {
       const g = polygons(r.code);
       if (!g) continue;
       const d = distanceToMultiM(lon, lat, g);

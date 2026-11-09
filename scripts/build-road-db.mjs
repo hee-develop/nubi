@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HIGHWAYS, RoadAccumulator, SCHEMA_SQL, haversine, locateWay, normalize, wayRecord, wayRowValues } from './road-rules.mjs';
-import { SIDO_SHORT, makeLocator } from './geo-utils.mjs';
+import { SIDO_SHORT, makeLocator } from '../server/src/shared/geo-utils.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -41,7 +41,7 @@ if (!bbox && !regionsArg) {
 }
 if (bbox && (bbox.length !== 4 || bbox.some(Number.isNaN))) throw new Error('--bbox 형식 오류');
 
-// 시군구 판정기(scripts/geo-utils.mjs 공용): 폴리곤 안 → 50m 이내 가장 가까운 시군구. 전국 빌드는 --regions 필수.
+// 시군구 판정기(server/src/shared/geo-utils.mjs 공용): 폴리곤 안 → 50m 이내 가장 가까운 시군구. 전국 빌드는 --regions 필수.
 let locate;
 let regionsMonth = null;
 if (regionsArg) {

@@ -51,6 +51,8 @@ class RegionsTest {
         assertNull(none.lastEvent)
         assertEquals(none, RegionsSummary.decode(none.encode()))
         assertNull(RegionsSummary.decode("broken"))
+        assertNull("버전 키가 없는 옛(분모 89) 캐시는 버린다", RegionsSummary.decode("2|229|1|89||"+"|0"))
+        assertNull("다른 버전도 버린다", RegionsSummary.decode("v1|2|229|1|92||"+"|0"))
         assertNull(RegionsSummary.decode(null))
     }
 

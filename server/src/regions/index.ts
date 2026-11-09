@@ -2,9 +2,9 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { Db } from '../db/index.js';
-import { makeLocator, pointInMulti, pointInRing } from '../../../scripts/geo-utils.mjs';
+import { makeLocator, pointInMulti, pointInRing } from '../shared/geo-utils.mjs';
 
-// 판정·point-in-polygon은 scripts/geo-utils.mjs 하나를 빌드 스크립트·verify와 공유한다(복사 금지).
+// 판정·point-in-polygon은 server/src/shared/geo-utils.mjs 하나를 빌드 스크립트·verify와 공유한다(복사 금지).
 export { pointInMulti, pointInRing };
 
 /** 행정동 경계 출처 표기(사양 03 3장). 지역 API 응답 `attribution`과 뷰어에 넣는다. */
@@ -53,6 +53,9 @@ export const attachRegions = (db: Db, path: string | null | undefined): Regions 
     db.exec(`ATTACH DATABASE '${pathToFileURL(path).href.replaceAll("'", "''")}?mode=ro' AS ${RG}`);
     const s = db.prepare(`SELECT month FROM ${RG}.snapshot ORDER BY month DESC LIMIT 1`).get() as { month: string } | undefined;
     if (!s) throw new Error('snapshot 행이 없습니다');
+    // 이전 빌드의 지역 DB는 display_name 열이 없다. 이름 조회가 나중에 500으로 터지지 않게 여기서 거른다(지역 API 503).
+    const cols = db.prepare(`PRAGMA ${RG}.table_info(regions)`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'display_name')) throw new Error('regions.display_name 열이 없습니다(지역 DB를 다시 빌드하세요)');
     const total = (db.prepare(`SELECT COUNT(*) AS n FROM ${RG}.regions`).get() as { n: number }).n;
     const alias = new Map(
       (db.prepare(`SELECT old_code, new_code FROM ${RG}.region_alias`).all() as { old_code: string; new_code: string }[]).map((r) => [

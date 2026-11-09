@@ -13,6 +13,7 @@ Pleos Connect(현대차그룹 AAOS 기반 인포테인먼트) 차량 앱 프로�
 
 - 설치(루트): `pnpm install`
 - 서버: `pnpm server:dev` / `pnpm server:test`
+- 서버 배포 단위: `server/`(`pnpm --filter @nubi/server build` → `server/dist/`)만 있으면 돈다. 시군구 판정 모듈 `server/src/shared/geo-utils.mjs`는 빌드가 `dist/shared/`로 복사하고, `scripts/`의 빌드·검증 스크립트가 같은 파일을 import 한다(루트 `scripts/`는 런타임에 필요 없음).
 - 폰 앱: `pnpm phone:start` / `pnpm phone:test`
 - 타입체크: `pnpm typecheck`
 - 차량 앱: `cd car && ./gradlew :app:assembleDebug` / `pnpm car:test`

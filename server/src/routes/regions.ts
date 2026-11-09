@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import type { Db } from '../db/index.js';
 import { RG, REGIONS_ATTRIBUTION, type Regions } from '../regions/index.js';
 import { nearestRegions, neighborsOf } from '../regions/neighbors.js';
+import { canonicalVehicleId } from '../matching/pipeline.js';
 import { VEHICLE_SET_SQL } from '../roads/index.js';
 
 export const MAX_REGION_BBOX_SPAN_DEG = 3;
@@ -36,10 +37,11 @@ export const regionsRoutes = (db: Db, getRegions: () => Regions | null) => {
 
   return new Hono()
     .get('/summary', (c) => {
-      const vehicleId = c.req.query('vehicleId');
-      if (!vehicleId) return c.json({ error: 'vehicleId_required' as const, ...base(getRegions()) }, 400);
+      const rawId = c.req.query('vehicleId');
+      if (!rawId) return c.json({ error: 'vehicleId_required' as const, ...base(getRegions()) }, 400);
       const regions = getRegions();
       if (!regions) return c.json(unavailable(), 503);
+      const vehicleId = canonicalVehicleId(db, rawId); // alias(UUID)로 조회해도 정본 기록을 합산한다
       const n = db
         .prepare(
           `WITH ${VISITED_CTE}
@@ -75,10 +77,11 @@ export const regionsRoutes = (db: Db, getRegions: () => Regions | null) => {
       );
     })
     .get('/list', (c) => {
-      const vehicleId = c.req.query('vehicleId');
-      if (!vehicleId) return c.json({ error: 'vehicleId_required' as const, ...base(getRegions()) }, 400);
+      const rawId = c.req.query('vehicleId');
+      if (!rawId) return c.json({ error: 'vehicleId_required' as const, ...base(getRegions()) }, 400);
       const regions = getRegions();
       if (!regions) return c.json(unavailable(), 503);
+      const vehicleId = canonicalVehicleId(db, rawId);
       const filter = c.req.query('filter') ?? 'all';
       const sort = c.req.query('sort') ?? 'name';
       if (!['all', 'depop', 'uncolored'].includes(filter)) return c.json({ error: 'invalid_filter' as const, ...base(regions) }, 400);
@@ -131,7 +134,7 @@ export const regionsRoutes = (db: Db, getRegions: () => Regions | null) => {
     .get('/geo', (c) => {
       const regions = getRegions();
       if (!regions) return c.json(unavailable(), 503);
-      const vehicleId = c.req.query('vehicleId') ?? '';
+      const vehicleId = canonicalVehicleId(db, c.req.query('vehicleId') ?? '');
       const bbox = (c.req.query('bbox') ?? '').split(',').map((s) => (s.trim() === '' ? NaN : Number(s)));
       const [minlon, minlat, maxlon, maxlat] = bbox as [number, number, number, number];
       const valid =
@@ -203,7 +206,7 @@ export const regionsRoutes = (db: Db, getRegions: () => Regions | null) => {
       const code2 = regions.canonical(code);
       const found = neighborsOf(db, regions, code2);
       if (!found) return c.json({ error: 'not_found' as const, ...base(regions) }, 404);
-      const vehicleId = c.req.query('vehicleId') ?? '';
+      const vehicleId = canonicalVehicleId(db, c.req.query('vehicleId') ?? '');
       const names = regions.names();
       const info = db
         .prepare(

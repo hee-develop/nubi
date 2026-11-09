@@ -251,6 +251,7 @@ class CoverageTracker(
         generation++
         matching = MatchingLine.None
         refreshNational()
+        refreshRegions() // 사양 03 10장: 서비스 시작·새 트립 시작·매칭 종료 뒤에 도감 조회
     }
 
     /** 서비스 시작 때 전국 완료율을 받는다. 차량 ID가 아직 없으면 최대 [waitIdMs] 동안 1초 간격으로 **예약**해 다시 본다(executor를 붙잡고 자지 않는다). */
