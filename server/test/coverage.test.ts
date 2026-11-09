@@ -14,8 +14,8 @@ const W = (id: number, lengthM: number, roadKey: string, extra: Partial<SynthWay
   ...extra,
 });
 
-/** 지정한 way들을 한 번에 달린 것처럼 트립 하나를 매칭한다. */
-const driveWays = async (app: ReturnType<typeof newApp>, _edges: unknown[], vehicleId = 'v1') => {
+/** 가짜 Valhalla가 돌려주는 way들을 한 번에 달린 것처럼 트립 하나를 매칭한다. */
+const driveWays = async (app: ReturnType<typeof newApp>, vehicleId = 'v1') => {
   const { tripId } = await driveTrip(app, { vehicleId });
   await app.matching.idle();
   return tripId;
@@ -43,7 +43,7 @@ describe('조회 API', () => {
         ),
       },
     });
-    await driveWays(app, []);
+    await driveWays(app);
     const { status, body } = await getJson(app, '/coverage/summary?vehicleId=v1');
     expect(status).toBe(200);
     expect(body).toMatchObject({ snapshotMonth: '209901', roadsStarted: 2, roadsCompleted: 1, totalKm: 4, drivenKm: 2.8 });
@@ -75,7 +75,7 @@ describe('조회 API', () => {
         ),
       },
     });
-    await driveWays(app, []);
+    await driveWays(app);
     const keys = async (qs: string) =>
       ((await getJson(app, `/coverage/roads?vehicleId=v1&${qs}`)).body.items as any[]).map((i) => i.roadKey);
     expect(await keys('sort=percent')).toEqual(['nm:a', 'nm:c', 'nm:b']);
@@ -112,12 +112,13 @@ describe('조회 API', () => {
         ),
       },
     });
-    await driveWays(app, []);
+    await driveWays(app);
     const byName = (await getJson(app, `/coverage/roads?vehicleId=v1&q=${encodeURIComponent('세종대로')}`)).body;
     expect(byName.total).toBe(1);
     expect(byName.items[0].roadKey).toBe('nr:31');
     expect(byName.items[0].names[0]).toBe('세종대로');
     expect(byName.items[0].names).toContain('녹사평대로');
+    expect(byName.items[0].namesTotal).toBe(2); // names_json 전체 개수(응답 names는 최대 20개)
     const byDisplay = (await getJson(app, `/coverage/roads?vehicleId=v1&q=${encodeURIComponent('을지')}`)).body;
     expect(byDisplay.items.map((i: any) => i.roadKey)).toEqual(['nm:을지로']);
     // 와일드카드 문자는 문자 그대로 검색한다
@@ -141,7 +142,7 @@ describe('조회 API', () => {
         ),
       },
     });
-    await driveWays(app, []);
+    await driveWays(app);
     const seg = (bbox?: string) => getJson(app, `/coverage/segments?vehicleId=v1${bbox === undefined ? '' : `&bbox=${bbox}`}`);
     for (const bad of [undefined, '', '1,2,3', '127,37,126,38', '126,37,127,37', 'a,b,c,d', '126,37,127.5,37.5', '126,36,127,37.2']) {
       expect((await seg(bad)).status, String(bad)).toBe(400);
@@ -170,7 +171,7 @@ describe('조회 API', () => {
         ),
       },
     });
-    await driveWays(app, []);
+    await driveWays(app);
     const { body } = await getJson(app, '/coverage/segments?vehicleId=v1&bbox=126.9,36.9,127.5,37.5');
     expect(body.features).toHaveLength(5_000);
     expect(body.truncated).toBe(true);

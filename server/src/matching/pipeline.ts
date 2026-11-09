@@ -18,7 +18,10 @@ export type MatchResult = {
   /** 인정하지 않은 사유: too_short | odometer_mismatch | low_confidence. */
   reason?: string;
   newWays: number;
-  /** 이번 주행으로 새로 칠해진 실제 거리(km). */
+  /**
+   * 이번 주행의 **전국 달린 길이 증가분**(km): 매칭 전후 집계(묶음별 상한·분리 구간 1/2 적용 후)의 차이(사양 2장).
+   * 실제 way 길이 합이 아니다. `nationalPercentAfter − Before ≈ newKm / 분모(km) × 100`.
+   */
   newKm: number;
   roadsTouched: string[];
   nationalPercentBefore: number;
@@ -74,7 +77,21 @@ export const isOdometerMismatch = (distanceM: number, startKm: number | null, en
   return distanceM > deltaKm * 1000 * 1.1 + 1000;
 };
 
-export const runMatching = async (db: Db, roads: Roads, tripId: string, deps: TraceDeps): Promise<MatchResult> => {
+/**
+ * 한 트립을 매칭한다. 결과가 정해지면 [finish]를 부른다. 인정된 way를 저장하는 경우 [finish]는 `driven_ways` 갱신과 **같은 트랜잭션** 안에서 불려
+ * (워커가 거기서 `trip_matching`을 done으로 바꾼다) 한쪽만 반영되는 중간 상태가 남지 않는다.
+ */
+export const runMatching = async (
+  db: Db,
+  roads: Roads,
+  tripId: string,
+  deps: TraceDeps,
+  finish: (result: MatchResult) => void,
+): Promise<MatchResult> => {
+  const done = (r: MatchResult) => {
+    finish(r);
+    return r;
+  };
   const trip = db.prepare('SELECT * FROM trips WHERE id = ?').get(tripId) as TripRow | undefined;
   if (!trip) throw new Error('trip 없음');
   const vehicle = canonicalVehicleId(db, trip.vehicle_id);
@@ -82,16 +99,16 @@ export const runMatching = async (db: Db, roads: Roads, tripId: string, deps: Tr
   const before = roundPercent(nationalCoverage(db, roads, vehicle).percent);
   const distanceM = pathLengthM(points);
 
-  if (points.length < MIN_POINTS || distanceM < MIN_DISTANCE_M) return emptyResult('skipped', 'too_short', before);
+  if (points.length < MIN_POINTS || distanceM < MIN_DISTANCE_M) return done(emptyResult('skipped', 'too_short', before));
   if (isOdometerMismatch(distanceM, trip.odometer_start_km, trip.odometer_end_km))
-    return emptyResult('suspect', 'odometer_mismatch', before);
+    return done(emptyResult('suspect', 'odometer_mismatch', before));
 
   const trace = await traceAttributes(points, deps);
   const totalPoints = trace.matchedPoints + trace.unmatchedPoints;
   const unmatchedRatio = totalPoints > 0 ? trace.unmatchedPoints / totalPoints : 1;
   const matchedKm = [...trace.wayLengthsM.values()].reduce((a, b) => a + b, 0) / 1000;
   if (unmatchedRatio > MAX_UNMATCHED_RATIO) {
-    return { ...emptyResult('low_confidence', 'low_confidence', before), matchedKm, unmatchedRatio };
+    return done({ ...emptyResult('low_confidence', 'low_confidence', before), matchedKm, unmatchedRatio });
   }
 
   const ways = findWays(db, [...trace.wayLengthsM.keys()]);
@@ -117,46 +134,49 @@ export const runMatching = async (db: Db, roads: Roads, tripId: string, deps: Tr
   const lastAt = trip.ended_at ?? points.at(-1)!.ts;
   const firstAt = trip.started_at;
   let newWays = 0;
-  let newKm = 0;
   db.exec('BEGIN');
   try {
+    const beforeM = nationalCoverage(db, roads, vehicle).drivenM;
     const old = new Map<number, number>();
     const getOld = db.prepare(
       `SELECT MAX(coverage) AS c FROM driven_ways WHERE way_id = ? AND vehicle_id IN (SELECT ? UNION SELECT alias_id FROM vehicle_alias WHERE vehicle_id = ?)`,
     );
     for (const r of recognized) old.set(r.wayId, (getOld.get(r.wayId, vehicle, vehicle) as { c: number | null }).c ?? 0);
+    // 커버리지는 줄지 않는다(MAX). 처음 칠한 시각이 더 이른 값으로 바뀔 때만 그 트립을 trip_id_first로 한다.
     const upsert = db.prepare(
       `INSERT INTO driven_ways (vehicle_id, way_id, coverage, first_driven_at, last_driven_at, trip_id_first, snapshot_month)
        VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (vehicle_id, way_id) DO UPDATE SET
          coverage = MAX(coverage, excluded.coverage),
+         trip_id_first = CASE WHEN excluded.first_driven_at < first_driven_at THEN excluded.trip_id_first ELSE trip_id_first END,
          first_driven_at = MIN(first_driven_at, excluded.first_driven_at),
          last_driven_at = MAX(last_driven_at, excluded.last_driven_at),
          snapshot_month = excluded.snapshot_month`,
     );
     for (const r of recognized) {
-      const prev = old.get(r.wayId) ?? 0;
-      if (prev === 0) newWays++;
-      newKm += Math.max(0, r.coverage - prev) * r.lengthM;
+      if ((old.get(r.wayId) ?? 0) === 0) newWays++;
       upsert.run(trip.vehicle_id, r.wayId, r.coverage, firstAt, lastAt, tripId, roads.month);
     }
+    const after = nationalCoverage(db, roads, vehicle);
+    const result: MatchResult = {
+      outcome: 'counted',
+      newWays,
+      // 매칭 전후 집계 차이(사양 2장). m 단위로 반올림해 km로 낸다.
+      newKm: Math.max(0, Math.round(after.drivenM - beforeM)) / 1000,
+      roadsTouched: [...new Set(recognized.map((r) => r.roadKey))],
+      nationalPercentBefore: roundPercent(roads.totalNamedLengthM > 0 ? (beforeM / roads.totalNamedLengthM) * 100 : 0),
+      nationalPercentAfter: roundPercent(after.percent),
+      suspect: false,
+      ignoredWays,
+      ignoredUnnamed,
+      matchedKm: Math.round(matchedKm * 1000) / 1000,
+      unmatchedRatio: Math.round(unmatchedRatio * 1000) / 1000,
+    };
+    finish(result);
     db.exec('COMMIT');
+    return result;
   } catch (e) {
     db.exec('ROLLBACK');
     throw e;
   }
-  const after = roundPercent(nationalCoverage(db, roads, vehicle).percent);
-  return {
-    outcome: 'counted',
-    newWays,
-    newKm: Math.round(newKm) / 1000,
-    roadsTouched: [...new Set(recognized.map((r) => r.roadKey))],
-    nationalPercentBefore: before,
-    nationalPercentAfter: after,
-    suspect: false,
-    ignoredWays,
-    ignoredUnnamed,
-    matchedKm: Math.round(matchedKm * 1000) / 1000,
-    unmatchedRatio: Math.round(unmatchedRatio * 1000) / 1000,
-  };
 };

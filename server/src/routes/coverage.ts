@@ -11,6 +11,13 @@ const MAX_NAMES = 20;
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
+/** 매칭 실패 사유는 분류와 코드(`retryable:network`·`permanent:http_400`)만 내보낸다. 메시지는 서버 로그에만 남는다. */
+const publicError = (error: string): string => {
+  const m = /^(retryable|permanent):([a-z0-9_]+)$/.exec(error);
+  if (m) return error;
+  return `${error.startsWith('permanent') ? 'permanent' : 'retryable'}:unknown`;
+};
+
 /** 사양 5장: 조회 API 4개와 매칭 상태. 모든 응답에 snapshotMonth·attribution을 싣는다. */
 export const coverageRoutes = (db: Db, getRoads: () => Roads | null) => {
   const base = (roads: Roads | null) => ({ snapshotMonth: roads?.month ?? null, attribution: ATTRIBUTION });
@@ -38,7 +45,7 @@ export const coverageRoutes = (db: Db, getRoads: () => Roads | null) => {
           startedAt: row.started_at,
           finishedAt: row.finished_at,
           ...(row.result_json ? { result: JSON.parse(row.result_json) as Record<string, unknown> } : {}),
-          ...(row.error ? { error: row.error } : {}),
+          ...(row.error ? { error: publicError(row.error) } : {}),
           ...base(getRoads()),
         },
         200,
@@ -53,8 +60,7 @@ export const coverageRoutes = (db: Db, getRoads: () => Roads | null) => {
       const counts = db
         .prepare(
           `WITH ${DRIVEN_CTE}, ${ROAD_DRIVEN_CTE}
-           SELECT COUNT(*) AS started, COALESCE(SUM(CASE WHEN r.driven >= ro.total_length_m * ? THEN 1 ELSE 0 END), 0) AS completed
-           FROM r JOIN ${RD}.roads ro ON ro.road_key = r.road_key`,
+           SELECT COUNT(*) AS started, COALESCE(SUM(CASE WHEN driven >= total * ? THEN 1 ELSE 0 END), 0) AS completed FROM r`,
         )
         .get(vehicleId, vehicleId, COMPLETE_PERCENT / 100) as { started: number; completed: number };
       return c.json(
@@ -94,8 +100,7 @@ export const coverageRoutes = (db: Db, getRoads: () => Roads | null) => {
       const rows = db
         .prepare(
           `${withCtes}
-             SELECT ro.road_key, ro.display_name, ro.highway_major, ro.total_length_m, ro.names_json, MIN(r.driven, ro.total_length_m) AS driven, r.last,
-                    MIN(r.driven, ro.total_length_m) / ro.total_length_m AS pct
+             SELECT ro.road_key, ro.display_name, ro.highway_major, ro.total_length_m, ro.names_json, r.driven, r.last, r.driven / ro.total_length_m AS pct
              FROM r JOIN ${RD}.roads ro ON ro.road_key = r.road_key ${where}
              ORDER BY ${order}, ro.road_key LIMIT ? OFFSET ?`,
         )
@@ -119,6 +124,8 @@ export const coverageRoutes = (db: Db, getRoads: () => Roads | null) => {
           displayName: r.display_name,
           highway: r.highway_major,
           names,
+          /** 저장된 거리명 전체 개수(최대 200). `names`는 상위 20개만 담으므로 '외 N'은 이 값으로 센다. */
+          namesTotal: all.length,
           drivenM: Math.round(r.driven),
           totalM: Math.round(r.total_length_m),
           percent,

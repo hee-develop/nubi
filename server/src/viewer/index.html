@@ -4,9 +4,18 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>누비 도로 색칠 뷰어</title>
-    <!-- 시연·검증용(debug). MapLibre GL JS는 버전을 고정해 CDN에서 받는다. -->
-    <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
-    <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+    <!-- 시연·검증용(debug). MapLibre GL JS는 버전을 고정하고 SRI(integrity)로 내용을 검증해 CDN에서 받는다(해시는 4.7.1 파일 실측, jsdelivr 사본과도 일치). -->
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
+      integrity="sha384-MinO0mNliZ3vwppuPOUnGa+iq619pfMhLVUXfC4LHwSCvF9H+6P/KO4Q7qBOYV5V"
+      crossorigin="anonymous"
+    />
+    <script
+      src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"
+      integrity="sha384-SYKAG6cglRMN0RVvhNeBY0r3FYKNOJtznwA0v7B5Vp9tr31xAHsZC0DqkQ/pZDmj"
+      crossorigin="anonymous"
+    ></script>
     <style>
       html,
       body {
@@ -131,7 +140,7 @@
           const li = document.createElement('li');
           const extra =
             it.names && it.names.length > 0 && it.roadKey.indexOf('nm:') !== 0
-              ? ' · ' + it.names[0] + (it.names.length > 1 ? ' 외 ' + (it.names.length - 1) : '')
+              ? ' · ' + it.names[0] + (it.namesTotal > 1 ? ' 외 ' + (it.namesTotal - 1) : '')
               : '';
           li.textContent = it.displayName + extra + ' — ' + it.percent + '% (' + (it.drivenM / 1000).toFixed(1) + 'km)';
           ol.appendChild(li);

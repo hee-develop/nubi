@@ -2,6 +2,9 @@ import { fileURLToPath } from 'node:url';
 import { expect } from 'vitest';
 import { createApp, type AppOptions } from '../src/app.js';
 import { openDb } from '../src/db/index.js';
+// 도로 DB 규칙(분류·oneway·유효 길이·names_json·스키마)은 빌드 스크립트와 같은 모듈을 쓴다. 테스트가 규칙을 따로 구현하지 않는다.
+// @ts-expect-error 타입 선언이 없는 .mjs
+import { effLength, RoadAccumulator, SCHEMA_SQL, wayRecord, wayRowValues } from '../../scripts/road-rules.mjs';
 
 export const ROADS_TEST_DB = fileURLToPath(new URL('./fixtures/roads-test.sqlite', import.meta.url));
 export const FIXTURE_NORTH = fileURLToPath(new URL('./fixtures/valhalla-e2e-north.json', import.meta.url));
@@ -35,15 +38,21 @@ export const matchedResponse = (edges: FakeEdge[], pointCount: number, unmatched
   matched_points: Array.from({ length: pointCount }, (_, i) => ({ type: i < unmatched ? 'unmatched' : 'matched', edge_index: 0 })),
 });
 
+/** 테스트 앱. 도로 DB는 항상 명시한다(기본은 테스트 픽스처). 로컬 전국 DB를 몰래 붙이지 않도록 `roadsPath: undefined`도 픽스처로 본다. */
 export const newApp = (options: AppOptions = {}) =>
-  createApp(openDb(':memory:'), { vehicleHmacKey: 'test-key', roadsPath: ROADS_TEST_DB, retryDelayMs: 5, ...options });
+  createApp(openDb(':memory:'), {
+    vehicleHmacKey: 'test-key',
+    retryDelayMs: 5,
+    ...options,
+    roadsPath: options.roadsPath === undefined ? ROADS_TEST_DB : options.roadsPath,
+  });
 export type TestApp = ReturnType<typeof newApp>;
 
 /** 서울 시청 부근을 북쪽으로 달리는 점 [n]개(약 [stepM]m 간격). */
-export const makePoints = (n: number, stepM = 25, lat0 = 37.5665, lon = 126.978) =>
+export const makePoints = (n: number, stepM = 25, lat0 = 37.5665, lon = 126.978, day = 9) =>
   Array.from({ length: n }, (_, seq) => ({
     seq,
-    ts: new Date(Date.UTC(2026, 10, 9, 0, 0, seq * 2)).toISOString(),
+    ts: new Date(Date.UTC(2026, 10, day, 0, 0, seq * 2)).toISOString(),
     lat: lat0 + (seq * stepM) / 111_195,
     lon,
   }));
@@ -82,61 +91,56 @@ export type SynthWay = {
   id: number;
   roadKey: string;
   highway?: string;
-  oneway?: 'yes' | null;
+  /** OSM `oneway` 태그 값. motorway는 생략해도 일방통행(암묵)으로 본다. */
+  oneway?: 'yes' | '-1' | 'no' | null;
   lengthM: number;
   /** [lon, lat] 시작점. way는 이 점에서 동쪽으로 뻗는 직선으로 만든다. */
   at?: [number, number];
   name?: string;
 };
 
-/** 도로 DB 스키마(scripts/build-road-db.mjs)를 따르는 합성 DB. 분리 차로는 `oneway: 'yes'`·주요 4등급이면 총길이를 1/2로 센다. */
+/** 도로 DB 스키마·규칙(scripts/road-rules.mjs)을 따르는 합성 DB. 분리 구간(주요 4등급 + 일방통행, motorway는 암묵)은 유효 길이를 1/2로 센다. */
 export const makeRoadsDb = async (path: string, ways: SynthWay[], month = '209901') => {
   const { DatabaseSync } = await import('node:sqlite');
   const db = new DatabaseSync(path);
-  db.exec(`
-    CREATE TABLE ways(way_id INTEGER PRIMARY KEY, road_key TEXT NOT NULL, highway TEXT NOT NULL, name TEXT, ref TEXT, length_m REAL NOT NULL, oneway TEXT, eff_length_m REAL NOT NULL, minlon REAL, minlat REAL, maxlon REAL, maxlat REAL, geom_json TEXT NOT NULL);
-    CREATE VIRTUAL TABLE ways_rtree USING rtree(way_id, minlon, maxlon, minlat, maxlat);
-    CREATE TABLE roads(road_key TEXT PRIMARY KEY, display_name TEXT NOT NULL, highway_major TEXT NOT NULL, total_length_m REAL NOT NULL, way_count INTEGER NOT NULL, names_json TEXT NOT NULL DEFAULT '[]');
-    CREATE TABLE snapshot(month TEXT PRIMARY KEY, built_at TEXT NOT NULL, pbf_name TEXT NOT NULL, pbf_timestamp TEXT, total_named_length_m REAL NOT NULL, total_all_length_m REAL NOT NULL, by_class_json TEXT NOT NULL);
-  `);
-  const roads = new Map<string, { len: number; n: number; hw: string; names: Set<string> }>();
+  db.exec(SCHEMA_SQL);
+  const acc = new RoadAccumulator();
   let totalNamed = 0;
   db.exec('BEGIN');
   for (const w of ways) {
-    const hw = w.highway ?? 'primary';
-    const half = w.oneway === 'yes' && ['motorway', 'trunk', 'primary', 'secondary'].includes(hw);
-    const eff = half ? w.lengthM / 2 : w.lengthM;
+    const tags: Record<string, string> = { highway: w.highway ?? 'primary' };
+    if (w.oneway) tags.oneway = w.oneway;
+    if (w.name) tags.name = w.name;
     const [lon, lat] = w.at ?? [127, 37];
     const dLon = w.lengthM / (111_195 * Math.cos((lat * Math.PI) / 180));
-    db.prepare('INSERT INTO ways VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
+    const rec = wayRecord(
       w.id,
-      w.roadKey,
-      hw,
-      w.name ?? null,
-      null,
-      w.lengthM,
-      w.oneway ?? null,
-      eff,
-      lon,
-      lat,
-      lon + dLon,
-      lat,
-      JSON.stringify([
+      tags,
+      [
         [lon, lat],
         [lon + dLon, lat],
-      ]),
+      ],
+      w.roadKey,
     );
-    db.prepare('INSERT INTO ways_rtree VALUES (?,?,?,?,?)').run(w.id, lon, lon + dLon, lat, lat);
-    if (w.roadKey.startsWith('unnamed:')) continue;
-    totalNamed += eff;
-    const r = roads.get(w.roadKey) ?? { len: 0, n: 0, hw, names: new Set<string>() };
-    r.len += eff;
-    r.n++;
-    if (w.name) r.names.add(w.name);
-    roads.set(w.roadKey, r);
+    // 길이는 테스트가 정한 값 그대로 쓴다(하버사인 오차 없이 기대값을 정수로 적으려고).
+    rec.len = w.lengthM;
+    rec.eff = effLength(tags, w.lengthM);
+    db.prepare('INSERT INTO ways VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run(...wayRowValues(rec));
+    db.prepare('INSERT INTO ways_rtree VALUES (?,?,?,?,?)').run(w.id, rec.minlon, rec.maxlon, rec.minlat, rec.maxlat);
+    if (rec.display === null) continue;
+    totalNamed += rec.eff;
+    acc.add(rec);
   }
-  for (const [key, r] of roads) {
-    db.prepare('INSERT INTO roads VALUES (?,?,?,?,?,?)').run(key, key.replace(/^\w+:/, ''), r.hw, r.len, r.n, JSON.stringify([...r.names]));
+  for (const r of acc.rows()) {
+    db.prepare('INSERT INTO roads VALUES (?,?,?,?,?,?,?)').run(
+      r.road_key,
+      r.display_name,
+      r.highway_major,
+      r.total_length_m,
+      r.split_length_m,
+      r.way_count,
+      r.names_json,
+    );
   }
   db.exec('COMMIT');
   db.prepare('INSERT INTO snapshot VALUES (?,?,?,?,?,?,?)').run(
@@ -150,4 +154,26 @@ export const makeRoadsDb = async (path: string, ways: SynthWay[], month = '20990
   );
   db.close();
   return path;
+};
+
+/** 도로 DB 스냅샷의 분모(km, 반올림 없음). */
+export const snapshotTotalKm = async (path: string) => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(path, { readOnly: true });
+  const row = db.prepare('SELECT total_named_length_m AS t FROM snapshot').get() as { t: number };
+  db.close();
+  return row.t / 1000;
+};
+
+/**
+ * 사양 2장: `nationalPercentAfter − Before ≈ newKm / 분모 × 100`(퍼센트). 완료율은 소수 4자리로 반올림돼 있으므로
+ * 비율로 환산한 오차 한도는 1e-6(두 값의 반올림 오차 합 1e-4 %p)에 newKm의 m 단위 반올림(0.0005km / 분모)을 더한 값이다.
+ * 전국 분모(12만 km대)에서는 후자가 4e-9라 사실상 1e-6이고, 분모가 작은 테스트 DB에서만 후자가 눈에 띈다.
+ */
+export const expectNewKmConsistent = (
+  r: { newKm: number; nationalPercentBefore: number; nationalPercentAfter: number },
+  totalKm: number,
+) => {
+  const fromPercent = (r.nationalPercentAfter - r.nationalPercentBefore) / 100;
+  expect(Math.abs(fromPercent - r.newKm / totalKm)).toBeLessThanOrEqual(1e-6 + 0.0005 / totalKm + 1e-9);
 };

@@ -4,7 +4,7 @@ import { openDb } from '../src/db/index.js';
 
 const json = (body: unknown) => ({ method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 
-const newApp = () => createApp(openDb(':memory:'), { vehicleHmacKey: 'test-key' });
+const newApp = () => createApp(openDb(':memory:'), { vehicleHmacKey: 'test-key', roadsPath: null });
 
 const point = (seq: number, lat = 37.5 + seq * 0.0001) => ({
   seq,

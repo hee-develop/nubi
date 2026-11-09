@@ -10,8 +10,10 @@ import { viewerRoutes } from './viewer/index.js';
 
 export type AppOptions = {
   vehicleHmacKey?: string;
-  /** 도로 DB 경로. 생략하면 `NUBI_ROADS_DB` → 최신 `server/data/roads-*.sqlite` → 테스트 DB, `null`이면 도로 DB 없이 뜬다. */
+  /** 도로 DB 경로. 생략하면 `NUBI_ROADS_DB` → 최신 `server/data/roads-*.sqlite`(둘 다 없으면 도로 DB 없음), `null`이면 도로 DB 없이 뜬다. 테스트 픽스처로는 조용히 대체하지 않는다. */
   roadsPath?: string | null;
+  /** `/viewer` 등록 여부. 생략하면 `NUBI_VIEWER=1` 이거나 `NODE_ENV`가 production이 아닐 때만 등록한다(시연·debug용). */
+  viewer?: boolean;
   /** Valhalla 호출 설정(테스트가 fetch를 가짜로 끼운다). */
   valhalla?: TraceDeps;
   /** 매칭 재시도 간격(ms, 기본 5분). */
@@ -34,11 +36,11 @@ export const createApp = (db: Db = openDb(), options: AppOptions = {}) => {
     .get('/health', (c) => c.json({ ok: true as const }))
     .route('/trips', tripsRoutes(db, worker.enqueue))
     .route('/vehicles', vehiclesRoutes(options.vehicleHmacKey ?? resolveVehicleHmacKey(), db))
-    .route('/viewer', viewerRoutes())
     .route(
       '/',
       coverageRoutes(db, () => roads),
     );
+  if (options.viewer ?? (process.env.NUBI_VIEWER === '1' || process.env.NODE_ENV !== 'production')) app.route('/viewer', viewerRoutes());
   return Object.assign(app, { matching: worker });
 };
 

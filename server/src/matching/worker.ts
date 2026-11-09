@@ -1,4 +1,7 @@
-/** 맵매칭 워커: 프로세스 내 단일 소비자. 실패(네트워크·5xx)는 5분 간격으로 최대 24시간 재시도하고 4xx는 영구 실패로 둔다(사양 02 4장). */
+/**
+ * 맵매칭 워커: 프로세스 내 단일 소비자. 실패(네트워크·5xx)는 5분 간격으로 최대 24시간 재시도하고 4xx는 영구 실패로 둔다(사양 02 4장).
+ * `trip_matching.error`에는 `retryable:<코드>`·`permanent:<코드>`만 남기고(API가 그대로 내려 준다) 메시지는 서버 로그로만 보낸다.
+ */
 import type { Db } from '../db/index.js';
 import type { Roads } from '../roads/index.js';
 import { runMatching } from './pipeline.js';
@@ -41,14 +44,12 @@ export const createMatchingWorker = (deps: WorkerDeps) => {
 
   const iso = () => new Date(now()).toISOString();
 
-  const fail = (tripId: string, error: string, queuedAt: string, retryable: boolean) => {
+  const fail = (tripId: string, code: string, detail: string, queuedAt: string, retryable: boolean) => {
     const exhausted = retryable && now() - Date.parse(queuedAt) >= retryLimitMs;
     const permanent = !retryable || exhausted;
-    db.prepare("UPDATE trip_matching SET status = 'failed', error = ?, finished_at = ? WHERE trip_id = ?").run(
-      `${permanent ? 'permanent' : 'retryable'}: ${exhausted ? 'retry_exhausted ' : ''}${error}`,
-      iso(),
-      tripId,
-    );
+    const stored = `${permanent ? 'permanent' : 'retryable'}:${exhausted ? 'retry_exhausted' : code}`;
+    console.warn(`맵매칭 실패 trip=${tripId} ${stored} (${detail})`);
+    db.prepare("UPDATE trip_matching SET status = 'failed', error = ?, finished_at = ? WHERE trip_id = ?").run(stored, iso(), tripId);
     if (!permanent && !stopped) {
       const t = setTimeout(() => {
         timers.delete(t);
@@ -68,17 +69,20 @@ export const createMatchingWorker = (deps: WorkerDeps) => {
       tripId,
     );
     const roads = deps.roads();
-    if (!roads) return fail(tripId, 'roads_db_unavailable', row.queued_at, true);
+    if (!roads) return fail(tripId, 'roads_db_unavailable', '도로 DB 없음', row.queued_at, true);
     try {
-      const result = await runMatching(db, roads, tripId, deps.trace ?? {});
-      db.prepare("UPDATE trip_matching SET status = 'done', error = NULL, finished_at = ?, result_json = ? WHERE trip_id = ?").run(
-        iso(),
-        JSON.stringify(result),
-        tripId,
-      );
+      // done 표시는 driven_ways 갱신과 같은 트랜잭션 안에서 한다(runMatching이 finish를 거기서 부른다).
+      await runMatching(db, roads, tripId, deps.trace ?? {}, (result) => {
+        db.prepare("UPDATE trip_matching SET status = 'done', error = NULL, finished_at = ?, result_json = ? WHERE trip_id = ?").run(
+          iso(),
+          JSON.stringify(result),
+          tripId,
+        );
+      });
     } catch (e) {
-      if (e instanceof ValhallaError) fail(tripId, e.message, row.queued_at, e.retryable);
-      else fail(tripId, e instanceof Error ? e.message : String(e), row.queued_at, true);
+      const detail = e instanceof Error ? e.message : String(e);
+      if (e instanceof ValhallaError) fail(tripId, e.code, detail, row.queued_at, e.retryable);
+      else fail(tripId, 'internal', detail, row.queued_at, true);
     }
   };
 
@@ -93,13 +97,18 @@ export const createMatchingWorker = (deps: WorkerDeps) => {
     }
   };
 
+  const kick = () => {
+    if (running || stopped || queue.length === 0) return;
+    running = pump().finally(() => {
+      running = null;
+      kick(); // 처리 중에 들어온 작업이 있으면 이어서 돈다
+    });
+  };
+
   const enqueue = (tripId: string) => {
     if (stopped || queue.includes(tripId)) return;
     queue.push(tripId);
-    running ??= pump().finally(() => {
-      running = null;
-      if (queue.length > 0) running = pump().finally(() => (running = null));
-    });
+    kick();
   };
 
   return {
@@ -113,12 +122,13 @@ export const createMatchingWorker = (deps: WorkerDeps) => {
         .all() as { trip_id: string }[];
       for (const r of rows) enqueue(r.trip_id);
     },
-    /** 큐가 빌 때까지(재시도 타이머는 기다리지 않는다). 테스트용. */
+    /** 지금 돌고 있는 작업이 끝날 때까지(재시도 타이머는 기다리지 않는다). `stop()` 뒤에는 남은 큐를 비우므로 곧 돌아온다. 테스트용. */
     async idle() {
-      while (running || queue.length > 0) await running;
+      while (running) await running;
     },
     stop() {
       stopped = true;
+      queue.length = 0;
       for (const t of timers) clearTimeout(t);
       timers.clear();
     },

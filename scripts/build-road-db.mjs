@@ -12,24 +12,9 @@ import { mkdirSync, mkdtempSync, rmSync, existsSync, statSync, renameSync, write
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { HIGHWAYS, RoadAccumulator, SCHEMA_SQL, haversine, wayRecord, wayRowValues } from './road-rules.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const HIGHWAYS = [
-  'motorway',
-  'trunk',
-  'primary',
-  'secondary',
-  'tertiary',
-  'unclassified',
-  'residential',
-  'motorway_link',
-  'trunk_link',
-  'primary_link',
-  'secondary_link',
-  'tertiary_link',
-];
-const HALF_CLASSES = new Set(['motorway', 'trunk', 'primary', 'secondary']);
-const RANK = { motorway: 0, trunk: 1, primary: 2, secondary: 3, tertiary: 4, unclassified: 5, residential: 6 };
 
 const args = process.argv.slice(2);
 const opt = (name) => {
@@ -63,49 +48,17 @@ sh('osmium', ['tags-filter', src, ...HIGHWAYS.map((h) => `w/highway=${h}`), '-o'
 const pbfTimestamp =
   execFileSync('osmium', ['fileinfo', '-g', 'header.option.osmosis_replication_timestamp', pbf]).toString().trim() || null;
 
-// --- 규칙 -----------------------------------------------------------------
-const normalize = (s) => s.normalize('NFKC').replace(/\s+/g, '');
-function classify(tags, wayId) {
-  const hw = tags.highway;
-  const major = hw.replace(/_link$/, '');
-  const ref = tags.ref ? tags.ref.split(';')[0].trim() : '';
-  const name = tags.name ? tags.name.trim() : '';
-  if (ref && major === 'motorway') return { key: `mw:${normalize(ref)}`, display: name || `고속도로 ${ref}` };
-  if (ref && (major === 'trunk' || major === 'primary')) return { key: `nr:${normalize(ref)}`, display: `국도 ${ref}호선` };
-  if (ref && (major === 'secondary' || major === 'tertiary')) return { key: `lr:${normalize(ref)}`, display: `지방도 ${ref}호선` };
-  // ref가 있어도 위 등급이 아니면(unclassified·residential) 이름 규칙으로 넘어간다
-  if (name) return { key: `nm:${normalize(name)}`, display: name };
-  return { key: `unnamed:${wayId}`, display: null };
-}
-const R = 6371008.8;
-const rad = Math.PI / 180;
-function haversine(a, b) {
-  const dLat = (b[1] - a[1]) * rad,
-    dLon = (b[0] - a[0]) * rad;
-  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a[1] * rad) * Math.cos(b[1] * rad) * Math.sin(dLon / 2) ** 2;
-  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
-}
-
 // --- DB --------------------------------------------------------------------
 mkdirSync(dirname(out), { recursive: true });
 const tmpOut = `${out}.tmp`;
 rmSync(tmpOut, { force: true });
 const db = new DatabaseSync(tmpOut);
-db.exec(`
-PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;
-CREATE TABLE ways(way_id INTEGER PRIMARY KEY, road_key TEXT NOT NULL, highway TEXT NOT NULL, name TEXT, ref TEXT,
-  length_m REAL NOT NULL, oneway TEXT, eff_length_m REAL NOT NULL, minlon REAL, minlat REAL, maxlon REAL, maxlat REAL, geom_json TEXT NOT NULL);
-CREATE INDEX ways_road_key ON ways(road_key);
-CREATE VIRTUAL TABLE ways_rtree USING rtree(way_id, minlon, maxlon, minlat, maxlat);
-CREATE TABLE roads(road_key TEXT PRIMARY KEY, display_name TEXT NOT NULL, highway_major TEXT NOT NULL,
-  total_length_m REAL NOT NULL, way_count INTEGER NOT NULL, names_json TEXT NOT NULL DEFAULT '[]');
-CREATE TABLE snapshot(month TEXT PRIMARY KEY, built_at TEXT NOT NULL, pbf_name TEXT NOT NULL, pbf_timestamp TEXT,
-  total_named_length_m REAL NOT NULL, total_all_length_m REAL NOT NULL, by_class_json TEXT NOT NULL);
-`);
+db.exec(`PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;`);
+db.exec(SCHEMA_SQL);
 const insWay = db.prepare('INSERT OR REPLACE INTO ways VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)');
 const insRtree = db.prepare('INSERT OR REPLACE INTO ways_rtree VALUES (?,?,?,?,?)');
 
-const roads = new Map(); // key -> {names:Map(표시이름→way 수), nameLen:Map(way name→길이 m), rank, len, n, c:[minlon,minlat,maxlon,maxlat] (way bbox 중심들의 범위)}
+const acc = new RoadAccumulator();
 const byClass = {};
 let totalAll = 0,
   totalNamed = 0,
@@ -132,83 +85,34 @@ for await (const raw of createInterface({ input: exp.stdout, crlfDelay: Infinity
     skipped++;
     continue;
   }
-  let len = 0,
-    minlon = 181,
-    minlat = 91,
-    maxlon = -181,
-    maxlat = -91;
-  for (let i = 0; i < coords.length; i++) {
-    const [x, y] = coords[i];
-    if (x < minlon) minlon = x;
-    if (x > maxlon) maxlon = x;
-    if (y < minlat) minlat = y;
-    if (y > maxlat) maxlat = y;
-    if (i) len += haversine(coords[i - 1], coords[i]);
-  }
-  const { key, display } = classify(tags, id);
-  const major = tags.highway.replace(/_link$/, '');
-  // 분리 차로(사양 6-3): 고속·국도·지방도(주요 4등급 + link)의 oneway=yes way는 상·하행 쌍이 한 도로라고 보고 총길이·분모에 1/2로 센다
-  const eff = tags.oneway === 'yes' && HALF_CLASSES.has(major) ? len / 2 : len;
-  insWay.run(
-    id,
-    key,
-    tags.highway,
-    tags.name ?? null,
-    tags.ref ?? null,
-    len,
-    tags.oneway ?? null,
-    eff,
-    minlon,
-    minlat,
-    maxlon,
-    maxlat,
-    JSON.stringify(coords),
-  );
-  insRtree.run(id, minlon, maxlon, minlat, maxlat);
+  const w = wayRecord(id, tags, coords);
+  insWay.run(...wayRowValues(w));
+  insRtree.run(id, w.minlon, w.maxlon, w.minlat, w.maxlat);
   wayCount++;
-  totalAll += len;
+  totalAll += w.len;
   byClass[tags.highway] ??= { length_m: 0, ways: 0 };
-  byClass[tags.highway].length_m += len;
+  byClass[tags.highway].length_m += w.len;
   byClass[tags.highway].ways++;
-  if (display === null) {
+  if (w.display === null) {
     unnamedWays++;
-    unnamedLen += len;
+    unnamedLen += w.len;
     continue;
   }
-  totalNamed += eff;
-  let r = roads.get(key);
-  if (!r) roads.set(key, (r = { names: new Map(), nameLen: new Map(), rank: 99, len: 0, n: 0, c: [181, 91, -181, -91] }));
-  r.names.set(display, (r.names.get(display) ?? 0) + 1);
-  if (tags.name) r.nameLen.set(tags.name.trim(), (r.nameLen.get(tags.name.trim()) ?? 0) + len);
-  r.rank = Math.min(r.rank, RANK[major] ?? 99);
-  r.len += eff;
-  r.n++;
-  const cx = (minlon + maxlon) / 2,
-    cy = (minlat + maxlat) / 2;
-  if (cx < r.c[0]) r.c[0] = cx;
-  if (cy < r.c[1]) r.c[1] = cy;
-  if (cx > r.c[2]) r.c[2] = cx;
-  if (cy > r.c[3]) r.c[3] = cy;
+  totalNamed += w.eff;
+  acc.add(w);
 }
 await exited;
-const insRoad = db.prepare('INSERT INTO roads VALUES (?,?,?,?,?,?)');
-const rankName = Object.fromEntries(Object.entries(RANK).map(([k, v]) => [v, k]));
+const insRoad = db.prepare('INSERT INTO roads VALUES (?,?,?,?,?,?,?)');
 let farApart = 0,
   farApartWays = 0,
   nmRoads = 0;
-for (const [key, r] of roads) {
-  const display = [...r.names.entries()].sort((a, b) => b[1] - a[1])[0][0];
-  // names_json: 그 도로를 이루는 way의 name 상위 200개(길이 순, 가안: 사양 6-1의 20개로는 짧은 구간의 거리명이 빠져 검색이 안 됨). 국도 31호선 = 세종대로 외 처럼 거리명으로 찾기 위한 것(사양 6-1)
-  const topNames = [...r.nameLen.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 200)
-    .map(([n]) => n);
-  insRoad.run(key, display, rankName[r.rank] ?? 'residential', r.len, r.n, JSON.stringify(topNames));
-  if (key.startsWith('nm:')) {
+for (const r of acc.rows()) {
+  insRoad.run(r.road_key, r.display_name, r.highway_major, r.total_length_m, r.split_length_m, r.way_count, r.names_json);
+  if (r.road_key.startsWith('nm:')) {
     nmRoads++;
-    if (haversine([r.c[0], r.c[1]], [r.c[2], r.c[3]]) > 50_000) {
+    if (haversine([r.center[0], r.center[1]], [r.center[2], r.center[3]]) > 50_000) {
       farApart++;
-      farApartWays += r.n;
+      farApartWays += r.way_count;
     }
   }
 }
@@ -234,7 +138,7 @@ const stats = {
   month,
   pbfTimestamp,
   ways: wayCount,
-  roads: roads.size,
+  roads: acc.roads.size,
   nmRoads,
   skipped,
   totalAllKm: totalAll / 1000,

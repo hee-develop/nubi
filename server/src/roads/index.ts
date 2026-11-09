@@ -18,10 +18,10 @@ export type Roads = {
 };
 
 const dataDir = fileURLToPath(new URL('../../data/', import.meta.url));
-const fixturePath = fileURLToPath(new URL('../../test/fixtures/roads-test.sqlite', import.meta.url));
 
 /**
- * 도로 DB 경로. `NUBI_ROADS_DB` → `server/data/roads-*.sqlite` 중 최신(파일명 사전순) → 테스트 DB 순.
+ * 도로 DB 경로. `NUBI_ROADS_DB` → `server/data/roads-*.sqlite` 중 최신(파일명 사전순) 순이고, 둘 다 없으면 null(조회 API 503·매칭 재시도 대기).
+ * 테스트 픽스처로 조용히 대체하지 않는다. 픽스처는 테스트·E2E가 `NUBI_ROADS_DB`나 `roadsPath`로 명시할 때만 쓴다(사양 3-2).
  * 사용자 기록 DB(`nubi.sqlite`)와 파일이 다르다(ODbL 파생 DB 분리).
  */
 export const resolveRoadsPath = (env: string | undefined = process.env.NUBI_ROADS_DB, dir: string = dataDir): string | null => {
@@ -33,9 +33,9 @@ export const resolveRoadsPath = (env: string | undefined = process.env.NUBI_ROAD
       .at(-1);
     if (latest) return join(dir, latest);
   } catch {
-    // data 폴더가 없으면 테스트 DB로 넘어간다
+    // data 폴더가 없으면 도로 DB 없음
   }
-  return existsSync(fixturePath) ? fixturePath : null;
+  return null;
 };
 
 /**
@@ -49,6 +49,8 @@ export const attachRoads = (db: Db, path: string | null | undefined): Roads | nu
     const s = db.prepare(`SELECT month, total_named_length_m FROM ${RD}.snapshot ORDER BY month DESC LIMIT 1`).get() as
       { month: string; total_named_length_m: number } | undefined;
     if (!s) return null;
+    // 묶음별 상한(사양 2장)에 쓰는 열이 없는 옛 스키마는 쓰지 않는다(재빌드 필요).
+    db.prepare(`SELECT split_length_m FROM ${RD}.roads LIMIT 1`).get();
     return { path, month: s.month, totalNamedLengthM: s.total_named_length_m };
   } catch (e) {
     console.warn(`도로 DB를 열 수 없습니다(${path}): ${e instanceof Error ? e.message : String(e)}`);
@@ -82,26 +84,28 @@ export const DRIVEN_CTE = `d AS (
 )`;
 
 /**
- * 도로별 달린 길이 CTE `r(road_key, driven, last)`(DRIVEN_CTE 뒤에 잇는다). 달린 길이 = Σ 커버리지 × 실제 way 길이.
- * 분리 차로(`eff_length_m` < `length_m`)는 총길이를 1/2로 세므로 한 방향만 달려도 도로 전체를 채운다(사양 6-3). 양방향을 다 달리면 총길이를 넘으므로 도로별로 총길이로 자른다.
+ * 도로별 달린 길이 CTE `r(road_key, total, driven, last)`(DRIVEN_CTE 뒤에 잇는다). 사양 2장의 묶음 정의:
+ * 도로마다 분리 구간 묶음(`eff_length_m < length_m`인 way: 주요 4등급 oneway, 상한 = Σ length / 2 = `roads.split_length_m`)과
+ * 양방향 묶음(상한 = Σ length = `total_length_m − split_length_m`)으로 나눠 `min(상한, Σ 커버리지 × length_m)`을 각각 구해 더한다.
+ * 그래서 분리 구간의 상·하행을 모두 달려도 양방향 구간의 몫을 채우지 못하고, 총길이(`total`)를 넘지도 않는다.
  */
 export const ROAD_DRIVEN_CTE = `r AS (
-  SELECT w.road_key, SUM(d.cov * w.length_m) AS driven, MAX(d.last) AS last
-  FROM d JOIN ${RD}.ways w ON w.way_id = d.way_id GROUP BY w.road_key
+  SELECT w.road_key, ro.total_length_m AS total,
+         MIN(SUM(CASE WHEN w.eff_length_m < w.length_m THEN d.cov * w.length_m ELSE 0 END), ro.split_length_m)
+         + MIN(SUM(CASE WHEN w.eff_length_m < w.length_m THEN 0 ELSE d.cov * w.length_m END), ro.total_length_m - ro.split_length_m) AS driven,
+         MAX(d.last) AS last
+  FROM d JOIN ${RD}.ways w ON w.way_id = d.way_id JOIN ${RD}.roads ro ON ro.road_key = w.road_key
+  GROUP BY w.road_key
 )`;
 
 /** 전국 완료율(%, 0~100)과 거리(m). 분모는 도로 DB 스냅샷의 이름 있는 도로 유효 총길이. */
 export const nationalCoverage = (db: Db, roads: Roads, vehicleId: string) => {
   const row = db
-    .prepare(
-      `WITH ${DRIVEN_CTE}, ${ROAD_DRIVEN_CTE}
-       SELECT COALESCE(SUM(MIN(r.driven, ro.total_length_m)), 0) AS driven
-       FROM r JOIN ${RD}.roads ro ON ro.road_key = r.road_key`,
-    )
+    .prepare(`WITH ${DRIVEN_CTE}, ${ROAD_DRIVEN_CTE} SELECT COALESCE(SUM(driven), 0) AS driven FROM r`)
     .get(vehicleId, vehicleId) as { driven: number };
   const percent = roads.totalNamedLengthM > 0 ? (row.driven / roads.totalNamedLengthM) * 100 : 0;
   return { drivenM: row.driven, percent };
 };
 
-/** 완료율은 0.0001% 단위로 반올림한다(가안: 전국 분모가 14만 km라 1.5km 주행이 소수 2자리에서는 0이 된다). */
+/** 완료율은 0.0001% 단위로 반올림한다(가안: 전국 분모가 12만 km대라 1.5km 주행이 소수 2자리에서는 0이 된다). */
 export const roundPercent = (p: number) => Math.round(p * 10_000) / 10_000;
