@@ -4,6 +4,21 @@
 import { createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
+/**
+ * 1회 실측(2026-11-09, 전국 도로 DB·Valhalla 3.5.1: 세종대로 newKm 1.245, e2e-north newKm 0.163, 누적 drivenKm 1.41)에 ±10%를 둔 기대값.
+ * 실제 Valhalla 응답은 결정적이다. 완료율은 분모가 도로 DB마다 달라 값 대신 drivenKm/totalKm과의 일치로 본다.
+ */
+const EXPECT = {
+  newKm: { min: 1.12, max: 1.37 },
+  drivenKm: { min: 1.27, max: 1.55 },
+};
+
+// 도로 색칠 검증 모드(사양 02 8장): verify-trip.mjs --road-coloring <trips.json> <e2e-sejong.gpx>. 서버 주소는 E2E_BASE_URL.
+if (process.argv[2] === '--road-coloring') {
+  await verifyRoadColoring(process.argv[3], process.argv[4]);
+  process.exit(0);
+}
+
 const [detailPath, gpxPath, listPath, schemaPath, registerPath] = process.argv.slice(2);
 const trip = JSON.parse(readFileSync(detailPath, 'utf8'));
 const gpx = [...readFileSync(gpxPath, 'utf8').matchAll(/<trkpt\s+lat="([-\d.]+)"\s+lon="([-\d.]+)"/g)].map((m) => ({
@@ -87,3 +102,87 @@ if (failures.length > 0) {
 console.log(
   `OK trip=${trip.tripId} localId=${trip.localId} pointCount=${trip.pointCount} distanceM=${trip.distanceM} durationS=${trip.durationS} odometer=${trip.odometerStartKm}->${trip.odometerEndKm}`,
 );
+
+/** 사양 02 8장 단언. 두 트립(e2e-north 30점, e2e-sejong 60점)을 모두 조회한다. 기대값은 1회 실측 후 ±10%로 고정한다. */
+async function verifyRoadColoring(listFile, sejongGpx) {
+  const base = process.env.E2E_BASE_URL;
+  const fails = [];
+  const ok = (cond, msg) => {
+    if (!cond) fails.push(msg);
+  };
+  const get = async (path) => {
+    const res = await fetch(base + path);
+    return { status: res.status, body: await res.json() };
+  };
+  const trips = JSON.parse(readFileSync(listFile, 'utf8')).trips;
+  ok(trips.length === 2, `트립이 2건이어야 하는데 ${trips.length}건`);
+  const north = trips.find((t) => t.pointCount === 30);
+  const sejong = trips.find((t) => t.pointCount === 60);
+  ok(north && sejong, `e2e-north(30점)·e2e-sejong(60점) 트립을 찾지 못함: ${JSON.stringify(trips.map((t) => t.pointCount))}`);
+  if (!north || !sejong) return finish(fails);
+
+  // 매칭은 종료 직후 비동기로 돈다. done이 될 때까지 최대 60초 기다린다.
+  const matching = async (tripId) => {
+    let last;
+    for (let i = 0; i < 60; i++) {
+      last = (await get(`/trips/${tripId}/matching`)).body;
+      if (last.status === 'done' || (last.status === 'failed' && String(last.error).startsWith('permanent'))) break;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    return last;
+  };
+  const mSejong = await matching(sejong.tripId);
+  const mNorth = await matching(north.tripId);
+
+  ok(mSejong.status === 'done', `세종대로 matching.status ${mSejong.status} != done (${mSejong.error ?? ''})`);
+  ok(mSejong.result?.outcome === 'counted', `세종대로 outcome ${mSejong.result?.outcome}`);
+  const newKm = mSejong.result?.newKm ?? 0;
+  ok(newKm >= EXPECT.newKm.min && newKm <= EXPECT.newKm.max, `세종대로 newKm ${newKm} not in ${EXPECT.newKm.min}~${EXPECT.newKm.max}`);
+  ok(Boolean(mSejong.snapshotMonth) && String(mSejong.attribution).includes('OpenStreetMap'), 'snapshotMonth·attribution 없음');
+  // 첫 트립(e2e-north)은 골목에 매칭돼 새 도로가 적다. done이면 되고 newKm은 0 이상.
+  ok(mNorth.status === 'done', `e2e-north matching.status ${mNorth.status} != done (${mNorth.error ?? ''})`);
+  ok((mNorth.result?.newKm ?? -1) >= 0, `e2e-north newKm ${mNorth.result?.newKm}`);
+
+  const v = encodeURIComponent(sejong.vehicleId);
+  const roads = (await get(`/coverage/roads?vehicleId=${v}&q=${encodeURIComponent('세종대로')}&limit=50`)).body;
+  const nr31 = (roads.items ?? []).find((r) => r.roadKey === 'nr:31');
+  ok(Boolean(nr31), `coverage/roads?q=세종대로에 nr:31이 없음: ${JSON.stringify((roads.items ?? []).map((r) => r.roadKey))}`);
+  ok(nr31?.names?.includes('세종대로'), `nr:31 names에 세종대로가 없음: ${JSON.stringify(nr31?.names)}`);
+  const summary = (await get(`/coverage/summary?vehicleId=${v}`)).body;
+  ok(summary.nationalPercent > 0, `nationalPercent ${summary.nationalPercent} <= 0`);
+  ok(
+    summary.drivenKm >= EXPECT.drivenKm.min && summary.drivenKm <= EXPECT.drivenKm.max,
+    `drivenKm ${summary.drivenKm} not in ${EXPECT.drivenKm.min}~${EXPECT.drivenKm.max}`,
+  );
+  const pct = (summary.drivenKm / summary.totalKm) * 100;
+  ok(
+    Math.abs(summary.nationalPercent - pct) <= pct * 0.01 + 0.00006,
+    `nationalPercent ${summary.nationalPercent} != drivenKm/totalKm ${pct}`,
+  );
+  ok(summary.roadsStarted >= 1, `roadsStarted ${summary.roadsStarted}`);
+
+  const pts = [...readFileSync(sejongGpx, 'utf8').matchAll(/<trkpt\s+lat="([-\d.]+)"\s+lon="([-\d.]+)"/g)].map((m) => [
+    Number(m[1]),
+    Number(m[2]),
+  ]);
+  const lats = pts.map((p) => p[0]);
+  const lons = pts.map((p) => p[1]);
+  const pad = 0.002;
+  const bbox = [Math.min(...lons) - pad, Math.min(...lats) - pad, Math.max(...lons) + pad, Math.max(...lats) + pad].join(',');
+  const seg = (await get(`/coverage/segments?vehicleId=${v}&bbox=${bbox}`)).body;
+  ok((seg.features ?? []).length >= 5, `segments feature ${(seg.features ?? []).length} < 5`);
+
+  const ms = Date.parse(mSejong.finishedAt) - Date.parse(mSejong.startedAt);
+  console.log(
+    `MEASURED newKm=${newKm} nationalPercent=${summary.nationalPercent} matchingMs=${ms} segments=${(seg.features ?? []).length} roadsStarted=${summary.roadsStarted} northNewKm=${mNorth.result?.newKm} snapshot=${summary.snapshotMonth} totalKm=${summary.totalKm}`,
+  );
+  finish(fails);
+}
+
+function finish(fails) {
+  if (fails.length > 0) {
+    for (const f of fails) console.error(`검증 실패: ${f}`);
+    process.exit(1);
+  }
+  console.log('OK road-coloring');
+}

@@ -1,0 +1,43 @@
+# 도로 색칠 E2E(사양 02 8장). trip-recording flow 다음에 돈다. GPX e2e-sejong(광화문 → 숭례문 세종대로 약 1.5km, 60점)을 재생하고
+# 트립 종료 뒤 서버 맵매칭 결과가 종료 화면에 "새 도로 N.Nkm · 전국 x% (+y)"로 나오는지 본다. 서버는 실제 Valhalla에 붙어 있어야 한다(scripts/e2e-car.sh).
+# CLOCK_PLUS_6MIN은 스크립트가 flow 시작 직전에 넘기는 "지금 + 6분"(epoch ms)이다. 글자 검증은 정규식(전체 일치)이라 뒤에 .*를 붙인다.
+appId: com.nubi.car
+name: 도로 색칠
+env:
+  SHOT_DIR: e2e/output/car
+---
+# 1. 상태를 비우고(서버에는 앞 flow의 트립이 남아 있다) 대기 화면
+- launchApp
+- openLink: nubi-debug://signal?reset=1
+- extendedWaitUntil:
+    visible: '대기'
+    timeout: 20000
+- takeScreenshot: ${SHOT_DIR}/10-road-idle
+
+# 2. 기어 D → 세종대로 60점(1초 간격) 재생
+- openLink: nubi-debug://signal?gear=D
+- openLink: nubi-debug://signal?gpx=e2e-sejong.gpx
+- extendedWaitUntil:
+    visible: '기록 중'
+    timeout: 30000
+- takeScreenshot: ${SHOT_DIR}/11-road-recording
+- extendedWaitUntil:
+    visible: '샘플 60'
+    timeout: 90000
+- takeScreenshot: ${SHOT_DIR}/12-road-samples
+
+# 3. 기어 P 뒤 시계를 6분 뒤로 → 종료됨. flush로 서버에 전량 올린다
+- openLink: nubi-debug://signal?gear=P&now=${CLOCK_PLUS_6MIN}&flush=1
+- extendedWaitUntil:
+    visible: '종료됨'
+    timeout: 20000
+- extendedWaitUntil:
+    visible: '마지막 업로드: 성공.*'
+    timeout: 30000
+
+# 4. 서버 맵매칭 결과(폴링 3초 간격, 최대 60초)가 종료 화면 한 줄로 나온다
+- extendedWaitUntil:
+    visible: '새 도로 .*km.*'
+    timeout: 70000
+- assertNotVisible: '이번 주행은 집계되지 않았어요.*'
+- takeScreenshot: ${SHOT_DIR}/13-road-result

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # 차량 앱 E2E(Maestro + 서버 검증): debug 앱을 설치하고 서버를 띄운 뒤 flow를 돌리고, 서버에 저장된 트립을 검증한다.
 # 사용: pnpm e2e:car   (Pleos 에뮬레이터 emulator-5554만 쓴다. 꺼져 있으면 실행 전에 띄워 두세요)
-# 환경 변수: E2E_OUT은 산출물 루트(기본 e2e/output/car), PORT는 서버 포트(기본 8787).
+# flow 2개를 순서대로 돈다: 주행 기록(trip-recording, GPX e2e-north) → 도로 색칠(road-coloring, GPX e2e-sejong). 도로 색칠은 실제 Valhalla(nubi-valhalla, 포트 8002)를 쓴다.
+# 환경 변수: E2E_OUT은 산출물 루트(기본 e2e/output/car), PORT는 서버 포트(기본 8787), VALHALLA_PORT는 Valhalla 포트(기본 8002),
+#            NUBI_ROADS_DB는 도로 DB(기본: server/data/roads-*.sqlite 중 최신, 없으면 server/test/fixtures/roads-test.sqlite).
 # 실행마다 $E2E_OUT/<시각>/ 폴더를 새로 만들고 스크린샷(shots/)과 로그는 그 안에만 둔다.
 set -euo pipefail
 # 백그라운드로 띄운 서버가 자기 프로세스 그룹을 갖도록 job control을 켠다(그룹 전체를 한 번에 종료하려고 쓴다)
@@ -9,6 +11,7 @@ set -m
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PORT="${PORT:-8787}"
+VALHALLA_PORT="${VALHALLA_PORT:-8002}"
 SERIAL="emulator-5554"
 export ANDROID_SERIAL="$SERIAL"
 RUN_DIR="${E2E_OUT:-$ROOT/e2e/output/car}/$(date +%Y%m%d-%H%M%S)"
@@ -30,6 +33,20 @@ if lsof -ti "tcp:$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   echo "포트 $PORT 를 이미 쓰고 있습니다. 서버를 내리고 다시 실행하세요." >&2
   exit 1
 fi
+
+# 도로 DB: 전국이 있으면 그것, 없으면 테스트 DB(사양 02 8장)
+if [ -z "${NUBI_ROADS_DB:-}" ]; then
+  NUBI_ROADS_DB="$(ls -1 "$ROOT"/server/data/roads-*.sqlite 2>/dev/null | sort | tail -1 || true)"
+  [ -n "$NUBI_ROADS_DB" ] || NUBI_ROADS_DB="$ROOT/server/test/fixtures/roads-test.sqlite"
+fi
+export NUBI_ROADS_DB
+echo "== Valhalla 확인 (포트 $VALHALLA_PORT), 도로 DB: $NUBI_ROADS_DB"
+VALHALLA_PORT="$VALHALLA_PORT" bash "$ROOT/scripts/valhalla-up.sh"
+for _ in $(seq 1 60); do
+  [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$VALHALLA_PORT/status" || true)" = "200" ] && break
+  sleep 1
+done
+[ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$VALHALLA_PORT/status" || true)" = "200" ] || { echo "Valhalla /status가 200이 아닙니다." >&2; exit 1; }
 
 SERVER_PGID=""
 stop_server() {
@@ -68,7 +85,7 @@ PROBE_VIN="E2EPROBEVIN0001"
 echo "== 서버 시작 (포트 $PORT, 메모리 DB)"
 mkdir -p "$RUN_DIR"
 # watch 없이 한 번만 띄운다. 서브셸이 곧 프로세스 그룹 리더라 그룹 전체(tsx와 자식 node)를 함께 종료한다.
-(cd "$ROOT/server" && NUBI_DB=:memory: NUBI_VEHICLE_HMAC_KEY="$HMAC_KEY" PORT="$PORT" exec ./node_modules/.bin/tsx src/index.ts >"$RUN_DIR/server.log" 2>&1) &
+(cd "$ROOT/server" && NUBI_DB=:memory: NUBI_VEHICLE_HMAC_KEY="$HMAC_KEY" PORT="$PORT" NUBI_VALHALLA_URL="http://127.0.0.1:$VALHALLA_PORT" NUBI_ROADS_DB="$NUBI_ROADS_DB" exec ./node_modules/.bin/tsx src/index.ts >"$RUN_DIR/server.log" 2>&1) &
 SERVER_PGID=$!
 for _ in $(seq 1 30); do
   curl -fs "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
@@ -108,4 +125,22 @@ curl -fs "http://127.0.0.1:$PORT/trips/$TRIP_ID" >"$RUN_DIR/trip-detail.json"
 curl -fs -X POST -H 'content-type: application/json' -d "{\"vin\":\"$PROBE_VIN\"}" "http://127.0.0.1:$PORT/vehicles/register" >"$RUN_DIR/register.json"
 curl -fs "http://127.0.0.1:$PORT/trips?limit=10" >"$RUN_DIR/trips-after-register.json"
 NUBI_VEHICLE_HMAC_KEY="$HMAC_KEY" E2E_PROBE_VIN="$PROBE_VIN" node "$ROOT/scripts/verify-trip.mjs" "$RUN_DIR/trip-detail.json" "$ROOT/car/app/src/debug/assets/e2e-north.gpx" "$RUN_DIR/trips-after-register.json" "$ROOT/server/src/db/schema.ts" "$RUN_DIR/register.json"
+echo "== 주행 기록 통과"
+
+echo "== Maestro 실행: 도로 색칠 (스크린샷: $SHOTS)"
+CLOCK_PLUS_6MIN=$(( $(date +%s) * 1000 + 6 * 60 * 1000 ))
+set +e
+"$MAESTRO" test "e2e/maestro/car/road-coloring.yaml" \
+  --device "$SERIAL" \
+  -e SHOT_DIR="$SHOTS" \
+  -e CLOCK_PLUS_6MIN="$CLOCK_PLUS_6MIN" \
+  --test-output-dir "$RUN_DIR/maestro/road-coloring"
+MAESTRO_RC=$?
+set -e
+"${ADB[@]}" logcat -d -s NubiLoc NubiTrip NubiVehicle NubiCarSignals NubiService NubiDebug NubiUpload NubiVehicleId NubiCipher NubiCoverage AndroidRuntime >"$RUN_DIR/app-logcat-road-coloring.txt" 2>&1 || true
+[ "$MAESTRO_RC" -eq 0 ] || { echo "Maestro(도로 색칠) 실패(rc=$MAESTRO_RC)" >&2; exit "$MAESTRO_RC"; }
+
+echo "== 서버 검증: 도로 색칠"
+curl -fs "http://127.0.0.1:$PORT/trips?limit=10" >"$RUN_DIR/trips-final.json"
+E2E_BASE_URL="http://127.0.0.1:$PORT" node "$ROOT/scripts/verify-trip.mjs" --road-coloring "$RUN_DIR/trips-final.json" "$ROOT/car/app/src/debug/assets/e2e-sejong.gpx" | tee "$RUN_DIR/road-coloring-verify.txt"
 echo "== 통과. 산출물: $RUN_DIR"

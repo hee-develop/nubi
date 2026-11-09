@@ -115,7 +115,7 @@ SecurityException: Starting FGS with type location ... requires permissions:
 | 도로 DB | `roads-202611.sqlite` 351 MB(350,756,864 B), 빌드 11.4초(osmium 필터·export 포함), 최대 RSS 2.1 GB |
 | 멱등성 | `setup-valhalla.sh` 재실행 0.3초(기존 컨테이너 재사용), `valhalla-up.sh` 정지 상태에서 2.2초 |
 
-도로 DB 통계(전국, 사양 3-2 등급): way 734,533개, road_key 79,478개(`nm:` 78,811), 총 길이 227,980 km, 이름·번호 있는 길이 140,444 km(분모). 이름·번호 없는 way 377,897개(51.4%), 길이로 38.4%(87,536 km).
+도로 DB 통계(전국, 사양 3-2 등급): way 734,533개, road_key 79,478개(`nm:` 78,811), 총 길이 227,980 km, 이름·번호 있는 길이 140,444 km(분리 차로 1/2 적용 전) → 122,422 km(적용 후, 분모). 이름·번호 없는 way 377,897개(51.4%), 길이로 38.4%(87,536 km).
 
 | highway | km | way |
 |---|---|---|
@@ -139,3 +139,17 @@ SecurityException: Starting FGS with type location ... requires permissions:
 - edge 중 way 221974030·1551642275(`service_other`)는 도로 DB(service 제외)에 없어 `ignored_ways`로 센다. 이름 없는 way(`unnamed:*`) 5개(primary_link 2·residential 3)는 분자·분모에서 빠진다.
 - Valhalla `edge.length` 단위는 km(응답 `units: kilometers`)다. 미터 환산 필요.
 - 타일 빌드 중 북한 행정구역 relation 경고(`missing way member`)가 나오나 무시해도 된다.
+
+### 7-1. 도로 색칠 E2E 실측 (feat/02, 2026-11-09, `pnpm e2e:car` 두 flow)
+
+전국 도로 DB(`roads-202611.sqlite`, 분리 차로 1/2 적용 뒤 분모 122,421.73 km)와 실제 Valhalla 3.5.1 컨테이너. GPX `e2e-sejong`(광화문 → 숭례문 방향 60점, GPS 거리 1,481 m).
+
+| 항목 | 실측 |
+|---|---|
+| newKm(세종대로 트립) | 1.245 km (기대 1.12~1.37, ±10%) |
+| newKm(e2e-north 트립) | 0.163 km (골목 매칭, `done`) |
+| 누적 drivenKm / nationalPercent | 1.41 km / 0.0012 % (소수 4자리) |
+| 매칭 소요(서버 `finishedAt - startedAt`) | 9~20 ms(5회 실측, Valhalla 로컬 호출 포함) |
+| segments(GPX bbox) / 시작한 도로 | 11개 / 5개 |
+| 종료 화면 | `새 도로 1.2km · 전국 0.0012% (+0.0011)` + 대기 줄 `전국 0.0012% 달렸어요` |
+| 사정 | `PORT=8788`로 실행(8787은 다른 프로젝트 서버가 사용 중이었음) |
