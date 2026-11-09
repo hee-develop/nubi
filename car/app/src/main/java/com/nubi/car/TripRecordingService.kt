@@ -56,6 +56,8 @@ class TripRecordingService : Service() {
         }
         started = true
         engine.onServiceStart()
+        // 대기 화면의 전국 완료율은 서비스 시작 때 1회만 받는다(실패하면 생략).
+        TripEngineProvider.coverage(this).refreshNational()
         startSources()
     }
 

@@ -26,6 +26,7 @@ object DebugSignals {
         if (value("reset") == "1") {
             GpxPlayer.stop()
             engine.reset()
+            TripEngineProvider.coverage(context).clear()
         }
         if (value("real") == "1") engine.setRealLocationAccepted(true)
         value("gear")?.let { engine.onGear(gearOf(it)) }

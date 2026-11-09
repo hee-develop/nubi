@@ -18,11 +18,14 @@ import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.nubi.car.trip.CoverageTracker
 import com.nubi.car.trip.RecorderHealth
 import com.nubi.car.trip.TripEngine
 import com.nubi.car.trip.TripEngineProvider
 import com.nubi.car.trip.TripState
 import com.nubi.car.trip.UploadKind
+import com.nubi.car.trip.formatMatchingLine
+import com.nubi.car.trip.formatNationalLine
 
 /**
  * 글자 위주 상태 화면. 1초마다 한 번만 갱신한다.
@@ -34,6 +37,9 @@ class MainActivity : Activity() {
     private lateinit var samplesText: TextView
     private lateinit var distanceText: TextView
     private lateinit var uploadText: TextView
+    private lateinit var nationalText: TextView
+    private lateinit var matchingText: TextView
+    private lateinit var coverage: CoverageTracker
     private lateinit var healthText: TextView
     private lateinit var storageText: TextView
     private lateinit var restartButton: Button
@@ -72,6 +78,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         engine = TripEngineProvider.get(this)
+        coverage = TripEngineProvider.coverage(this)
         setContentView(buildUi())
     }
 
@@ -209,8 +216,29 @@ class MainActivity : Activity() {
         )
         storageText.visibility = if (storage.isEmpty()) View.GONE else View.VISIBLE
         storageText.text = limited(storage.joinToString(" · "))
+        // 주행 중(기록 중)에는 완료율·거리 같은 숫자를 갱신해 보이지 않는다(사양 02 6-3). 샘플·거리의 1초 갱신은 debug 빌드에서만 기록 중에도 보인다.
+        val showNumbers = BuildConfig.DEBUG || s.state != TripState.RECORDING
+        samplesText.visibility = if (showNumbers) View.VISIBLE else View.GONE
+        distanceText.visibility = if (showNumbers) View.VISIBLE else View.GONE
         samplesText.text = limited(getString(R.string.samples_format, s.sampleCount))
         distanceText.text = limited(getString(R.string.distance_format, s.distanceM))
+        // 도로 색칠 결과: 대기·종료 화면에서만. 전국 완료율은 대기, 이번 주행 결과는 종료 화면.
+        val national = if (s.state == TripState.RECORDING) null else formatNationalLine(coverage.nationalPercent, getString(R.string.national_percent))
+        nationalText.visibility = if (national == null) View.GONE else View.VISIBLE
+        nationalText.text = limited(national ?: "")
+        val matching = if (s.state == TripState.ENDED) {
+            formatMatchingLine(
+                coverage.matching,
+                getString(R.string.matching_counted),
+                getString(R.string.matching_not_counted),
+                getString(R.string.matching_not_counted_reason),
+                BuildConfig.DEBUG,
+            )
+        } else {
+            null
+        }
+        matchingText.visibility = if (matching == null) View.GONE else View.VISIBLE
+        matchingText.text = limited(matching ?: "")
         val upload = when (s.upload.kind) {
             UploadKind.NONE -> getString(R.string.upload_none)
             UploadKind.OK -> getString(R.string.upload_ok, s.upload.points)
@@ -232,6 +260,8 @@ class MainActivity : Activity() {
         samplesText = text(24f)
         distanceText = text(24f)
         uploadText = text(18f)
+        nationalText = text(22f)
+        matchingText = text(22f, bold = true)
         healthText = text(20f, bold = true)
         storageText = text(18f)
         restartButton = Button(this).apply {
@@ -263,6 +293,8 @@ class MainActivity : Activity() {
             addView(samplesText)
             addView(distanceText)
             addView(uploadText)
+            addView(matchingText)
+            addView(nationalText)
             addView(storageText)
             addView(healthText)
             addView(restartButton)

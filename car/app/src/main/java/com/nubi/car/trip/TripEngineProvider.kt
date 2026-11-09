@@ -14,8 +14,17 @@ object TripEngineProvider {
     @Volatile
     private var instance: TripEngine? = null
 
+    @Volatile
+    private var tracker: CoverageTracker? = null
+
     fun get(context: Context): TripEngine =
         instance ?: synchronized(this) { instance ?: create(context.applicationContext).also { instance = it } }
+
+    /** 도로 색칠 결과(종료 한 줄)·전국 완료율 상태. 엔진과 같은 수명이다. */
+    fun coverage(context: Context): CoverageTracker {
+        get(context)
+        return tracker!!
+    }
 
     private fun create(context: Context): TripEngine {
         val main = Handler(Looper.getMainLooper())
@@ -56,6 +65,10 @@ object TripEngineProvider {
             api = HttpVehicleApi(BuildConfig.SERVER_URL),
             executor = Executors.newSingleThreadExecutor(),
         )
-        return TripEngine(clock, scheduler, Executors.newSingleThreadExecutor(), VehicleInfo(context, resolver), store, uploader)
+        val vehicle = VehicleInfo(context, resolver)
+        val coverage = CoverageTracker(HttpCoverageApi(BuildConfig.SERVER_URL), Executors.newCachedThreadPool(), { vehicle.vehicleId })
+        uploader.onTripEnded = coverage::onTripEnded
+        tracker = coverage
+        return TripEngine(clock, scheduler, Executors.newSingleThreadExecutor(), vehicle, store, uploader)
     }
 }

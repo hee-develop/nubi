@@ -26,4 +26,8 @@
     <string name="storage_save_failed">저장 실패 %1$d건</string>
     <string name="storage_corrupt">손상 %1$d줄</string>
     <string name="storage_discarded">복호화할 수 없어 폐기 %1$d줄</string>
+    <string name="matching_counted">새 도로 %1$skm · 전국 %2$s%% (+%3$s)</string>
+    <string name="matching_not_counted">이번 주행은 집계되지 않았어요</string>
+    <string name="matching_not_counted_reason">이번 주행은 집계되지 않았어요 (%1$s)</string>
+    <string name="national_percent">전국 %1$s%% 달렸어요</string>
 </resources>
