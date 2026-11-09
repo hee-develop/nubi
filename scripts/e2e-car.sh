@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # 차량 앱 E2E(Maestro + 서버 검증): debug 앱을 설치하고 서버를 띄운 뒤 flow를 돌리고, 서버에 저장된 트립을 검증한다.
 # 사용: pnpm e2e:car   (Pleos 에뮬레이터 emulator-5554만 쓴다. 꺼져 있으면 실행 전에 띄워 두세요)
-# flow 2개를 순서대로 돈다: 주행 기록(trip-recording, GPX e2e-north) → 도로 색칠(road-coloring, GPX e2e-sejong). 도로 색칠은 실제 Valhalla(nubi-valhalla, 포트 8002)를 쓴다.
+# flow 3개를 순서대로 돈다: 주행 기록(trip-recording, GPX e2e-north) → 도로 색칠(road-coloring, GPX e2e-sejong) → 시군구 색칠(region-coloring, GPX e2e-junggu 2회). 도로 색칠은 실제 Valhalla(nubi-valhalla, 포트 8002)를 쓴다.
 # 환경 변수: E2E_OUT은 산출물 루트(기본 e2e/output/car), PORT는 서버 포트(기본 8787), VALHALLA_PORT는 Valhalla 포트(기본 8002),
+#            NUBI_REGIONS_DB는 지역(시군구) DB(기본 server/data/regions/regions.sqlite, 없으면 테스트 픽스처를 명시해 넘김),
 #            NUBI_ROADS_DB는 도로 DB(기본: server/data/roads-*.sqlite 중 최신, 없으면 server/test/fixtures/roads-test.sqlite를 이 스크립트가 **명시**해 서버에 넘긴다. 서버 자체는 조용히 대체하지 않는다).
 # 실행마다 $E2E_OUT/<시각>/ 폴더를 새로 만들고 스크린샷(shots/)과 로그는 그 안에만 둔다.
 # 앞 실행의 앱 데이터(미종료 트립·큐·저장된 차량 ID)가 남지 않도록 설치 뒤 pm clear 한다.
@@ -45,7 +46,13 @@ if [ -z "${NUBI_ROADS_DB:-}" ]; then
   [ -n "$NUBI_ROADS_DB" ] || NUBI_ROADS_DB="$ROOT/server/test/fixtures/roads-test.sqlite"
 fi
 export NUBI_ROADS_DB
-echo "== Valhalla 확인 (포트 $VALHALLA_PORT), 도로 DB: $NUBI_ROADS_DB"
+# 지역(시군구) DB: 전국이 있으면 그것, 없으면 테스트 픽스처를 명시해 넘긴다. 도감 분모(229) 단언은 전국 DB가 아니면 verify-trip이 중단한다.
+if [ -z "${NUBI_REGIONS_DB:-}" ]; then
+  NUBI_REGIONS_DB="$ROOT/server/data/regions/regions.sqlite"
+  [ -f "$NUBI_REGIONS_DB" ] || NUBI_REGIONS_DB="$ROOT/server/test/fixtures/regions-test.sqlite"
+fi
+export NUBI_REGIONS_DB
+echo "== Valhalla 확인 (포트 $VALHALLA_PORT), 도로 DB: $NUBI_ROADS_DB, 지역 DB: $NUBI_REGIONS_DB"
 VALHALLA_PORT="$VALHALLA_PORT" bash "$ROOT/scripts/valhalla-up.sh"
 for _ in $(seq 1 60); do
   [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$VALHALLA_PORT/status" || true)" = "200" ] && break
@@ -95,7 +102,7 @@ APP_VIN="E2EAPPVIN0000001"
 echo "== 서버 시작 (포트 $PORT, 메모리 DB)"
 mkdir -p "$RUN_DIR"
 # watch 없이 한 번만 띄운다. 서브셸이 곧 프로세스 그룹 리더라 그룹 전체(tsx와 자식 node)를 함께 종료한다.
-(cd "$ROOT/server" && NUBI_DB=:memory: NUBI_VEHICLE_HMAC_KEY="$HMAC_KEY" PORT="$PORT" NUBI_VALHALLA_URL="http://127.0.0.1:$VALHALLA_PORT" NUBI_ROADS_DB="$NUBI_ROADS_DB" exec ./node_modules/.bin/tsx src/index.ts >"$RUN_DIR/server.log" 2>&1) &
+(cd "$ROOT/server" && NUBI_DB=:memory: NUBI_VEHICLE_HMAC_KEY="$HMAC_KEY" PORT="$PORT" NUBI_VALHALLA_URL="http://127.0.0.1:$VALHALLA_PORT" NUBI_ROADS_DB="$NUBI_ROADS_DB" NUBI_REGIONS_DB="$NUBI_REGIONS_DB" exec ./node_modules/.bin/tsx src/index.ts >"$RUN_DIR/server.log" 2>&1) &
 SERVER_PGID=$!
 for _ in $(seq 1 30); do
   curl -fs "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
@@ -116,9 +123,15 @@ run_flow() {
     [ "$attempt" -eq 1 ] || out="$RUN_DIR/maestro/$name-attempt$attempt"
     # 기어 P 5분 종료 조건을 시계로 건너뛰려고 flow 시작 직전의 "지금 + 6분"(epoch ms)을 넘긴다
     plus6=$(( $(date +%s) * 1000 + 6 * 60 * 1000 ))
+    # 시군구 flow용 시각: +15분·+22분, 그리고 (flow 시작 + 30분)이 속한 KST 날짜의 다음 날 07:00·07:06(사이에 자정이 반드시 들어가게)
+    local plus15 plus22 next0700 next0706
+    plus15=$(( $(date +%s) * 1000 + 15 * 60 * 1000 ))
+    plus22=$(( $(date +%s) * 1000 + 22 * 60 * 1000 ))
+    next0700="$(node -e 'const b=Date.now()+30*60000,k=new Date(b+9*3600000);console.log(Date.UTC(k.getUTCFullYear(),k.getUTCMonth(),k.getUTCDate()+1,7,0,0)-9*3600000)')"
+    next0706=$(( next0700 + 6 * 60 * 1000 ))
     "${ADB[@]}" logcat -c || true
     set +e
-    "$MAESTRO" test "$yaml" --device "$SERIAL" -e SHOT_DIR="$SHOTS" -e CLOCK_PLUS_6MIN="$plus6" -e APP_VIN="$APP_VIN" --test-output-dir "$out"
+    "$MAESTRO" test "$yaml" --device "$SERIAL" -e SHOT_DIR="$SHOTS" -e CLOCK_PLUS_6MIN="$plus6" -e CLOCK_PLUS_15MIN="$plus15" -e CLOCK_PLUS_22MIN="$plus22" -e CLOCK_NEXT_DAY_0700="$next0700" -e CLOCK_NEXT_DAY_0706="$next0706" -e APP_VIN="$APP_VIN" --test-output-dir "$out"
     rc=$?
     set -e
     "${ADB[@]}" logcat -d -s "${LOGTAGS[@]}" >"$RUN_DIR/app-logcat-$name-attempt$attempt.txt" 2>&1 || true
@@ -162,5 +175,10 @@ run_flow road-coloring "e2e/maestro/car/road-coloring.yaml" "$ROOT/car/app/src/d
 echo "== 서버 검증: 도로 색칠"
 E2E_BASE_URL="$BASE_URL" node "$ROOT/scripts/verify-trip.mjs" --road-coloring "$ROOT/car/app/src/debug/assets/e2e-north.gpx" "$ROOT/car/app/src/debug/assets/e2e-sejong.gpx" | tee "$RUN_DIR/road-coloring-verify.txt"
 curl -fs "$BASE_URL/trips?limit=200" >"$RUN_DIR/trips-final.json" || true
+echo "== Maestro 실행: 시군구 색칠 (스크린샷: $SHOTS)"
+run_flow region-coloring "e2e/maestro/car/region-coloring.yaml" "$ROOT/car/app/src/debug/assets/e2e-junggu.gpx" 12 || { echo "Maestro(시군구 색칠) 실패" >&2; exit 1; }
+
+echo "== 서버 검증: 시군구 색칠"
+E2E_BASE_URL="$BASE_URL" node "$ROOT/scripts/verify-trip.mjs" --regions "$ROOT/car/app/src/debug/assets/e2e-sejong.gpx" "$ROOT/car/app/src/debug/assets/e2e-junggu.gpx" | tee "$RUN_DIR/region-coloring-verify.txt"
 write_summary
 echo "== 통과. 산출물: $RUN_DIR"
