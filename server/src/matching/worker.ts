@@ -3,6 +3,7 @@
  * `trip_matching.error`에는 `retryable:<코드>`·`permanent:<코드>`만 남기고(API가 그대로 내려 준다) 메시지는 서버 로그로만 보낸다.
  */
 import type { Db } from '../db/index.js';
+import type { Regions } from '../regions/index.js';
 import type { Roads } from '../roads/index.js';
 import { runMatching } from './pipeline.js';
 import { ValhallaError, type TraceDeps } from './valhalla.js';
@@ -15,6 +16,8 @@ export const RETRY_LIMIT_MS = 24 * 60 * 60 * 1000;
 export type WorkerDeps = {
   db: Db;
   roads: () => Roads | null;
+  /** 지역 DB. 생략하면 시군구 판정을 하지 않고, null을 돌려주면(DB 없음) 재시도 대기한다. */
+  regions?: () => Regions | null;
   trace?: TraceDeps;
   retryDelayMs?: number;
   retryLimitMs?: number;
@@ -70,15 +73,24 @@ export const createMatchingWorker = (deps: WorkerDeps) => {
     );
     const roads = deps.roads();
     if (!roads) return fail(tripId, 'roads_db_unavailable', '도로 DB 없음', row.queued_at, true);
+    const regions = deps.regions ? deps.regions() : null;
+    if (deps.regions && !regions) return fail(tripId, 'regions_db_unavailable', '지역 DB 없음', row.queued_at, true);
     try {
       // done 표시는 driven_ways 갱신과 같은 트랜잭션 안에서 한다(runMatching이 finish를 거기서 부른다).
-      await runMatching(db, roads, tripId, deps.trace ?? {}, (result) => {
-        db.prepare("UPDATE trip_matching SET status = 'done', error = NULL, finished_at = ?, result_json = ? WHERE trip_id = ?").run(
-          iso(),
-          JSON.stringify(result),
-          tripId,
-        );
-      });
+      await runMatching(
+        db,
+        roads,
+        tripId,
+        deps.trace ?? {},
+        (result) => {
+          db.prepare("UPDATE trip_matching SET status = 'done', error = NULL, finished_at = ?, result_json = ? WHERE trip_id = ?").run(
+            iso(),
+            JSON.stringify(result),
+            tripId,
+          );
+        },
+        regions,
+      );
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e);
       if (e instanceof ValhallaError) fail(tripId, e.code, detail, row.queued_at, e.retryable);

@@ -17,7 +17,8 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 /** 2026-07-01 전남광주통합특별시: 기존 시군구 코드 → 새 코드. 광주 5구 + 전남 22시군(1:1, 이름 불변).
  *  출처: vuski/admdongkor ver20261001(통계청 SGIS 2026-10 행정동 경계)의 sgg 코드, 시도 코드 12 '전남광주통합특별시'.
  *  행정안전부 코드 고시 원문(법정동·행정동 코드 일괄 개정)은 찾지 못했다 → 고시와 대조 필요(코드 값은 SGIS 경계 파일 기준).
- *  근거 법률: 전남광주통합특별시 설치 및 운영에 관한 특별법(2026-07-01 시행, 법률 제21446호는 사양 03 기재, 미검증). */
+ *  근거 법률: 「전남광주통합특별시 설치를 위한 특별법」(법률 제21446호, 2026-03-05 공포, 2026-07-01 시행).
+ *  코드는 행안부 행정표준코드(code.go.kr, 시도 12) 대조 결과와 같다(코디네이터 확인, 2026-11-10). */
 export const NEW_SIDO = { code: '12', name: '전남광주통합특별시' };
 export const REGION_ALIAS = {
   // 광주광역시 5구
@@ -281,7 +282,8 @@ function main() {
   const depopMissing = [];
   if (existsSync(depopPath)) {
     const dj = JSON.parse(readFileSync(depopPath, 'utf8'));
-    const find = (e) => [...groups].find(([, g]) => g.sidoName === e.sido && g.name === e.name)?.[0];
+    // 2025 경계의 시도명(전라남도 등)과 맞추려고 sidoAt2021(통합특별시 편입 전 이름)도 후보로 본다.
+    const find = (e) => [...groups].find(([, g]) => (g.sidoName === e.sido || g.sidoName === e.sidoAt2021) && g.name === e.name)?.[0];
     for (const e of dj.list89 ?? []) {
       const c = find(e);
       if (c) {
