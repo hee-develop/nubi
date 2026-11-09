@@ -35,6 +35,30 @@ CREATE TABLE IF NOT EXISTS trip_points (
   gear TEXT,
   PRIMARY KEY (trip_id, seq)
 );
+
+-- 맵매칭 작업(사양 02 4장). queued_at은 24시간 재시도 한도를 재려고 더한 열이다(가안).
+CREATE TABLE IF NOT EXISTS trip_matching (
+  trip_id TEXT PRIMARY KEY REFERENCES trips (id),
+  status TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  queued_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  result_json TEXT
+);
+
+-- 인정된 way. 차량별 최댓값 커버리지. 도로 DB(ODbL 파생)는 별도 파일이라 여기에는 way_id만 둔다.
+CREATE TABLE IF NOT EXISTS driven_ways (
+  vehicle_id TEXT NOT NULL,
+  way_id INTEGER NOT NULL,
+  coverage REAL NOT NULL,
+  first_driven_at TEXT NOT NULL,
+  last_driven_at TEXT NOT NULL,
+  trip_id_first TEXT NOT NULL,
+  snapshot_month TEXT NOT NULL,
+  PRIMARY KEY (vehicle_id, way_id)
+);
 `;
 
 /** local_id 열이 없던 기존 DB를 위한 후속 DDL. SQLite의 UNIQUE 인덱스는 NULL을 여러 개 허용한다. */

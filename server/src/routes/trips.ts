@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
 import type { Db } from '../db/index.js';
+import { queueMatching } from '../matching/worker.js';
 
 const MAX_POINTS_PER_BATCH = 500;
 const MAX_ID_LENGTH = 128;
@@ -142,7 +143,8 @@ const readJson = async (req: Request): Promise<unknown> => {
   }
 };
 
-export const tripsRoutes = (db: Db) =>
+/** [onEnded]: 트립이 처음 끝나 맵매칭 작업이 새로 큐에 들어갔을 때 부른다. */
+export const tripsRoutes = (db: Db, onEnded: (tripId: string) => void = () => {}) =>
   new Hono()
     .use(
       bodyLimit({
@@ -208,7 +210,13 @@ export const tripsRoutes = (db: Db) =>
         tripId,
       );
       const s = getSummary(db, tripId)!;
-      return c.json({ tripId: s.tripId, pointCount: s.pointCount, distanceM: s.distanceM, durationS: s.durationS ?? 0 }, 200);
+      // 맵매칭은 응답과 무관하게 뒤에서 돈다. 같은 End를 다시 받으면 큐에 다시 넣지 않는다(응답은 멱등하게 항상 queued, 실제 상태는 GET /trips/:id/matching).
+      const m = queueMatching(db, tripId);
+      if (m.created) onEnded(tripId);
+      return c.json(
+        { tripId: s.tripId, pointCount: s.pointCount, distanceM: s.distanceM, durationS: s.durationS ?? 0, matching: 'queued' as const },
+        200,
+      );
     })
     .get('/:tripId', (c) => {
       const summary = getSummary(db, c.req.param('tripId'));
