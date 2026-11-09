@@ -95,3 +95,29 @@ export const neighborsOf = (db: Db, regions: Regions, code: string): { code: str
   perRegions.set(code, out);
   return out;
 };
+
+/**
+ * 이웃이 하나도 없는 시군구(섬 등)의 대체: 중심점(bbox 중심) 거리순 가장 가까운 [count]곳. 응답에서 `nearest: true`로 표시한다.
+ */
+export const nearestRegions = (db: Db, code: string, count = 3): { code: string; distanceM: number }[] => {
+  const rows = db.prepare(`SELECT code, minlon, minlat, maxlon, maxlat FROM ${RG}.regions`).all() as {
+    code: string;
+    minlon: number;
+    minlat: number;
+    maxlon: number;
+    maxlat: number;
+  }[];
+  const me = rows.find((r) => r.code === code);
+  if (!me) return [];
+  const cx = (me.minlon + me.maxlon) / 2,
+    cy = (me.minlat + me.maxlat) / 2;
+  const cos = Math.cos((cy * Math.PI) / 180);
+  return rows
+    .filter((r) => r.code !== code)
+    .map((r) => ({
+      code: r.code,
+      distanceM: Math.round(Math.hypot(((r.minlon + r.maxlon) / 2 - cx) * cos, (r.minlat + r.maxlat) / 2 - cy) * M_PER_DEG),
+    }))
+    .sort((a, b) => a.distanceM - b.distanceM || (a.code < b.code ? -1 : 1))
+    .slice(0, count);
+};

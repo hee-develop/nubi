@@ -73,7 +73,8 @@ CREATE TABLE IF NOT EXISTS visited_regions (
   PRIMARY KEY (vehicle_id, code)
 );
 
--- 트립 종료 지점 시군구. 다음 트립 Start(또는 24시간 배치)에서 방문/숙박으로 판정하고 지운다. visit_done: 방문 판정은 끝났고 숙박(시작 지점) 확인만 남음.
+-- 트립 종료 지점 시군구. 다음 트립 Start·점·배치에서 방문/숙박으로 판정한다. 확정(삭제)은 다음 트립 판정이 끝났을 때 또는 종료 + 7일.
+-- visit_done: 방문은 이미 반영했다(Start로 확정했거나 24시간 배치가 잠정 확정). 이 뒤에도 늦게 온 Start·점으로 숙박 승격·방문 취소가 가능해서 7일간 남겨 둔다.
 CREATE TABLE IF NOT EXISTS region_pending (
   trip_id TEXT PRIMARY KEY,
   vehicle_id TEXT NOT NULL,
@@ -83,6 +84,17 @@ CREATE TABLE IF NOT EXISTS region_pending (
 );
 
 CREATE INDEX IF NOT EXISTS idx_region_pending_vehicle ON region_pending (vehicle_id);
+
+-- 지역 판정 작업 큐(사양 03 4장). 매칭(done)과 분리해서 지역 DB가 없어도 도로 매칭은 끝나고, 판정은 5분 간격으로 최대 7일 재시도한다.
+-- status: queued | done | failed(7일 초과). result_json.regions는 판정 전 'pending', 완료 시 결과로 갱신.
+CREATE TABLE IF NOT EXISTS region_jobs (
+  trip_id TEXT PRIMARY KEY,
+  status TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  queued_at TEXT NOT NULL,
+  finished_at TEXT
+);
 
 CREATE TABLE IF NOT EXISTS region_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

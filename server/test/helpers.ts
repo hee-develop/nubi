@@ -145,7 +145,7 @@ export const makeRoadsDb = async (path: string, ways: SynthWay[], month = '20990
     );
   }
   db.exec('COMMIT');
-  db.prepare('INSERT INTO snapshot VALUES (?,?,?,?,?,?,?)').run(
+  db.prepare('INSERT INTO snapshot VALUES (?,?,?,?,?,?,?,?)').run(
     month,
     new Date().toISOString(),
     'synthetic.pbf',
@@ -153,6 +153,7 @@ export const makeRoadsDb = async (path: string, ways: SynthWay[], month = '20990
     totalNamed,
     totalNamed,
     '{}',
+    null,
   );
   db.close();
   return path;

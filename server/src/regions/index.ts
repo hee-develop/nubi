@@ -2,6 +2,10 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { Db } from '../db/index.js';
+import { makeLocator, pointInMulti, pointInRing } from '../../../scripts/geo-utils.mjs';
+
+// 판정·point-in-polygon은 scripts/geo-utils.mjs 하나를 빌드 스크립트·verify와 공유한다(복사 금지).
+export { pointInMulti, pointInRing };
 
 /** 행정동 경계 출처 표기(사양 03 3장). 지역 API 응답 `attribution`과 뷰어에 넣는다. */
 export const REGIONS_ATTRIBUTION = '통계청 통계지리정보서비스(SGIS) 행정동 경계를 vuski/admdongkor가 가공(CC BY 4.0)';
@@ -9,8 +13,7 @@ export const REGIONS_ATTRIBUTION = '통계청 통계지리정보서비스(SGIS) 
 /** 사용자 DB 연결에 ATTACH 하는 지역 DB의 스키마 이름. 쿼리에서 `rg.regions` 처럼 쓴다. */
 export const RG = 'rg';
 
-type Ring = number[][];
-type Polygon = Ring[];
+type Polygon = number[][][];
 
 export type Regions = {
   path: string;
@@ -20,13 +23,13 @@ export type Regions = {
   total: number;
   /** 통합특별시 등 옛 코드 → 새 코드. */
   alias: Map<string, string>;
-  /** 점이 속한 시군구 코드(없으면 null). */
+  /** 점이 속한 시군구 코드. 폴리곤 밖이면 50m 이내 가장 가까운 시군구(경계 틈 보정), 그래도 없으면 null. */
   locate: (lon: number, lat: number) => string | null;
   /** 시군구 폴리곤(파싱 캐시). */
   polygons: (code: string) => Polygon[] | null;
   /** 옛 코드를 새 코드로. */
   canonical: (code: string) => string;
-  names: () => Map<string, { name: string; sidoName: string }>;
+  names: () => Map<string, { name: string; displayName: string; sidoName: string }>;
 };
 
 const dataDir = fileURLToPath(new URL('../../data/regions/', import.meta.url));
@@ -39,32 +42,6 @@ export const resolveRegionsPath = (env: string | undefined = process.env.NUBI_RE
   if (env && env.length > 0) return env;
   const p = join(dir, 'regions.sqlite');
   return existsSync(p) ? p : null;
-};
-
-/** 점이 고리 안인가(ray casting). */
-export const pointInRing = (x: number, y: number, r: Ring): boolean => {
-  let inside = false;
-  for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
-    const [xi, yi] = r[i]!;
-    const [xj, yj] = r[j]!;
-    if (yi! > y !== yj! > y && x < ((xj! - xi!) * (y - yi!)) / (yj! - yi!) + xi!) inside = !inside;
-  }
-  return inside;
-};
-
-/** MultiPolygon 좌표 안 판정: 폴리곤 any, 바깥 고리 안 + 구멍 밖. */
-export const pointInMulti = (x: number, y: number, polys: Polygon[]): boolean => {
-  for (const p of polys) {
-    if (!pointInRing(x, y, p[0]!)) continue;
-    let hole = false;
-    for (let k = 1; k < p.length; k++)
-      if (pointInRing(x, y, p[k]!)) {
-        hole = true;
-        break;
-      }
-    if (!hole) return true;
-  }
-  return false;
 };
 
 /**
@@ -83,45 +60,26 @@ export const attachRegions = (db: Db, path: string | null | undefined): Regions 
         r.new_code,
       ]),
     );
-    const cache = new Map<string, { polys: Polygon[]; bbox: [number, number, number, number] }>();
-    const load = (code: string) => {
-      let hit = cache.get(code);
-      if (!hit) {
-        const r = db.prepare(`SELECT geom_json, minlon, minlat, maxlon, maxlat FROM ${RG}.regions WHERE code = ?`).get(code) as
-          { geom_json: string; minlon: number; minlat: number; maxlon: number; maxlat: number } | undefined;
-        if (!r) return null;
-        hit = {
-          polys: (JSON.parse(r.geom_json) as { coordinates: Polygon[] }).coordinates,
-          bbox: [r.minlon, r.minlat, r.maxlon, r.maxlat],
-        };
-        cache.set(code, hit);
-      }
-      return hit;
-    };
-    const cand = db.prepare(
-      `SELECT r.code FROM ${RG}.regions_rtree t JOIN ${RG}.regions r ON r.rowid = t.region_id
-       WHERE t.minlon <= ? AND t.maxlon >= ? AND t.minlat <= ? AND t.maxlat >= ? ORDER BY r.code`,
-    );
-    let namesCache: Map<string, { name: string; sidoName: string }> | null = null;
+    const loc = makeLocator(db, { schema: RG });
+    let namesCache: Map<string, { name: string; displayName: string; sidoName: string }> | null = null;
     return {
       path,
       month: s.month,
       total,
       alias,
       canonical: (code) => alias.get(code) ?? code,
-      polygons: (code) => load(code)?.polys ?? null,
-      locate: (lon, lat) => {
-        for (const c of cand.all(lon, lon, lat, lat) as { code: string }[]) {
-          const g = load(c.code);
-          if (g && pointInMulti(lon, lat, g.polys)) return c.code;
-        }
-        return null;
-      },
+      polygons: (code) => loc.polygons(code),
+      locate: (lon, lat) => loc.locate(lon, lat)?.code ?? null,
       names: () =>
         (namesCache ??= new Map(
-          (db.prepare(`SELECT code, name, sido_name FROM ${RG}.regions`).all() as { code: string; name: string; sido_name: string }[]).map(
-            (r) => [r.code, { name: r.name, sidoName: r.sido_name }],
-          ),
+          (
+            db.prepare(`SELECT code, name, display_name, sido_name FROM ${RG}.regions`).all() as {
+              code: string;
+              name: string;
+              display_name: string;
+              sido_name: string;
+            }[]
+          ).map((r) => [r.code, { name: r.name, displayName: r.display_name, sidoName: r.sido_name }]),
         )),
     };
   } catch (e) {

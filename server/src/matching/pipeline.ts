@@ -1,8 +1,7 @@
 /** 맵매칭 결과 처리(사양 02 4장): 합산 → 도로 DB 조회 → 오도미터 대조 → low_confidence → 인정 → driven_ways upsert → result_json. */
 import type { Db } from '../db/index.js';
 import { findWays, nationalCoverage, roundPercent, type Roads } from '../roads/index.js';
-import { inTx, judgeTrip, resolvePending, type RegionsResult } from '../regions/judge.js';
-import type { Regions } from '../regions/index.js';
+import type { RegionsResult } from '../regions/judge.js';
 import { haversineM } from '../routes/trips.js';
 import { traceAttributes, type TraceDeps } from './valhalla.js';
 
@@ -35,8 +34,8 @@ export type MatchResult = {
   ignoredUnnamed: number;
   matchedKm?: number;
   unmatchedRatio?: number;
-  /** 시군구 판정(사양 03 4장). 지역 DB를 붙이지 않았거나 의심(suspect) 트립이면 없다. */
-  regions?: RegionsResult;
+  /** 시군구 판정(사양 03 4장). 매칭과 분리된 작업이라 매칭이 끝난 시점에는 `'pending'`이고 워커가 완료 시 결과로 갱신한다. 지역 판정을 안 쓰거나 의심(suspect) 트립이면 없다. */
+  regions?: RegionsResult | 'pending';
 };
 
 type TripRow = {
@@ -91,10 +90,21 @@ export const runMatching = async (
   tripId: string,
   deps: TraceDeps,
   finish: (result: MatchResult) => void,
-  regions: Regions | null = null,
 ): Promise<MatchResult> => {
   const done = (r: MatchResult) => {
     finish(r);
+    return r;
+  };
+  /** 트랜잭션 밖에서 끝나는 결과(짧은 트립·low_confidence)도 finish(done 표시 + 지역 작업 등록)를 한 트랜잭션에 묶는다. */
+  const doneTx = (r: MatchResult) => {
+    db.exec('BEGIN');
+    try {
+      finish(r);
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
     return r;
   };
   const trip = db.prepare('SELECT * FROM trips WHERE id = ?').get(tripId) as TripRow | undefined;
@@ -104,23 +114,7 @@ export const runMatching = async (
   const before = roundPercent(nationalCoverage(db, roads, vehicle).percent);
   const distanceM = pathLengthM(points);
 
-  /** 시군구 판정(통과 반영·pending 기록·지난 pending 판정). 호출하는 쪽의 트랜잭션 안에서만 부른다. */
-  const judgeRegions = (): RegionsResult | undefined => {
-    if (!regions) return undefined;
-    const r = judgeTrip(db, regions, { id: tripId, vehicleId: trip.vehicle_id, endedAt: trip.ended_at }, points);
-    resolvePending(db, regions, trip.vehicle_id, Date.now());
-    return r;
-  };
-  /** 트랜잭션 없이 끝나던 결과(짧은 트립·low_confidence)도 판정과 done 표시를 한 트랜잭션에 묶는다. */
-  const doneJudged = (r: MatchResult) =>
-    inTx(db, () => {
-      const rg = judgeRegions();
-      if (rg) r.regions = rg;
-      finish(r);
-      return r;
-    });
-
-  if (points.length < MIN_POINTS || distanceM < MIN_DISTANCE_M) return doneJudged(emptyResult('skipped', 'too_short', before));
+  if (points.length < MIN_POINTS || distanceM < MIN_DISTANCE_M) return doneTx(emptyResult('skipped', 'too_short', before));
   if (isOdometerMismatch(distanceM, trip.odometer_start_km, trip.odometer_end_km))
     return done(emptyResult('suspect', 'odometer_mismatch', before));
 
@@ -129,7 +123,7 @@ export const runMatching = async (
   const unmatchedRatio = totalPoints > 0 ? trace.unmatchedPoints / totalPoints : 1;
   const matchedKm = [...trace.wayLengthsM.values()].reduce((a, b) => a + b, 0) / 1000;
   if (unmatchedRatio > MAX_UNMATCHED_RATIO) {
-    return doneJudged({ ...emptyResult('low_confidence', 'low_confidence', before), matchedKm, unmatchedRatio });
+    return doneTx({ ...emptyResult('low_confidence', 'low_confidence', before), matchedKm, unmatchedRatio });
   }
 
   const ways = findWays(db, [...trace.wayLengthsM.keys()]);
@@ -193,8 +187,6 @@ export const runMatching = async (
       matchedKm: Math.round(matchedKm * 1000) / 1000,
       unmatchedRatio: Math.round(unmatchedRatio * 1000) / 1000,
     };
-    const rg = judgeRegions();
-    if (rg) result.regions = rg;
     finish(result);
     db.exec('COMMIT');
     return result;
