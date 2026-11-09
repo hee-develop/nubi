@@ -21,9 +21,13 @@
 | 매칭 길이 | Valhalla가 그 way에 붙인 edge 길이의 합(m) |
 | 커버리지 | `min(1, 매칭 길이 / way 길이)` |
 | 인정 | 커버리지 ≥ 0.7 **또는** 매칭 길이 ≥ 500m(긴 way의 부분 주행) (가안) |
-| 도로 완주율 | `Σ(인정 way의 커버리지 × way 길이) / 도로 총길이` |
+| 묶음(bucket) | 한 도로 안의 way를 **분리 구간 묶음**(주요 4등급 + link이면서 oneway — `yes`, `-1`, motorway(_link)의 암묵 oneway 포함)과 **양방향 묶음**으로 나눈 것. 묶음 상한 = 분리 묶음은 `Σ length_m / 2`, 양방향 묶음은 `Σ length_m` |
+| 달린 길이(driven) | 묶음별로 `min(묶음 상한, Σ 인정 way의 커버리지 × length_m)`을 구해 더한 값. 도로별·전국 모두 이 정의 |
+| 도로 총길이 | 그 도로의 묶음 상한 합(= `Σ eff_length_m`) |
+| 도로 완주율 | `달린 길이 / 도로 총길이` |
 | 완주 | 도로 완주율 ≥ 95% (가안) |
-| 전국 완료율 | `Σ(인정 way의 커버리지 × way 길이) / 분모` |
+| 전국 완료율 | `Σ(도로별 달린 길이) / 분모`. **소수 4자리**(분모가 12만 km대라 2자리면 0.00이 됨). 화면은 1% 이상 2자리, 0.1% 이상 3자리, 그 밑 4자리 |
+| 새 도로(newKm) | 트립 매칭 전후의 **전국 달린 길이 차이**(상한·1/2 적용 후). 실제 way 길이 합이 아니다. 따라서 `nationalPercentAfter − Before ≈ newKm / 분모`가 항상 성립 |
 | 분모 | 도로 DB 스냅샷에서 **이름 또는 번호가 있는** 자동차 도로 총길이(6-2). 이름·번호 없는 way는 분자·분모 모두 제외 |
 | 스냅샷 | 도로 DB의 월간 버전 `YYYYMM`. 완료율은 항상 현재 스냅샷 기준 |
 
@@ -40,17 +44,18 @@
 - `scripts/build-road-db.mjs <pbf> <YYYYMM>`: `osmium tags-filter`로 `highway=motorway|trunk|primary|secondary|tertiary|unclassified|residential|*_link` 만 추출(`service, track, path, footway, cycleway, living_street, pedestrian` 제외) → `osmium export`(GeoJSONSeq) → SQLite `server/data/roads-YYYYMM.sqlite`.
 - 테이블
   - `ways(way_id PK, road_key, highway, name, ref, length_m, oneway, eff_length_m, minlon, minlat, maxlon, maxlat, geom_json)` + R-tree `ways_rtree(way_id, minlon, maxlon, minlat, maxlat)`
-  - `roads(road_key PK, display_name, highway_major, total_length_m, way_count, names_json)`
+  - `roads(road_key PK, display_name, highway_major, total_length_m, split_length_m, way_count, names_json)` — `split_length_m`은 분리 구간 묶음의 상한(= Σ eff_length_m of 분리 구간), 양방향 묶음의 상한은 `total_length_m − split_length_m`
   - `snapshot(month PK, built_at, pbf_name, pbf_timestamp, total_named_length_m, total_all_length_m, by_class_json)`
 - 길이는 geom 좌표열의 하버사인 합(m). 출처 표기 "© OpenStreetMap contributors (ODbL)"를 뷰어·API 응답 `attribution` 필드에 넣는다.
-- 서버 환경변수 `NUBI_ROADS_DB`(기본 최신 `roads-*.sqlite`). 사용자 기록 DB(`nubi.sqlite`)와 **파일을 분리**한다(ODbL 집합 DB 분리 전제).
+- 서버 환경변수 `NUBI_ROADS_DB`(기본 최신 `server/data/roads-*.sqlite`). **도로 DB가 없으면 조회 API는 503, 매칭은 재시도 대기**이며, 테스트 픽스처(`server/test/fixtures/roads-test.sqlite`)로의 대체는 `NUBI_ROADS_DB`에 그 경로를 **명시**했을 때만 한다(조용한 대체 금지). 픽스처의 snapshot month는 실 DB와 구분되게 `209901`. 사용자 기록 DB(`nubi.sqlite`)와 **파일을 분리**한다(ODbL 집합 DB 분리 전제).
+- oneway 판정: `oneway=yes` 또는 `-1`, 그리고 `motorway`·`motorway_link`는 태그가 없어도 oneway로 본다(OSM 기본값).
 
 ## 4. 처리 흐름 (서버)
 
 1. `POST /trips/:id/end` 처리 후 매칭 작업을 큐에 넣는다(`trip_matching(trip_id PK, status: queued|running|done|failed, attempts, error, started_at, finished_at, result_json)`). 응답에 `matching: 'queued'`를 더한다. 트립 점이 20개 미만 또는 거리 100m 미만이면 `done(skipped: too_short)`.
 2. 워커(프로세스 내 단일 소비자)가 트립 점(ts 순)을 Valhalla `trace_attributes`로 보낸다. 실패(네트워크·5xx)는 재시도, 4xx는 `failed(permanent)`로 기록.
 3. 응답 edge를 `way_id`별로 합산 → 매칭 길이. 도로 DB에서 way 길이·road_key를 찾는다. **도로 DB에 없는 way_id**(service 등 제외 등급, 또는 pbf 버전 차이)는 `ignored_ways`에 세고 넘어간다.
-4. **오도미터 대조**(5-4): `odometerEndKm - odometerStartKm`이 양수이고 트립 GPS 길이(`distanceM`)가 `odoDelta × 1.1 + 1,000m`를 넘으면 트립을 `suspect`로 두고 **인정하지 않는다**(결과에 사유 `odometer_mismatch`). 오도미터가 null·0·감소면 대조를 건너뛴다(에뮬레이터는 0).
+4. **오도미터 대조**(5-4): `odoDelta = odometerEndKm − odometerStartKm`. **`odoDelta > 0`일 때만** 대조하고, 트립 GPS 길이(`distanceM`)가 `odoDelta × 1.1 + 1,000m`를 넘으면 트립을 `suspect`로 두고 **인정하지 않는다**(사유 `odometer_mismatch`). 시작·종료 중 하나라도 null이거나 `odoDelta ≤ 0`(증가량 0 포함, 에뮬레이터는 둘 다 0)이면 건너뛴다.
 5. 인정 판정(2장) → `driven_ways(vehicle_id, way_id, coverage, first_driven_at, last_driven_at, trip_id_first, snapshot_month)`에 upsert. 커버리지는 더 큰 값으로 갱신, `last_driven_at`은 트립 종료 시각.
 6. 집계는 조회 시 SQL로 계산한다(`driven_ways ⨝ ways ⨝ roads`). 결과 요약을 `trip_matching.result_json`에 저장: `{ newWays, newKm, roadsTouched: [road_key], nationalPercentBefore, nationalPercentAfter, suspect, ignoredWays }`.
 
@@ -58,11 +63,11 @@
 
 | 호출 | 응답 |
 |---|---|
-| `GET /trips/:id/matching` | `{ status, attempts, result?: {...4장 6}, error? }` |
+| `GET /trips/:id/matching` | `{ status, attempts, startedAt, finishedAt, result?: {...4장 6}, error? }`. `error`는 분류와 코드만(`retryable:network`·`permanent:http_400`·`retryable:roads_db_unavailable` 등). 메시지는 서버 로그에만 남긴다 |
 | `GET /coverage/summary?vehicleId=` | `{ snapshotMonth, nationalPercent(소수 2자리), drivenKm, totalKm, roadsCompleted, roadsStarted, attribution }` |
-| `GET /coverage/roads?vehicleId=&sort=percent|recent|length&limit=&offset=` | `{ items: [{ roadKey, displayName, highway, drivenM, totalM, percent, completed, lastDrivenAt }], total }` |
+| `GET /coverage/roads?vehicleId=&sort=percent|recent|length&limit=&offset=&q=` | `{ items: [{ roadKey, displayName, highway, names, namesTotal, drivenM, totalM, percent, completed, lastDrivenAt }], total }`. `names`는 최대 20개, `namesTotal`은 저장된 거리명 전체 개수(`names_json` 길이, 최대 200)라 화면의 '외 N'은 `namesTotal − 1`로 센다 |
 | `GET /coverage/segments?vehicleId=&bbox=minlon,minlat,maxlon,maxlat` | GeoJSON FeatureCollection. feature 속성 `wayId, roadKey, displayName, coverage, lastDrivenAt`. bbox 필수, 한 변 ≤ 1도, 최대 5,000개(초과 시 `truncated: true`) |
-| `GET /viewer?vehicleId=` (debug·시연) | MapLibre GL JS(CDN) + OSM 래스터 타일(개발용, 출처 표기) 위에 `/coverage/segments` 를 그리는 정적 HTML. 완료율·도로 상위 10개 표시 |
+| `GET /viewer?vehicleId=` (debug·시연. `NUBI_VIEWER=1`이거나 `NODE_ENV`가 production이 아닐 때만 라우트를 등록) | MapLibre GL JS(CDN, 버전 고정 + SRI `integrity`) + OSM 래스터 타일(개발용, 출처 표기) 위에 `/coverage/segments` 를 그리는 정적 HTML. 완료율·도로 상위 10개 표시 |
 
 - vehicleId는 feat/01의 alias 규칙을 따른다(alias로 이어진 트립 포함). 인증은 여전히 범위 밖(공개 배포 전 필수).
 - 모든 응답에 `snapshotMonth`.
@@ -99,7 +104,9 @@
 - 트립 종료 후 `GET /trips/:id/matching`을 3초 간격 최대 60초 폴링(서비스 워커, 메인 스레드 아님). `done`이면 종료 화면에 한 줄 추가: `새 도로 {newKm}km · 전국 {after}% (+{delta})`. `skipped/suspect/low_confidence/failed`이면 `이번 주행은 집계되지 않았어요`(사유는 debug 빌드에서만 괄호 표기).
 - 대기 화면: 서비스 시작 때 `GET /coverage/summary`를 1회 받아 `전국 {percent}% 달렸어요` 표시. 실패 시 생략(크래시 금지).
 - 주행 규제 중에도 글자만이라 추가 처리 없음(문자열 길이 제한은 feat/01 규칙 그대로).
-- **주행 중(기어 D·R·N) 화면에는 완료율·거리 같은 숫자를 갱신해 보이지 않는다**(Pleos 심사의 '주행 중 게임 요소' 거절 사유 회피). 숫자는 대기(P)·종료 화면에서만. 기록 중 화면은 "기록 중" 상태 문구와 마지막 업로드 결과만 둔다(샘플 수·거리의 1초 갱신은 debug 빌드에서만).
+- **숫자 표시는 기어 기준**: 완료율·새 도로·샘플 수·거리 같은 숫자는 **기어가 P일 때만** 보인다(상태기계 상태와 무관). 기어가 D·R·N이면 상태 문구("기록 중"/"대기")와 마지막 업로드 결과만. 기어를 못 읽는(null) 차량은 상태기계가 RECORDING이 아닐 때만 숫자를 보인다. (Pleos 심사의 '주행 중 게임 요소' 거절 사유 회피.) 샘플 수·거리의 1초 갱신은 debug 빌드에서만, 그것도 같은 기어 규칙을 따른다.
+- 업로드 결과 문구: End만 보낸 경우 "성공: 0점" 대신 "종료 전송 완료"로 표시한다.
+- 전국 완료율 조회는 마지막 성공 값을 로컬(SharedPreferences)에 저장해 오프라인·실패 시에도 보이고, 실패 시 30초 뒤 1회 재시도. 폴링은 시도 횟수가 아니라 **시작 시각 기준 60초** 마감.
 
 ## 8. 테스트·E2E
 
@@ -132,21 +139,23 @@
 - 동명이로 문제의 규모(같은 name의 road_key가 몇 개 시군구에 걸치는지) — 빌드 통계로 기록.
 - OSM 래스터 타일을 시연 뷰어에 쓰는 것은 개발용에 한함(OSMF 타일 정책). 배포 시 자체 타일 또는 유료 타일.
 
-## 11. 구현 결과와 가안(구현자) — 2026-11-09
+## 11. 구현 결과와 가안(구현자) — 2026-11-09, 리뷰 반영 2026-11-10
 
-구현 위치: 서버 `server/src/roads/`(도로 DB 접근·집계 SQL), `server/src/matching/`(Valhalla·파이프라인·워커), `server/src/routes/coverage.ts`, `server/src/viewer/`. 차량 `trip/Coverage.kt`, `MainActivity`. E2E `scripts/e2e-car.sh`·`verify-trip.mjs --road-coloring`·`scripts/make-gpx-from-road.mjs`.
+구현 위치: 서버 `server/src/roads/`(도로 DB 접근·집계 SQL), `server/src/matching/`(Valhalla·파이프라인·워커), `server/src/routes/coverage.ts`, `server/src/viewer/`. 도로 DB 규칙(분류·oneway·유효 길이·names_json·스키마)은 `scripts/road-rules.mjs`에 한 곳에 두고 빌더와 서버 테스트 도구가 같이 쓴다. 차량 `trip/Coverage.kt`, `trip/TripStatus.kt`(`numbersVisible`), `MainActivity`. E2E `scripts/e2e-car.sh`·`verify-trip.mjs`(`--pick`·`--road-coloring`)·`scripts/make-gpx-from-road.mjs`.
 
-**사양에서 달라진 점·가안(구현자)**
-- **분리 차로 계산(6-3 해석)**: `ways.eff_length_m`(주요 4등급 oneway=yes면 길이/2)을 `roads.total_length_m`·`snapshot.total_named_length_m`에 쓴다. 달린 길이는 **실제 `length_m` × 커버리지**이고 도로별로 총길이를 넘지 않게 자른다(`MIN(driven, total)`). 사양 문구 그대로 인정 길이도 1/2로 세면 한 방향만 달렸을 때 50%가 되어 "한 방향만 달려도 100%"와 모순이라 이렇게 풀었다. 전국 분모는 140,444km에서 **122,421.7km**로 바뀐다(분리 차로 1/2 적용). 한 방향만 달려도 100%·tertiary 이하 1배·양방향 상한은 단위 테스트로 검증.
-- **`names_json` 상위 200개 저장·API 20개 반환**: 국도 31호선 전국 DB에는 구간 거리명이 83개이고 세종대로는 길이 순 20위 안에 들지 않아 20개 저장으로는 검색·E2E 단언이 실패했다. 검색(`q`)은 저장된 200개 전체를 보고, 응답 `names`는 `q`에 걸린 거리명을 앞에 둔 최대 20개다. 그래서 E2E의 `names`에 세종대로 단언은 `GET /coverage/roads?q=세종대로` 결과로 한다.
-- **완료율 소수 4자리**(5장은 2자리): 전국 분모가 12만 km대라 1.5km 주행이 2자리에서는 0.00이 된다. 차량 화면은 값이 1% 이상이면 2자리, 0.1% 이상이면 3자리, 그보다 작으면 4자리로 보인다.
-- `trip_matching`에 `queued_at` 열 추가(24시간 재시도 한도 기준). 실패 상태 `error`는 `retryable: …`(재시도 대기) 또는 `permanent: …`. 매칭 응답에 `startedAt`·`finishedAt`.
+**사양에서 달라진 점·가안(구현자)** (2·3-2·5·7장으로 승격된 항목 — 묶음별 상한, newKm 정의, 소수 4자리, `names_json` 200/20, 503·픽스처 명시, 기어 P 숫자 규칙, 60초 시작 기준 폴링, 캐시·재시도 — 은 이 장에서 뺐다)
+- **`roads.split_length_m` 열 추가(3-2)**: 묶음별 상한을 SQL 한 번으로 구하려고 분리 구간 묶음의 상한을 열로 둔다(양방향 상한 = `total_length_m − split_length_m`). 이 열이 없는 옛 도로 DB는 서버가 열지 않는다(재빌드 필요, 조회 503).
+- **way의 묶음 판정**: DB에는 `eff_length_m < length_m`이면 분리 구간이다(주요 4등급 + link이면서 oneway). `ways.oneway`에는 `yes`·`-1`·`implicit`(motorway 암묵)·태그 원문을 저장한다. 명시적 `oneway=no`는 motorway의 암묵 규칙보다 우선한다.
+- **Valhalla 분할**: 한 걸음이 `breakage_distance`(2,000m)를 넘는 점프에서 조각을 끊고(겹치는 점 없음), 점 16,000개·누적 150km에서는 점 하나를 겹쳐 끊는다. 점프 사이에 외따로 남은 점은 요청에 못 들어가므로 unmatched로 센다.
+- `trip_matching`에 `queued_at` 열 추가(24시간 재시도 한도 기준). 실패 상태 `error`는 `retryable:<코드>`·`permanent:<코드>`. 매칭 응답에 `startedAt`·`finishedAt`. `driven_ways` 갱신과 `status = done`은 같은 트랜잭션이다. `trip_id_first`는 `first_driven_at`이 더 이른 값으로 바뀔 때 함께 바뀐다.
 - 결과 `result_json`에 `outcome`(`counted`·`skipped`·`suspect`·`low_confidence`)·`reason`·`ignoredUnnamed`·`matchedKm`·`unmatchedRatio`를 더했다. 건너뜀·의심·낮은 신뢰도도 `status = done`이다. 오도미터 대조는 Valhalla 호출 전에 한다(의심이면 호출하지 않음).
 - `POST /trips/:id/end` 응답의 `matching`은 항상 `'queued'`(같은 End 재전송에도 같은 본문을 주려는 멱등성). 실제 상태는 `GET /trips/:id/matching`. 매칭 요청이 없는 트립은 404.
-- 도로 DB가 없으면 조회 API는 503, 매칭 작업은 재시도 대기. 서버 기본 도로 DB 선택은 `NUBI_ROADS_DB` → 최신 `server/data/roads-*.sqlite` → 테스트 DB.
 - 사용자 DB 연결에 도로 DB를 `mode=ro`로 ATTACH해 같은 연결에서 집계 SQL을 돌린다(파일은 분리 유지).
-- 차량 앱: 영구 실패가 아닌 `failed(retryable)`는 계속 폴링하고, 60초가 지나도 끝나지 않으면 줄을 보이지 않는다. 종료 화면에는 이번 주행 줄과 전국 완료율 줄이 함께 나온다. 기록 중에는 샘플·거리 숫자를 숨긴다(debug 빌드 제외). 종료 알림은 `Uploader.onTripEnded`(End 업로드 성공 시)로 받는다.
+- 차량 앱: 영구 실패가 아닌 `failed(retryable)`는 계속 폴링하고, 시작 시각 기준 60초가 지나도 끝나지 않으면 줄을 보이지 않는다. 새 트립이 시작되면(상태기계 Started, 기어 null 차량의 변위 50m 재개 포함) 이전 트립의 종료 줄과 진행 중이던 폴링을 지운다. 종료 알림은 `Uploader.onTripEnded`(End 업로드 성공 시)로 받는다.
+- 샘플·거리 숫자는 release에서도 같은 기어 규칙으로 보인다(debug 전용은 아님). 1초 갱신 루프는 상태 문구용으로 두 빌드 모두 돈다. 가안.
+- debug 주입에 `park=1`(gpx 재생이 끝나면 기어 P)을 더했다. 숫자가 기어 P에서만 보이므로 E2E가 재생 끝을 화면으로 알기 위한 것이다.
 - E2E GPX는 연속 두 점 사이가 21m 아래가 되면(차량 앱 채택 기준 20m) 시드를 하나씩 올려 다시 뽑는다(기본 시드 20261109 → 20261130 채택, 결정적). 경로는 국도 48호선 하행 → 국도 31호선 → 세종대로(`nr:48`·`nr:31`·`nm:세종대로`) 약 1.48km, 60점.
+- E2E는 설치 뒤 `pm clear`, flow 단위 1회 재시도(시도별 출력·logcat 보존), 검증 대상 트립은 GPX의 점 수·첫/끝 좌표로 고른다. 단언에 `(nationalPercentAfter − Before)/100 ≈ newKm / totalKm`(±1e-6)과 차량 화면 `전국 .*% 달렸어요`(P 상태)가 더해졌다. 도로 DB는 `NUBI_ROADS_DB`로 항상 명시해 서버에 넘긴다.
 - 호스트의 8787 포트를 다른 프로젝트가 쓰고 있으면 `PORT=8788 pnpm e2e:car`로 돌린다.
 
-**E2E 실측(전국 도로 DB·Valhalla 3.5.1, 에뮬레이터 emulator-5554)**: 세종대로 트립 newKm 1.245, e2e-north newKm 0.163(done), 누적 drivenKm 1.41·전국 완료율 0.0012%, segments 11, 시작한 도로 5, 매칭 소요 9~20ms. 연속 2회 통과 확인(실패한 실행은 인프라 요인: 앞 실행이 남긴 미종료 트립이 다음 실행의 트립 수 단언을 깨뜨림, Maestro 드라이버 종료). 기대값은 ±10%로 고정(`verify-trip.mjs`).
+**실측 갱신**은 `docs/sdk-check.md` 7절(도로 DB 재빌드 뒤 분모, nr:48 수동 확인, E2E 실측)에 있다.
