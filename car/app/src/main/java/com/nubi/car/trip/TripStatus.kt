@@ -1,6 +1,7 @@
 package com.nubi.car.trip
 
-enum class UploadKind { NONE, OK, FAILED, HELD }
+/** [END_SENT]: 점은 없고 트립 종료(End)만 전송한 drain. 화면에는 '성공: 0점' 대신 '종료 전송 완료'로 보인다. */
+enum class UploadKind { NONE, OK, END_SENT, FAILED, HELD }
 
 /** 마지막 업로드 결과. 화면 문구는 화면(strings.xml)이 정한다. */
 data class UploadStatus(val kind: UploadKind = UploadKind.NONE, val points: Int = 0)
@@ -11,6 +12,8 @@ enum class RecorderHealth { OK, SERVICE_FAILED, UNSUPPORTED }
 /** 화면이 읽는 현재 상태 스냅샷. 엔진이 갱신하고 화면이 1초마다 읽는다. */
 data class TripStatus(
     val state: TripState = TripState.IDLE,
+    /** 마지막으로 읽은 기어. 못 읽는 차량은 null. */
+    val gear: Gear? = null,
     val sampleCount: Int = 0,
     val distanceM: Int = 0,
     val upload: UploadStatus = UploadStatus(),
@@ -32,3 +35,9 @@ data class TripStatus(
         val UNSUPPORTED = RecorderHealth.UNSUPPORTED
     }
 }
+
+/**
+ * 완료율·새 도로·샘플·거리 같은 **숫자**를 화면에 보여도 되는지(사양 02 7장, Pleos '주행 중 게임 요소' 거절 사유 회피).
+ * 기어를 읽을 수 있으면 기어가 P일 때만(상태기계 상태와 무관). 기어를 못 읽는(null) 차량은 상태기계가 RECORDING이 아닐 때만 보인다.
+ */
+fun numbersVisible(gear: Gear?, state: TripState): Boolean = if (gear != null) gear == Gear.P else state != TripState.RECORDING

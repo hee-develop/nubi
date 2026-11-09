@@ -391,4 +391,68 @@ class TripEngineTest {
         val localId = server.tripIdByLocalId.keys.single()
         assertEquals(listOf(0, 1, 2, 3, 4), server.seqs(localId))
     }
+
+    @Test
+    fun 숫자는_기어가_P일_때만_보이고_기어를_못_읽는_차량은_기록_중이_아닐_때만_보인다() {
+        for (state in TripState.values()) {
+            assertEquals("D $state", false, numbersVisible(Gear.D, state))
+            assertEquals("R $state", false, numbersVisible(Gear.R, state))
+            assertEquals("N $state", false, numbersVisible(Gear.N, state))
+            // 기어가 P면 상태기계 상태와 무관하게 보인다(기록 중이어도)
+            assertEquals("P $state", true, numbersVisible(Gear.P, state))
+            assertEquals("null $state", state != TripState.RECORDING, numbersVisible(null, state))
+        }
+    }
+
+    @Test
+    fun 상태는_기어를_그대로_담아_D_IDLE에서는_숨기고_P에서는_보인다() {
+        val e = engine()
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        scheduler.runPosted()
+        assertEquals(TripState.IDLE, e.status.state)
+        assertEquals(Gear.D, e.status.gear)
+        assertEquals("기어 D·IDLE에서는 숨김", false, numbersVisible(e.status.gear, e.status.state))
+        e.onGear(Gear.P)
+        scheduler.runPosted()
+        assertEquals(true, numbersVisible(e.status.gear, e.status.state))
+    }
+
+    @Test
+    fun 기어를_못_읽는_차량도_변위로_재개하면_새_트립_시작을_알려_이전_종료_줄을_치울_수_있다() {
+        vehicle.vehicleId = "hash"
+        val e = engine()
+        var started = 0
+        e.onTripStarted = { started++ }
+        e.onServiceStart()
+        e.drive(4) // 기어 null
+        assertEquals(1, started)
+        assertNull(e.status.gear)
+        assertEquals(false, numbersVisible(e.status.gear, e.status.state)) // 기록 중
+        scheduler.advance(5 * 60_000 + 10_000) // 5분 정지 → 종료
+        assertEquals(TripState.ENDED, e.status.state)
+        assertEquals(true, numbersVisible(e.status.gear, e.status.state))
+        e.drive(4, firstIndex = 100) // 새 변위 50m → 기어 없이 새 트립
+        assertEquals(TripState.RECORDING, e.status.state)
+        assertEquals(2, started)
+    }
+
+    @Test
+    fun 점은_이미_올라갔고_End만_보낸_업로드는_종료_전송_완료로_표시한다() {
+        vehicle.vehicleId = "hash"
+        val e = engine()
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.drive(4)
+        scheduler.advance(61_000) // 60초 업로드 타이머: Start와 점이 올라간다
+        assertEquals(UploadKind.OK, e.status.upload.kind)
+        assertEquals(4, e.status.upload.points)
+        e.onGear(Gear.P)
+        scheduler.advance(5 * 60_000 + 10_000)
+        assertEquals(TripState.ENDED, e.status.state)
+        scheduler.advance(10_000)
+        assertEquals(1, server.ended.size)
+        assertEquals(UploadKind.END_SENT, e.status.upload.kind)
+        assertEquals(0, e.status.upload.points)
+    }
 }

@@ -93,7 +93,8 @@ sealed interface MatchingLine {
 }
 
 /**
- * 매칭 결과를 3초 간격 최대 60초 폴링한다. 워커 스레드에서만 부른다(메인 스레드 금지).
+ * 매칭 결과를 3초 간격으로 폴링한다. 마감은 시도 횟수가 아니라 **폴링 시작 시각 기준 [maxMs](60초)** 다(요청이 느려도 60초를 넘기지 않는다).
+ * 워커 스레드에서만 부른다(메인 스레드 금지).
  * queued·running·아직 없음(404)·네트워크 오류·재시도 대기(retryable)는 계속 기다리고, 시간이 다 되면 [MatchingLine.None]이다.
  * done이면 결과(집계/미집계), 영구 실패(permanent)면 미집계.
  */
@@ -102,10 +103,11 @@ class MatchingPoller(
     private val sleep: (Long) -> Unit = { Thread.sleep(it) },
     private val intervalMs: Long = 3_000,
     private val maxMs: Long = 60_000,
+    private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 },
 ) {
     fun poll(tripId: String, isCancelled: () -> Boolean = { false }): MatchingLine {
-        val attempts = (maxMs / intervalMs).toInt().coerceAtLeast(1)
-        for (i in 1..attempts) {
+        val start = nowMs()
+        while (true) {
             if (isCancelled()) return MatchingLine.None
             val line = try {
                 lineOf(api.getMatching(tripId))
@@ -114,9 +116,10 @@ class MatchingPoller(
                 null
             }
             if (line != null) return line
-            if (i < attempts) sleep(intervalMs)
+            // 다음 시도가 마감(시작 + maxMs) 이후에 시작되면 더 묻지 않는다.
+            if (nowMs() - start + intervalMs >= maxMs) return MatchingLine.None
+            sleep(intervalMs)
         }
-        return MatchingLine.None
     }
 
     /** 끝난 상태면 줄, 더 기다려야 하면 null. */
@@ -166,7 +169,10 @@ fun formatNationalLine(percent: Double?, format: String): String? = percent?.let
 
 /**
  * 화면이 읽는 도로 색칠 결과 상태. 트립이 서버에 끝났다고 알려지면([onTripEnded]) 워커에서 폴링하고,
- * 서비스 시작 때 전국 완료율을 1회 받는다([refreshNational], 실패하면 값이 없는 채로 둔다). 모든 네트워크 호출은 [executor]에서 한다.
+ * 서비스 시작 때 전국 완료율을 받는다([refreshNational]). 모든 네트워크 호출은 [executor]에서 한다.
+ *
+ * 전국 완료율은 마지막으로 성공한 값을 [cache](SharedPreferences)에 저장해, 오프라인·조회 실패 때도 그 값을 보인다.
+ * 조회가 실패하면 [retryDelayMs](30초) 뒤 한 번만 더 시도한다.
  */
 class CoverageTracker(
     private val api: CoverageApi,
@@ -174,13 +180,19 @@ class CoverageTracker(
     private val vehicleId: () -> String?,
     private val poller: MatchingPoller = MatchingPoller(api),
     private val sleep: (Long) -> Unit = { Thread.sleep(it) },
+    private val cache: KeyValueStore? = null,
+    private val retryDelayMs: Long = 30_000,
 ) {
     @Volatile
     var matching: MatchingLine = MatchingLine.None
         private set
 
     @Volatile
-    var nationalPercent: Double? = null
+    var nationalPercent: Double? = try {
+        cache?.getString(KEY_NATIONAL)?.toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0.0 }
+    } catch (t: Throwable) {
+        null
+    }
         private set
 
     @Volatile
@@ -194,12 +206,19 @@ class CoverageTracker(
             val line = poller.poll(serverTripId) { gen != generation }
             if (gen == generation) {
                 matching = line
-                if (line is MatchingLine.Counted) nationalPercent = line.percentAfter
+                if (line is MatchingLine.Counted) setNational(line.percentAfter)
             }
         }
     }
 
-    /** 서비스 시작 때 1회. 차량 ID가 아직 없으면 최대 [waitIdMs] 기다린다. 실패하면 생략(크래시 금지). */
+    /** 새 트립이 시작됐다: 이전 트립의 종료 줄을 치우고 진행 중이던 폴링을 멈춘다. 전국 완료율은 새로 받아 둔다(그 결과가 아직 반영 전일 수 있다). */
+    fun onTripStarted() {
+        generation++
+        matching = MatchingLine.None
+        refreshNational()
+    }
+
+    /** 서비스 시작 때. 차량 ID가 아직 없으면 최대 [waitIdMs] 기다린다. 실패하면 캐시 값을 그대로 두고(크래시 금지) 30초 뒤 1회만 다시 시도한다. */
     fun refreshNational(waitIdMs: Long = 15_000) {
         run {
             var waited = 0L
@@ -209,14 +228,27 @@ class CoverageTracker(
                 waited += 1_000
                 id = vehicleId()
             }
-            if (id != null) {
-                nationalPercent = try {
-                    api.getNationalPercent(id)
-                } catch (e: Exception) {
-                    Log.w("NubiCoverage", "전국 완료율 조회 실패: ${e.javaClass.simpleName}")
-                    nationalPercent
-                }
+            if (id != null && !fetchNational(id)) {
+                sleep(retryDelayMs)
+                fetchNational(id)
             }
+        }
+    }
+
+    private fun fetchNational(id: String): Boolean = try {
+        setNational(api.getNationalPercent(id))
+        true
+    } catch (e: Exception) {
+        Log.w("NubiCoverage", "전국 완료율 조회 실패: ${e.javaClass.simpleName}")
+        false
+    }
+
+    private fun setNational(percent: Double) {
+        nationalPercent = percent
+        try {
+            cache?.putString(KEY_NATIONAL, percent.toString())
+        } catch (t: Throwable) {
+            Log.w("NubiCoverage", "전국 완료율 저장 실패: ${t.javaClass.simpleName}")
         }
     }
 
@@ -238,5 +270,9 @@ class CoverageTracker(
         } catch (t: Throwable) {
             Log.w("NubiCoverage", "도로 색칠 작업 등록 실패: ${t.javaClass.simpleName}")
         }
+    }
+
+    private companion object {
+        const val KEY_NATIONAL = "nationalPercent"
     }
 }

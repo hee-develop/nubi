@@ -13,6 +13,7 @@
     <string name="upload_format">마지막 업로드: %1$s</string>
     <string name="upload_none">없음</string>
     <string name="upload_ok">성공: %1$d점</string>
+    <string name="upload_end_sent">종료 전송 완료</string>
     <string name="upload_failed">실패, 다시 시도 대기</string>
     <string name="upload_held">업로드 보류</string>
     <string name="permission_title">위치 권한이 필요해요</string>

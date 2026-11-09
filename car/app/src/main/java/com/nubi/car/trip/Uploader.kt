@@ -8,7 +8,7 @@ import java.util.concurrent.atomic.AtomicInteger
 enum class DrainKind { OK, RETRY, HELD }
 
 /** [HELD]는 서버가 요청 자체를 거절해(Start 4xx 등) 항목을 버리지 않고 보류한 트립이 남은 경우다. */
-data class DrainResult(val kind: DrainKind, val uploadedPoints: Int, val message: String) {
+data class DrainResult(val kind: DrainKind, val uploadedPoints: Int, val message: String, val endedTrips: Int = 0) {
     val ok: Boolean get() = kind == DrainKind.OK
 }
 
@@ -407,7 +407,7 @@ class Uploader(
                     return if (heldTrips > 0) {
                         DrainResult(DrainKind.HELD, uploaded, "HELD ${heldTrips}건")
                     } else {
-                        DrainResult(DrainKind.OK, uploaded, summary(uploaded, ended))
+                        DrainResult(DrainKind.OK, uploaded, summary(uploaded, ended), ended)
                     }
                 }
                 try {

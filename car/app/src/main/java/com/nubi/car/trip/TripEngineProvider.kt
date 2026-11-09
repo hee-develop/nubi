@@ -17,8 +17,21 @@ object TripEngineProvider {
     @Volatile
     private var tracker: CoverageTracker? = null
 
+    @Volatile
+    private var resolver: VehicleIdResolver? = null
+
     fun get(context: Context): TripEngine =
         instance ?: synchronized(this) { instance ?: create(context.applicationContext).also { instance = it } }
+
+    /**
+     * debug 전용: 차량 SDK 대신 [vin]으로 서버 차량 ID를 받는다(E2E가 `pm clear` 뒤에도 서버 발급 ID를 쓰게 한다. 에뮬레이터의 VIN은 서버 형식 검사에 걸려 등록이 400이다).
+     * release에서는 아무것도 하지 않는다.
+     */
+    fun debugInjectVin(context: Context, vin: String) {
+        if (!BuildConfig.DEBUG) return
+        get(context)
+        resolver?.onVin(vin)
+    }
 
     /** 도로 색칠 결과(종료 한 줄)·전국 완료율 상태. 엔진과 같은 수명이다. */
     fun coverage(context: Context): CoverageTracker {
@@ -65,10 +78,11 @@ object TripEngineProvider {
             api = HttpVehicleApi(BuildConfig.SERVER_URL),
             executor = Executors.newSingleThreadExecutor(),
         )
+        this.resolver = resolver
         val vehicle = VehicleInfo(context, resolver)
-        val coverage = CoverageTracker(HttpCoverageApi(BuildConfig.SERVER_URL), Executors.newCachedThreadPool(), { vehicle.vehicleId })
+        val coverage = CoverageTracker(HttpCoverageApi(BuildConfig.SERVER_URL), Executors.newCachedThreadPool(), { vehicle.vehicleId }, cache = store)
         uploader.onTripEnded = coverage::onTripEnded
         tracker = coverage
-        return TripEngine(clock, scheduler, Executors.newSingleThreadExecutor(), vehicle, store, uploader)
+        return TripEngine(clock, scheduler, Executors.newSingleThreadExecutor(), vehicle, store, uploader).also { it.onTripStarted = coverage::onTripStarted }
     }
 }

@@ -75,6 +75,10 @@ class TripEngine(
     var acceptRealLocation: Boolean = true
         private set
 
+    /** 새 트립이 시작됐다(상태기계 Started). 이전 트립의 종료 줄을 치우는 데 쓴다. 엔진 스레드에서 불린다. */
+    @Volatile
+    var onTripStarted: () -> Unit = {}
+
     @Volatile
     var status: TripStatus = TripStatus()
         private set
@@ -255,6 +259,11 @@ class TripEngine(
             })
             when (e) {
                 is TripEvent.Started -> {
+                    try {
+                        onTripStarted()
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "트립 시작 알림 예외: ${t.javaClass.simpleName}")
+                    }
                     val ctx = TripCtx(UUID.randomUUID().toString(), e.startedAtMillis)
                     liveTrips.add(ctx.localId)
                     ctx.held.addAll(e.points)
@@ -411,7 +420,8 @@ class TripEngine(
             failures = if (result.ok) 0 else failures + 1
             nextAttemptElapsed = clock.elapsedMs() + backoffMillis(failures)
             lastUpload = when (result.kind) {
-                DrainKind.OK -> UploadStatus(UploadKind.OK, result.uploadedPoints)
+                DrainKind.OK ->
+                    if (result.uploadedPoints == 0 && result.endedTrips > 0) UploadStatus(UploadKind.END_SENT) else UploadStatus(UploadKind.OK, result.uploadedPoints)
                 DrainKind.RETRY -> UploadStatus(UploadKind.FAILED)
                 DrainKind.HELD -> UploadStatus(UploadKind.HELD)
             }
@@ -426,6 +436,7 @@ class TripEngine(
     private fun publish() {
         status = TripStatus(
             state = machine.state,
+            gear = machine.gear,
             sampleCount = machine.sampleCount,
             distanceM = machine.distanceM.toInt(),
             upload = lastUpload,

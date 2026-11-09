@@ -2,6 +2,7 @@ package com.nubi.car
 
 import android.content.Context
 import android.util.Log
+import com.nubi.car.trip.Gear
 import com.nubi.car.trip.TripEngine
 import com.nubi.car.trip.haversineM
 import java.util.concurrent.Executors
@@ -9,14 +10,14 @@ import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.ScheduledExecutorService
 
-/** GPX의 trkpt(lat·lon)를 1초 간격으로 엔진에 넣는다. 시간 정보는 쓰지 않는다. */
+/** GPX의 trkpt(lat·lon)를 1초 간격으로 엔진에 넣는다. 시간 정보는 쓰지 않는다. [parkAtEnd]면 마지막 점을 넣은 뒤 기어를 P로 바꾼다(숫자는 기어 P에서만 보이므로 E2E가 재생 끝을 화면으로 알 수 있게). */
 object GpxPlayer {
     private val point = Regex("""<(?:trkpt|wpt|rtept)\s[^>]*?lat="([-0-9.]+)"[^>]*?lon="([-0-9.]+)"""", RegexOption.IGNORE_CASE)
     private var scheduler: ScheduledExecutorService? = null
     private var task: Future<*>? = null
 
     @Synchronized
-    fun play(context: Context, engine: TripEngine, assetName: String) {
+    fun play(context: Context, engine: TripEngine, assetName: String, parkAtEnd: Boolean = false) {
         stop()
         val text = context.assets.open(assetName).bufferedReader().use { it.readText() }
         val pts = point.findAll(text).map { it.groupValues[1].toDouble() to it.groupValues[2].toDouble() }.toList()
@@ -27,6 +28,7 @@ object GpxPlayer {
         var i = 0
         task = s.scheduleAtFixedRate({
             if (i >= pts.size) {
+                if (parkAtEnd) engine.onGear(Gear.P)
                 s.shutdown()
                 return@scheduleAtFixedRate
             }
