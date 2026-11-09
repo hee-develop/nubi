@@ -2,6 +2,8 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { openDb } from '../src/db/index.js';
+import { attachRoads } from '../src/roads/index.js';
 import { driveTrip, fakeValhalla, getJson, makeRoadsDb, matchedResponse, newApp, type SynthWay } from './helpers.js';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'nubi-test-'));
@@ -184,6 +186,32 @@ describe('조회 API', () => {
       expect(r.status, p).toBe(503);
       expect(r.body.attribution).toContain('OpenStreetMap');
     }
+  });
+});
+
+describe('옛 스키마 도로 DB', () => {
+  it('split_length_m 열이 없는 도로 DB는 쓰지 않고 조회 API는 503', async () => {
+    const roadsPath = await makeRoadsDb(join(tmp(), 'old.sqlite'), [W(1, 1000, 'nm:a')]);
+    const { DatabaseSync } = await import('node:sqlite');
+    const old = new DatabaseSync(roadsPath);
+    old.exec('ALTER TABLE roads DROP COLUMN split_length_m');
+    old.close();
+    const app = newApp({ roadsPath });
+    const r = await getJson(app, '/coverage/summary?vehicleId=v');
+    expect(r.status).toBe(503);
+    expect(r.body.attribution).toContain('OpenStreetMap');
+  });
+
+  it('검사에 실패하면 ATTACH를 풀어 같은 연결에 도로 DB가 남지 않는다', async () => {
+    const roadsPath = await makeRoadsDb(join(tmp(), 'old2.sqlite'), [W(1, 1000, 'nm:a')]);
+    const { DatabaseSync } = await import('node:sqlite');
+    const old = new DatabaseSync(roadsPath);
+    old.exec('ALTER TABLE roads DROP COLUMN split_length_m');
+    old.close();
+    const db = openDb(':memory:');
+    expect(attachRoads(db, roadsPath)).toBeNull();
+    const names = (db.prepare('PRAGMA database_list').all() as { name: string }[]).map((d) => d.name);
+    expect(names).not.toContain('rd');
   });
 });
 

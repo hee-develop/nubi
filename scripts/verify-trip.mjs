@@ -2,7 +2,8 @@
 //  - 기본 모드: GET /trips/:id 응답(첫째 인자)을 GPX(둘째 인자)의 기준값과 대조한다. 셋째 인자는 목록 응답(VIN 누출 확인용)이다.
 //    넷째 인자는 DB 스키마(schema.ts), 다섯째는 POST /vehicles/register 응답이다. 서버가 VIN을 저장·응답하지 않는지와 차량 ID 발급(HMAC)을 확인한다.
 //  - --pick <서버 주소> <gpx> [대기 초]: 이번 실행의 트립 ID를 골라 출력한다. 트립 수가 아니라 GPX의 **점 수·첫/끝 좌표**가 맞는 종료된 트립을 고르고,
-//    같은 GPX 후보가 여럿이면(Maestro 재시도 등) 가장 먼저 시작한 것을 쓴다. 후보가 없으면 아무것도 출력하지 않는다.
+//    같은 GPX 후보가 여럿이면 **가장 늦게 시작한** 것을 쓴다. 후보가 없으면 아무것도 출력하지 않는다.
+//  - --exists <서버 주소> <gpx>: 종료 여부와 상관없이 GPX와 점 수·첫/끝 좌표가 맞는 트립이 서버에 있으면 그 ID를, 없으면 아무것도 출력하지 않는다(재시도 전 1회차 흔적 확인용, 대기 없음).
 //  - --road-coloring <north.gpx> <sejong.gpx>: 사양 02 8장 도로 색칠 단언. 서버 주소는 환경변수 E2E_BASE_URL.
 // 실패하면 이유를 stderr에 쓰고 종료 코드 1로 끝난다.
 import { createHmac } from 'node:crypto';
@@ -16,8 +17,8 @@ const EXPECT = {
   newKm: { min: 1.12, max: 1.37 },
   drivenKm: { min: 1.27, max: 1.55 },
 };
-/** nationalPercentAfter − Before ≈ newKm / totalKm: 소수 4자리 반올림 오차로 ±1e-6(비율)이 상한이고, newKm·totalKm 반올림 여유를 1% 더한다. */
-const PERCENT_TOLERANCE = 1.01e-6;
+/** nationalPercentAfter − Before ≈ newKm / totalKm: 소수 4자리 반올림 오차 1e-6(비율)에 newKm의 m 단위 반올림(0.0005km / totalKm)을 더한다. */
+const percentTolerance = (totalKm) => 1e-6 + 0.0005 / totalKm;
 
 const readGpx = (path) =>
   [...readFileSync(path, 'utf8').matchAll(/<trkpt\s+lat="([-\d.]+)"\s+lon="([-\d.]+)"/g)].map((m) => ({
@@ -31,22 +32,28 @@ async function fetchJson(base, path) {
   return { status: res.status, body: await res.json() };
 }
 
-/** 이번 실행의 GPX와 점 수·첫/끝 좌표가 맞는 종료된 트립(상세 응답)을 고른다. 없으면 null. */
-async function pickTrip(base, gpxPath, timeoutS = 30) {
+/** 이번 실행의 GPX와 점 수·첫/끝 좌표가 맞는 트립(상세 응답)을 고른다. 후보가 여럿이면 가장 늦게 시작한 것. 없으면 null. [anyState]면 종료 전 트립도 후보다. */
+async function pickTrip(base, gpxPath, timeoutS = 30, anyState = false) {
   const gpx = readGpx(gpxPath);
   for (let i = 0; i <= timeoutS; i++) {
     const list = (await fetchJson(base, '/trips?limit=200')).body.trips ?? [];
     const found = [];
     for (const t of list) {
-      if (!t.endedAt || t.pointCount !== gpx.length) continue;
+      if ((!anyState && !t.endedAt) || t.pointCount !== gpx.length) continue;
       const d = (await fetchJson(base, `/trips/${t.tripId}`)).body;
       const pts = d.points ?? [];
       if (pts.length === gpx.length && nearPt(pts[0], gpx[0]) && nearPt(pts.at(-1), gpx.at(-1))) found.push(d);
     }
-    if (found.length > 0) return found.sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)))[0];
+    if (found.length > 0) return found.sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)))[0];
     if (i < timeoutS) await new Promise((r) => setTimeout(r, 1000));
   }
   return null;
+}
+
+if (process.argv[2] === '--exists') {
+  const trip = await pickTrip(process.argv[3], process.argv[4], 0, true);
+  if (trip) process.stdout.write(trip.tripId);
+  process.exit(0);
 }
 
 if (process.argv[2] === '--pick') {
@@ -195,6 +202,13 @@ async function verifyRoadColoring(northGpx, sejongGpx) {
   ok(Boolean(nr31), `coverage/roads?q=세종대로에 nr:31이 없음: ${JSON.stringify((roads.items ?? []).map((r) => r.roadKey))}`);
   ok(nr31?.names?.includes('세종대로'), `nr:31 names에 세종대로가 없음: ${JSON.stringify(nr31?.names)}`);
   const summary = (await get(`/coverage/summary?vehicleId=${v}`)).body;
+  // E2E는 전국 도로 DB 전제다. 픽스처 등으로 대체됐으면(분모가 작으면) 기대값이 의미 없으므로 경고 후 중단한다.
+  if (!(summary.totalKm > 100_000) || summary.snapshotMonth === '209901') {
+    console.error(
+      `경고: 도로 DB가 전국이 아닙니다(totalKm=${summary.totalKm}, snapshotMonth=${summary.snapshotMonth}). E2E는 전국 DB를 전제로 하므로 중단합니다.`,
+    );
+    process.exit(1);
+  }
   ok(summary.nationalPercent > 0, `nationalPercent ${summary.nationalPercent} <= 0`);
   ok(
     summary.drivenKm >= EXPECT.drivenKm.min && summary.drivenKm <= EXPECT.drivenKm.max,
@@ -207,7 +221,10 @@ async function verifyRoadColoring(northGpx, sejongGpx) {
     const r = m.result ?? {};
     const lhs = (r.nationalPercentAfter - r.nationalPercentBefore) / 100;
     const rhs = r.newKm / summary.totalKm;
-    ok(Math.abs(lhs - rhs) <= PERCENT_TOLERANCE, `${label}: (after−before)/100 ${lhs} != newKm/totalKm ${rhs} (±${PERCENT_TOLERANCE})`);
+    ok(
+      Math.abs(lhs - rhs) <= percentTolerance(summary.totalKm),
+      `${label}: (after−before)/100 ${lhs} != newKm/totalKm ${rhs} (±${percentTolerance(summary.totalKm)})`,
+    );
     return { lhs, rhs };
   };
   const cSejong = consistency('세종대로', mSejong);

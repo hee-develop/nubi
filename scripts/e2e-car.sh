@@ -5,7 +5,10 @@
 # 환경 변수: E2E_OUT은 산출물 루트(기본 e2e/output/car), PORT는 서버 포트(기본 8787), VALHALLA_PORT는 Valhalla 포트(기본 8002),
 #            NUBI_ROADS_DB는 도로 DB(기본: server/data/roads-*.sqlite 중 최신, 없으면 server/test/fixtures/roads-test.sqlite를 이 스크립트가 **명시**해 서버에 넘긴다. 서버 자체는 조용히 대체하지 않는다).
 # 실행마다 $E2E_OUT/<시각>/ 폴더를 새로 만들고 스크린샷(shots/)과 로그는 그 안에만 둔다.
-# 앞 실행의 앱 데이터(미종료 트립·큐·저장된 차량 ID)가 남지 않도록 설치 뒤 pm clear 하고, Maestro flow는 실패하면 flow 단위로 1회 재시도한다(실패한 시도의 출력·logcat은 시도별로 보존).
+# 앞 실행의 앱 데이터(미종료 트립·큐·저장된 차량 ID)가 남지 않도록 설치 뒤 pm clear 한다.
+# Maestro flow가 실패해도 1회차 트립(GPX 점 수·좌표 일치)이 서버에 생겼으면 **재시도하지 않고 실패로 끝낸다**(화면 단언 실패를 가리지 않는다).
+# 트립이 아예 없을 때(Maestro 드라이버 중단 등)만 flow 단위로 1회 재시도하고, 그 경우 통과 출력과 summary.json에 retried=<flow>를 남긴다(시도별 출력·logcat 보존).
+# "2회 연속 통과" 기준은 retried가 없는 통과만 인정한다.
 # 검증 대상 트립은 트립 수가 아니라 이번 실행 GPX의 점 수·첫/끝 좌표로 고른다(verify-trip.mjs --pick).
 set -euo pipefail
 # 백그라운드로 띄운 서버가 자기 프로세스 그룹을 갖도록 job control을 켠다(그룹 전체를 한 번에 종료하려고 쓴다)
@@ -36,7 +39,7 @@ if lsof -ti "tcp:$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   exit 1
 fi
 
-# 도로 DB: 전국이 있으면 그것, 없으면 테스트 DB(사양 02 8장)
+# 도로 DB: 전국이 있으면 그것, 없으면 테스트 DB를 명시해 넘기지만 verify-trip이 전국이 아니면 도로 색칠 검증에서 중단한다(사양 02 8장)
 if [ -z "${NUBI_ROADS_DB:-}" ]; then
   NUBI_ROADS_DB="$(ls -1 "$ROOT"/server/data/roads-*.sqlite 2>/dev/null | sort | tail -1 || true)"
   [ -n "$NUBI_ROADS_DB" ] || NUBI_ROADS_DB="$ROOT/server/test/fixtures/roads-test.sqlite"
@@ -103,9 +106,11 @@ curl -fs "http://127.0.0.1:$PORT/health" >/dev/null || { echo "서버가 뜨지 
 BASE_URL="http://127.0.0.1:$PORT"
 LOGTAGS=(NubiLoc NubiTrip NubiVehicle NubiCarSignals NubiService NubiDebug NubiUpload NubiVehicleId NubiCipher NubiCoverage AndroidRuntime)
 
-# flow 하나를 돌린다. 실패하면 로그를 남기고 1회만 다시 돈다. 인자: <이름> <flow yaml>
+RETRIED=()
+# flow 하나를 돌린다. 인자: <이름> <flow yaml> <GPX> <점 수>
+# 실패하면 1회차 트립이 서버에 있는지 본다: 있으면 재시도 없이 실패, 없으면 1회만 다시 돈다(RETRIED에 기록).
 run_flow() {
-  local name="$1" yaml="$2" attempt rc=1 out plus6
+  local name="$1" yaml="$2" gpx="$3" npts="$4" attempt rc=1 out plus6 seen
   for attempt in 1 2; do
     out="$RUN_DIR/maestro/$name"
     [ "$attempt" -eq 1 ] || out="$RUN_DIR/maestro/$name-attempt$attempt"
@@ -119,13 +124,25 @@ run_flow() {
     "${ADB[@]}" logcat -d -s "${LOGTAGS[@]}" >"$RUN_DIR/app-logcat-$name-attempt$attempt.txt" 2>&1 || true
     [ "$rc" -eq 0 ] && return 0
     echo "Maestro($name) 시도 $attempt 실패(rc=$rc). 출력: $out, logcat: $RUN_DIR/app-logcat-$name-attempt$attempt.txt" >&2
+    seen="$(node "$ROOT/scripts/verify-trip.mjs" --exists "$BASE_URL" "$gpx" 2>/dev/null || true)"
+    if [ -n "$seen" ]; then
+      echo "1회차 트립($seen, 점 ${npts}개)이 서버에 이미 있어 재시도하지 않습니다(화면 단언 실패를 가리지 않음)." >&2
+      return "$rc"
+    fi
+    [ "$attempt" -eq 1 ] && RETRIED+=("$name")
   done
   return "$rc"
 }
 
+write_summary() {
+  local retried="${RETRIED[*]:-}"
+  printf '{"result":"pass","retried":"%s","runDir":"%s"}\n' "${retried// /,}" "$RUN_DIR" >"$RUN_DIR/summary.json"
+  [ -z "$retried" ] || echo "retried=${retried// /,}  (재시도가 있었으므로 2회 연속 통과 기준에는 인정되지 않습니다)"
+}
+
 echo "== Maestro 실행: 주행 기록 (스크린샷: $SHOTS)"
 cd "$ROOT"
-run_flow trip-recording "e2e/maestro/car/trip-recording.yaml" || { echo "Maestro(주행 기록) 실패" >&2; exit 1; }
+run_flow trip-recording "e2e/maestro/car/trip-recording.yaml" "$ROOT/car/app/src/debug/assets/e2e-north.gpx" 30 || { echo "Maestro(주행 기록) 실패" >&2; exit 1; }
 
 echo "== 서버 검증"
 # 이번 실행의 e2e-north GPX(점 30개, 첫/끝 좌표 일치)와 맞는 종료된 트립을 찾는다. 종료 업로드가 끝날 때까지 잠시 기다린다
@@ -140,9 +157,10 @@ NUBI_VEHICLE_HMAC_KEY="$HMAC_KEY" E2E_PROBE_VIN="$PROBE_VIN" E2E_APP_VIN="$APP_V
 echo "== 주행 기록 통과"
 
 echo "== Maestro 실행: 도로 색칠 (스크린샷: $SHOTS)"
-run_flow road-coloring "e2e/maestro/car/road-coloring.yaml" || { echo "Maestro(도로 색칠) 실패" >&2; exit 1; }
+run_flow road-coloring "e2e/maestro/car/road-coloring.yaml" "$ROOT/car/app/src/debug/assets/e2e-sejong.gpx" 60 || { echo "Maestro(도로 색칠) 실패" >&2; exit 1; }
 
 echo "== 서버 검증: 도로 색칠"
 E2E_BASE_URL="$BASE_URL" node "$ROOT/scripts/verify-trip.mjs" --road-coloring "$ROOT/car/app/src/debug/assets/e2e-north.gpx" "$ROOT/car/app/src/debug/assets/e2e-sejong.gpx" | tee "$RUN_DIR/road-coloring-verify.txt"
 curl -fs "$BASE_URL/trips?limit=200" >"$RUN_DIR/trips-final.json" || true
+write_summary
 echo "== 통과. 산출물: $RUN_DIR"

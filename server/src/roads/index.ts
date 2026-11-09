@@ -48,11 +48,17 @@ export const attachRoads = (db: Db, path: string | null | undefined): Roads | nu
     db.exec(`ATTACH DATABASE '${pathToFileURL(path).href.replaceAll("'", "''")}?mode=ro' AS ${RD}`);
     const s = db.prepare(`SELECT month, total_named_length_m FROM ${RD}.snapshot ORDER BY month DESC LIMIT 1`).get() as
       { month: string; total_named_length_m: number } | undefined;
-    if (!s) return null;
+    if (!s) throw new Error('snapshot 행이 없습니다');
     // 묶음별 상한(사양 2장)에 쓰는 열이 없는 옛 스키마는 쓰지 않는다(재빌드 필요).
     db.prepare(`SELECT split_length_m FROM ${RD}.roads LIMIT 1`).get();
     return { path, month: s.month, totalNamedLengthM: s.total_named_length_m };
   } catch (e) {
+    // 검사에 실패하면 ATTACH를 풀어 둔다(붙은 채로 남으면 이후 쿼리가 옛 스키마를 읽는다).
+    try {
+      db.exec(`DETACH DATABASE ${RD}`);
+    } catch {
+      // ATTACH 자체가 실패했으면 풀 것이 없다
+    }
     console.warn(`도로 DB를 열 수 없습니다(${path}): ${e instanceof Error ? e.message : String(e)}`);
     return null;
   }

@@ -296,6 +296,20 @@ describe('묶음별 상한(사양 2장)', () => {
     expect(s.nationalPercent).toBe(roundPercent((1000 / 1500) * 100));
   });
 
+  it('양방향 묶음만 단독으로 달리면 분리 구간 몫은 0이고 양방향 상한(500m)까지만 센다', async () => {
+    const roadsPath = await mixed();
+    const app = newApp({
+      roadsPath,
+      valhalla: { fetchFn: fakeValhalla(() => matchedResponse([{ way_id: 12, length: 0.5 }], 40)) },
+    });
+    const m = await settle(app, (await driveTrip(app)).tripId);
+    expect(m.result).toMatchObject({ newWays: 1, newKm: 0.5 });
+    const road = (await getJson(app, '/coverage/roads?vehicleId=v1')).body.items[0];
+    expect(road).toMatchObject({ roadKey: 'nr:90', totalM: 1500, drivenM: 500, completed: false });
+    expect(road.percent).toBeCloseTo(33.33, 2);
+    expect((await getJson(app, '/coverage/summary?vehicleId=v1')).body).toMatchObject({ drivenKm: 0.5, totalKm: 1.5 });
+  });
+
   it('양방향 구간까지 달려야 100%가 되고, 그때의 newKm은 새로 채운 몫(0.5km)이다', async () => {
     const roadsPath = await mixed();
     const ids = [[10, 11], [12]];

@@ -104,7 +104,7 @@
 - 트립 종료 후 `GET /trips/:id/matching`을 3초 간격 최대 60초 폴링(서비스 워커, 메인 스레드 아님). `done`이면 종료 화면에 한 줄 추가: `새 도로 {newKm}km · 전국 {after}% (+{delta})`. `skipped/suspect/low_confidence/failed`이면 `이번 주행은 집계되지 않았어요`(사유는 debug 빌드에서만 괄호 표기).
 - 대기 화면: 서비스 시작 때 `GET /coverage/summary`를 1회 받아 `전국 {percent}% 달렸어요` 표시. 실패 시 생략(크래시 금지).
 - 주행 규제 중에도 글자만이라 추가 처리 없음(문자열 길이 제한은 feat/01 규칙 그대로).
-- **숫자 표시는 기어 기준**: 완료율·새 도로·샘플 수·거리 같은 숫자는 **기어가 P일 때만** 보인다(상태기계 상태와 무관). 기어가 D·R·N이면 상태 문구("기록 중"/"대기")와 마지막 업로드 결과만. 기어를 못 읽는(null) 차량은 상태기계가 RECORDING이 아닐 때만 숫자를 보인다. (Pleos 심사의 '주행 중 게임 요소' 거절 사유 회피.) 샘플 수·거리의 1초 갱신은 debug 빌드에서만, 그것도 같은 기어 규칙을 따른다.
+- **숫자 표시는 기어 기준**: 완료율·새 도로·샘플 수·거리 같은 숫자는 **기어가 P일 때만** 보인다(상태기계 상태와 무관). 기어가 D·R·N이면 상태 문구("기록 중"/"대기")와 마지막 업로드 결과만. 기어를 못 읽는(null) 차량은 상태기계가 RECORDING이 아닐 때만 숫자를 보인다. (Pleos 심사의 '주행 중 게임 요소' 거절 사유 회피.) 샘플 수·거리도 release·debug 모두 같은 기어 규칙(P일 때만)으로 보이고, 1초 갱신 루프는 두 빌드가 동일하다.
 - 업로드 결과 문구: End만 보낸 경우 "성공: 0점" 대신 "종료 전송 완료"로 표시한다.
 - 전국 완료율 조회는 마지막 성공 값을 로컬(SharedPreferences)에 저장해 오프라인·실패 시에도 보이고, 실패 시 30초 뒤 1회 재시도. 폴링은 시도 횟수가 아니라 **시작 시각 기준 60초** 마감.
 
@@ -113,7 +113,7 @@
 - 서버 단위: Valhalla 응답 **픽스처**(`server/test/fixtures/valhalla-e2e-north.json`, 실제 응답을 저장)로 매칭 파이프라인 전체(합산·인정·오도미터 대조·low_confidence·unnamed 제외·집계 SQL)를 검증. 도로 DB는 테스트용 소형 sqlite(`server/test/fixtures/roads-test.sqlite`, 세종대로 일대 way 수십 개)를 스크립트로 생성해 커밋(크기 < 1MB).
 - 차량 단위: 폴링·표시 문자열 생성.
 - E2E(`pnpm e2e:car`): 기존 feat/01 flow(GPX `e2e-north` 30점)는 그대로 두고 **두 번째 flow `road-coloring.yaml`** 을 추가한다. 새 GPX `e2e-sejong.gpx`는 도로 DB(`roads-test.sqlite`)의 `nm:세종대로`/`nr:31` way 기하에서 **차로 중심선을 따라 약 25m 간격으로 생성**(광화문 → 숭례문 방향 약 1.5km, 점 60개, 고정 시드의 ±3m 지터)해 `car/app/src/debug/assets/`에 커밋하고, 생성 스크립트 `scripts/make-gpx-from-road.mjs`도 커밋한다. 기존 `e2e-north`는 골목에 매칭되므로 도로 색칠 단언에 쓰지 않는다.
-- `valhalla-up.sh`로 실제 Valhalla 기동, 서버 도로 DB는 전국(`server/data/roads-*.sqlite`)이 있으면 그것, 없으면 테스트 DB. `scripts/verify-trip.mjs`에 두 번째 트립 단언 추가: `matching.status == done`, `newKm ≥ 1.0`, `coverage/roads`에 `roadKey == 'nr:31'`이고 `names`에 `세종대로`가 포함된 항목, `coverage/summary.nationalPercent > 0`, `coverage/segments`(bbox = GPX 범위) feature ≥ 5, 첫 트립(`e2e-north`)의 결과는 `done`이되 `newKm`은 0 이상(골목 매칭이라 작을 수 있음). 차량 화면 Maestro: `새 도로 .*km` 보임. **2회 연속 통과**.
+- `valhalla-up.sh`로 실제 Valhalla 기동, 서버 도로 DB는 전국(`server/data/roads-*.sqlite`) 전제다. 없으면 서버는 503이며 픽스처는 `NUBI_ROADS_DB`에 명시했을 때만 쓰고, 그 경우 `verify-trip.mjs`가 경고 후 도로 색칠 검증을 중단한다. `scripts/verify-trip.mjs`에 두 번째 트립 단언 추가: `matching.status == done`, `newKm ≥ 1.0`, `coverage/roads`에 `roadKey == 'nr:31'`이고 `names`에 `세종대로`가 포함된 항목, `coverage/summary.nationalPercent > 0`, `coverage/segments`(bbox = GPX 범위) feature ≥ 5, 첫 트립(`e2e-north`)의 결과는 `done`이되 `newKm`은 0 이상(골목 매칭이라 작을 수 있음). 차량 화면 Maestro: `새 도로 .*km` 보임. **2회 연속 통과(재시도 없는 통과만 인정, 아래 재시도 규칙)**.
 - 실제 Valhalla 응답은 결정적이므로 E2E 기대값은 1회 실측 후 ±10% 허용으로 고정한다.
 - 실측(2026-11-09, 스모크): edge 17개·851m, unmatched 1점, `edge.length` 단위 km, service 등급 way 2개는 도로 DB에 없어 `ignored_ways`. 전국 도로 DB: way 734,533·road 79,478, 총 227,980km, **이름 있는 길이 140,444km(분리 차로 1/2 적용 전) → 적용 후 분모 122,422km**, unnamed 길이 비율 38.4%, 동명이로(`nm:` 키 범위 대각선 > 50km) 3,668개(4.7%). 기획서 6-3·15장에 반영할 것.
 
@@ -155,7 +155,7 @@
 - 샘플·거리 숫자는 release에서도 같은 기어 규칙으로 보인다(debug 전용은 아님). 1초 갱신 루프는 상태 문구용으로 두 빌드 모두 돈다. 가안.
 - debug 주입에 `park=1`(gpx 재생이 끝나면 기어 P)을 더했다. 숫자가 기어 P에서만 보이므로 E2E가 재생 끝을 화면으로 알기 위한 것이다.
 - E2E GPX는 연속 두 점 사이가 21m 아래가 되면(차량 앱 채택 기준 20m) 시드를 하나씩 올려 다시 뽑는다(기본 시드 20261109 → 20261130 채택, 결정적). 경로는 국도 48호선 하행 → 국도 31호선 → 세종대로(`nr:48`·`nr:31`·`nm:세종대로`) 약 1.48km, 60점.
-- E2E는 설치 뒤 `pm clear`, flow 단위 1회 재시도(시도별 출력·logcat 보존), 검증 대상 트립은 GPX의 점 수·첫/끝 좌표로 고른다. 단언에 `(nationalPercentAfter − Before)/100 ≈ newKm / totalKm`(±1e-6)과 차량 화면 `전국 .*% 달렸어요`(P 상태)가 더해졌다. 도로 DB는 `NUBI_ROADS_DB`로 항상 명시해 서버에 넘긴다.
+- E2E는 설치 뒤 `pm clear`, 검증 대상 트립은 GPX의 점 수·첫/끝 좌표로 고르고 후보가 여럿이면 가장 늦게 시작한 것을 쓴다. flow 재시도는 1회차 트립이 서버에 **없을 때만**(Maestro 드라이버 중단 등) 허용하고(시도별 출력·logcat 보존), 트립이 이미 생겼으면 재시도하지 않고 실패로 끝낸다(화면 단언 실패를 가리지 않음). 재시도한 실행은 통과 출력과 `summary.json`에 `retried=<flow>`가 남고, **2회 연속 통과 기준에는 재시도 없는 통과만** 인정한다. 완료율 정합 허용 오차는 `1e-6 + 0.0005/totalKm`. 단언에 `(nationalPercentAfter − Before)/100 ≈ newKm / totalKm`(±1e-6)과 차량 화면 `전국 .*% 달렸어요`(P 상태)가 더해졌다. 도로 DB는 `NUBI_ROADS_DB`로 항상 명시해 서버에 넘긴다.
 - 호스트의 8787 포트를 다른 프로젝트가 쓰고 있으면 `PORT=8788 pnpm e2e:car`로 돌린다.
 
 **실측 갱신**은 `docs/sdk-check.md` 7절(도로 DB 재빌드 뒤 분모, nr:48 수동 확인, E2E 실측)에 있다.
