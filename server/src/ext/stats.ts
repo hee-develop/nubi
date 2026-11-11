@@ -3,6 +3,8 @@ import type { Db } from '../db/index.js';
 import { RG, type Regions } from '../regions/index.js';
 import { DRIVEN_CTE, RD, ROAD_DRIVEN_CTE, VEHICLE_SET_SQL, roundPercent, type Roads } from '../roads/index.js';
 import { COMPLETE_PERCENT } from '../routes/coverage.js';
+import { guestRegionLevels, refreshGuestWays } from './guest-record.js';
+import type { ExtDeps } from './util.js';
 
 export type RegionLevels = Map<string, { level: number; lastAt: string | null }>;
 
@@ -14,55 +16,6 @@ export const ownerRegionLevels = (db: Db, vehicleId: string): RegionLevels => {
     .prepare(`SELECT code, MAX(level) AS level, MAX(last_at) AS last_at FROM visited_regions WHERE vehicle_id IN ${VEHICLE_SET_SQL} GROUP BY code`)
     .all(vehicleId, vehicleId) as { code: string; level: number; last_at: string }[];
   return new Map(rows.map((r) => [r.code, { level: r.level, lastAt: r.last_at }]));
-};
-
-/** 게스트 계정의 세션 목록(삭제하지 않은 것). */
-const sessionsOf = (db: Db, accountId: string) =>
-  db.prepare('SELECT id, vehicle_id, started_at, ended_at FROM guest_sessions WHERE account_id = ? AND deleted_at IS NULL').all(accountId) as {
-    id: string;
-    vehicle_id: string;
-    started_at: string;
-    ended_at: string | null;
-  }[];
-
-/**
- * 게스트의 시군구 단계: 세션 시간 창 안에 **시작된** 그 차량 트립에서 통과(매칭 결과의 `regions.passed`)·방문·숙박(`region_events`)을 모은다.
- * 방문·숙박은 다음 트립이 판정하지만 이벤트가 그 트립(종료 지점이 이 시군구였던 트립) id에 매여 있어 세션이 먼저 끝나도 인정된다.
- */
-export const guestRegionLevels = (db: Db, regions: Regions | null, accountId: string): RegionLevels => {
-  const out: RegionLevels = new Map();
-  const bump = (code: string, level: number, at: string) => {
-    const c = regions ? regions.canonical(code) : code;
-    const cur = out.get(c);
-    if (!cur) out.set(c, { level, lastAt: at });
-    else out.set(c, { level: Math.max(cur.level, level), lastAt: cur.lastAt && cur.lastAt > at ? cur.lastAt : at });
-  };
-  for (const s of sessionsOf(db, accountId)) {
-    const trips = db
-      .prepare(
-        `SELECT t.id, t.started_at, m.result_json FROM trips t LEFT JOIN trip_matching m ON m.trip_id = t.id
-         WHERE (t.vehicle_id = ? OR t.vehicle_id IN (SELECT alias_id FROM vehicle_alias WHERE vehicle_id = ?))
-           AND t.started_at >= ? AND (? IS NULL OR t.started_at <= ?)`,
-      )
-      .all(s.vehicle_id, s.vehicle_id, s.started_at, s.ended_at, s.ended_at) as { id: string; started_at: string; result_json: string | null }[];
-    for (const t of trips) {
-      if (t.result_json) {
-        try {
-          const r = (JSON.parse(t.result_json) as { regions?: { passed?: string[] } | string }).regions;
-          if (r && typeof r === 'object' && Array.isArray(r.passed)) for (const code of r.passed) bump(code, 1, t.started_at);
-        } catch {
-          // 깨진 결과는 건너뛴다
-        }
-      }
-      for (const e of db.prepare("SELECT code, kind, at FROM region_events WHERE trip_id = ? AND kind IN ('visit', 'stay', 'pass')").all(t.id) as {
-        code: string;
-        kind: string;
-        at: string;
-      }[])
-        bump(e.code, e.kind === 'stay' ? 3 : e.kind === 'visit' ? 2 : 1, e.at);
-    }
-  }
-  return out;
 };
 
 export type RegionItem = {
@@ -106,12 +59,6 @@ export const regionSummary = (items: RegionItem[]) => {
   };
 };
 
-/** 게스트 계정의 인정 way를 `d(way_id, cov, first, last)` CTE로(이름이 `d`라 ROAD_DRIVEN_CTE를 그대로 쓴다). 바인딩 값은 [accountId] 한 번. */
-const GUEST_DRIVEN_CTE = `d AS (
-  SELECT way_id, MAX(coverage) AS cov, MIN(first_at) AS first, MAX(last_at) AS last
-  FROM guest_ways WHERE session_id IN (SELECT id FROM guest_sessions WHERE account_id = ? AND deleted_at IS NULL) GROUP BY way_id
-)`;
-
 export type CoverageStats = { nationalPercent: number; drivenKm: number; totalKm: number; roadsStarted: number; roadsCompleted: number };
 
 const coverageFrom = (db: Db, roads: Roads, cte: string, args: string[]): CoverageStats => {
@@ -131,23 +78,56 @@ const coverageFrom = (db: Db, roads: Roads, cte: string, args: string[]): Covera
 };
 
 export const ownerCoverage = (db: Db, roads: Roads, vehicleId: string) => coverageFrom(db, roads, DRIVEN_CTE, [vehicleId, vehicleId]);
-export const guestCoverage = (db: Db, roads: Roads, accountId: string) => coverageFrom(db, roads, GUEST_DRIVEN_CTE, [accountId]);
 
-/** 그려 넣을 인정 도로 선(경도·위도 배열)과 바램 여부. 도로 DB의 도형을 읽을 뿐 밖으로 내보내지 않는다(렌더러가 픽셀로만 바꾼다). */
+/** 계정이 게스트로 앉은 세션의 인정 way(`guest_trip_ways`)를 way별로 합친 부분 쿼리. 바인딩 [accountId]. */
+const GUEST_ROWS = `SELECT way_id, coverage AS cov, last_at AS first, last_at AS last FROM guest_trip_ways
+  WHERE session_id IN (SELECT id FROM guest_sessions WHERE account_id = ? AND deleted_at IS NULL)`;
+const GUEST_CTE = `d AS (SELECT way_id, MAX(cov) AS cov, MIN(first) AS first, MAX(last) AS last FROM (${GUEST_ROWS}) GROUP BY way_id)`;
+/** 차주: 내 차량 인정 way + 내가 게스트로 탄 기록(M2). 바인딩 [vehicleId, vehicleId, accountId]. */
+const OWNER_PLUS_GUEST_CTE = `d AS (SELECT way_id, MAX(cov) AS cov, MIN(first) AS first, MAX(last) AS last FROM (
+  SELECT way_id, coverage AS cov, first_driven_at AS first, last_driven_at AS last FROM driven_ways WHERE vehicle_id IN ${VEHICLE_SET_SQL}
+  UNION ALL ${GUEST_ROWS}) GROUP BY way_id)`;
+
+export type AccountView = { accountId: string; owner: boolean; vehicleId: string | null };
+
+/** 계정의 도로 집계. 차주는 내 차량 + 게스트로 탄 기록, 게스트는 탄 기록만. 읽기 전에 게스트 기록을 최신으로 맞춘다. */
+export const accountCoverage = (deps: ExtDeps, roads: Roads, v: AccountView): CoverageStats => {
+  refreshGuestWays(deps, v.accountId);
+  return v.owner ? coverageFrom(deps.db, roads, OWNER_PLUS_GUEST_CTE, [v.vehicleId!, v.vehicleId!, v.accountId]) : coverageFrom(deps.db, roads, GUEST_CTE, [v.accountId]);
+};
+
+/** 그려 넣을 인정 도로 선(경도·위도 배열)과 마지막 인정 시각. 도로 DB의 도형을 읽을 뿐 밖으로 내보내지 않는다(렌더러가 픽셀로만 바꾼다). */
 export type DrawnWay = { coords: number[][]; last: string };
 
 const MAX_DRAWN_WAYS = 60_000;
 
-export const ownerWays = (db: Db, vehicleId: string): DrawnWay[] =>
+const drawn = (db: Db, cte: string, args: string[]): DrawnWay[] =>
   (
-    db
-      .prepare(`WITH ${DRIVEN_CTE} SELECT w.geom_json, d.last FROM d JOIN ${RD}.ways w ON w.way_id = d.way_id ORDER BY w.way_id LIMIT ?`)
-      .all(vehicleId, vehicleId, MAX_DRAWN_WAYS) as { geom_json: string; last: string }[]
+    db.prepare(`WITH ${cte} SELECT w.geom_json, d.last FROM d JOIN ${RD}.ways w ON w.way_id = d.way_id ORDER BY w.way_id LIMIT ?`).all(...args, MAX_DRAWN_WAYS) as {
+      geom_json: string;
+      last: string;
+    }[]
   ).map((r) => ({ coords: JSON.parse(r.geom_json) as number[][], last: r.last }));
 
-export const guestWays = (db: Db, accountId: string): DrawnWay[] =>
-  (
-    db
-      .prepare(`WITH ${GUEST_DRIVEN_CTE} SELECT w.geom_json, d.last FROM d JOIN ${RD}.ways w ON w.way_id = d.way_id ORDER BY w.way_id LIMIT ?`)
-      .all(accountId, MAX_DRAWN_WAYS) as { geom_json: string; last: string }[]
-  ).map((r) => ({ coords: JSON.parse(r.geom_json) as number[][], last: r.last }));
+export const ownerWays = (db: Db, vehicleId: string): DrawnWay[] => drawn(db, DRIVEN_CTE, [vehicleId, vehicleId]);
+
+export const accountWays = (deps: ExtDeps, v: AccountView): DrawnWay[] => {
+  refreshGuestWays(deps, v.accountId);
+  return v.owner ? drawn(deps.db, OWNER_PLUS_GUEST_CTE, [v.vehicleId!, v.vehicleId!, v.accountId]) : drawn(deps.db, GUEST_CTE, [v.accountId]);
+};
+
+/** 두 시군구 단계 지도를 합친다(단계 최댓값, 마지막 시각 최신). */
+export const mergeLevels = (a: RegionLevels, b: RegionLevels): RegionLevels => {
+  const out: RegionLevels = new Map(a);
+  for (const [code, v] of b) {
+    const cur = out.get(code);
+    out.set(code, cur ? { level: Math.max(cur.level, v.level), lastAt: cur.lastAt && v.lastAt ? (cur.lastAt > v.lastAt ? cur.lastAt : v.lastAt) : (cur.lastAt ?? v.lastAt) } : v);
+  }
+  return out;
+};
+
+/** 계정의 시군구 단계. 차주는 내 차량 + 게스트로 탄 기록(M2), 게스트는 탄 기록만. */
+export const accountRegionLevels = (deps: ExtDeps, v: AccountView): RegionLevels => {
+  const guest = guestRegionLevels(deps, v.accountId);
+  return v.owner ? mergeLevels(ownerRegionLevels(deps.db, v.vehicleId!), guest) : guest;
+};

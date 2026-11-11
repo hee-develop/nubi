@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { isFaded } from '../src/shared/fade.js';
 // @ts-expect-error 타입 선언이 없는 .mjs
 import { recompute } from '../../scripts/recompute-coverage.mjs';
+import { extApp } from './ext-helpers.js';
 import { driveTrip, fakeValhalla, getJson, json, makePoints, makeRoadsDb, matchedResponse, newApp, type SynthWay } from './helpers.js';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'nubi-test-'));
@@ -83,17 +84,17 @@ describe('바램', () => {
     await app.request('/debug/age', json({ vehicleId: 'v1', days: 400 }));
     await drive(app, 10); // 다시 달림
     const s = (await getJson(app, '/coverage/summary?vehicleId=v1')).body;
-    expect(s.revivedKm).toBe(7); // 1000 + 1000 + 5000m
+    expect(s.revivedKm).toBe(2.9); // 다시 달린 커버리지만: 1000 + 1000 + 5000m x 0.18(900m 매칭)
     expect(s.nationalPercent).toBe(pct);
     const seg = (await getJson(app, '/coverage/segments?vehicleId=v1&bbox=126.9,36.9,127.2,37.2')).body.features as any[];
     expect(seg.every((f) => f.properties.faded === false)).toBe(true); // 바램이 풀렸다
     // 같은 길을 또 달려도(바랜 적 없음) 늘지 않는다
     await drive(app, 11);
-    expect((await getJson(app, '/coverage/summary?vehicleId=v1')).body.revivedKm).toBe(7);
+    expect((await getJson(app, '/coverage/summary?vehicleId=v1')).body.revivedKm).toBe(2.9);
     // 364일만 당기면 바랜 것이 아니므로 되살림도 없다
     await app.request('/debug/age', json({ vehicleId: 'v1', days: 300 }));
     await drive(app, 12);
-    expect((await getJson(app, '/coverage/summary?vehicleId=v1')).body.revivedKm).toBe(7);
+    expect((await getJson(app, '/coverage/summary?vehicleId=v1')).body.revivedKm).toBe(2.9);
     // 다른 차량은 0
     expect((await getJson(app, '/coverage/summary?vehicleId=v2')).body.revivedKm).toBe(0);
   });
@@ -167,5 +168,42 @@ describe('월간 재계산 스크립트', () => {
     expect(user.prepare("SELECT way_id FROM driven_ways WHERE snapshot_month = '210001' ORDER BY way_id").all()).toEqual([{ way_id: 1 }, { way_id: 2 }, { way_id: 2 }]);
     expect(user.prepare('SELECT COUNT(*) AS n FROM driven_ways WHERE way_id = 3').get()).toEqual({ n: 1 });
     user.close();
+  });
+});
+
+describe('되살린 거리 트리거(DB)', () => {
+  const ins = (db: any, v: string, way: number, cov: number, last: string) =>
+    db
+      .prepare("INSERT INTO driven_ways VALUES (?, ?, ?, ?, ?, 't', '209901') ON CONFLICT (vehicle_id, way_id) DO UPDATE SET coverage = MAX(coverage, excluded.coverage), last_driven_at = MAX(last_driven_at, excluded.last_driven_at)")
+      .run(v, way, cov, last, last);
+  const rows = (db: any) => db.prepare('SELECT vehicle_id, way_id, cov FROM way_revived ORDER BY id').all();
+
+  it('같은 차량의 alias 행이 오래됐고 정본 ID로 새 행이 INSERT되면 되살림, 최근 alias 행이 있으면 아니다. 같은 갱신을 되풀이해도 중복 없음', () => {
+    const e = extApp();
+    e.db.prepare("INSERT INTO vehicle_alias VALUES ('uuid-old', 'v-main')").run();
+    ins(e.db, 'uuid-old', 1, 1, '2024-01-01T00:00:00.000Z'); // 옛 기록(alias로 올림)
+    ins(e.db, 'v-main', 1, 0.8, '2026-11-01T00:00:00.000Z'); // 정본 ID의 새 행(INSERT 경로) → 되살림
+    expect(rows(e.db)).toEqual([{ vehicle_id: 'v-main', way_id: 1, cov: 0.8 }]);
+    ins(e.db, 'v-main', 1, 0.8, '2026-11-01T00:00:00.000Z'); // 같은 값 되풀이: last 증가 없음 → 중복 없음
+    ins(e.db, 'v-main', 1, 0.9, '2026-11-02T00:00:00.000Z'); // 하루 뒤: 이전 마지막이 최근이라 되살림 아님
+    expect(rows(e.db)).toHaveLength(1);
+    // 최근 alias 행이 있으면 정본 행이 오래돼도 되살림이 아니다
+    ins(e.db, 'uuid-old', 2, 1, '2026-10-20T00:00:00.000Z');
+    ins(e.db, 'v-main', 2, 1, '2026-11-02T00:00:00.000Z');
+    expect(rows(e.db)).toHaveLength(1);
+    // 다른 차량의 오래된 행은 상관없다
+    ins(e.db, 'other', 3, 1, '2023-01-01T00:00:00.000Z');
+    ins(e.db, 'v-main', 3, 1, '2026-11-02T00:00:00.000Z');
+    expect(rows(e.db)).toHaveLength(1);
+  });
+
+  it('UPDATE 경로: 정본 행이 최근이어도 alias 행이 더 최근이면 되살림 아님, 365일 넘게 비었다 돌아오면 한 번만', () => {
+    const e = extApp();
+    e.db.prepare("INSERT INTO vehicle_alias VALUES ('uuid-old', 'v-main')").run();
+    ins(e.db, 'v-main', 1, 1, '2024-01-01T00:00:00.000Z');
+    ins(e.db, 'uuid-old', 1, 1, '2026-10-30T00:00:00.000Z'); // alias가 최근에 달림(INSERT, 같은 차량의 기존 행이 오래됨 → 되살림 1건)
+    const before = rows(e.db).length;
+    ins(e.db, 'v-main', 1, 1, '2026-11-01T00:00:00.000Z'); // 정본 행 갱신: 직전 최댓값(alias 10-30)이 최근이라 되살림 아님
+    expect(rows(e.db)).toHaveLength(before);
   });
 });

@@ -2,18 +2,32 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { fakeValhalla, makePoints, makeRoadsDb, matchedResponse, type SynthWay } from './helpers.js';
-import { bearer, call, extApp, HOUR, MIN, post, T0, type ExtApp } from './ext-helpers.js';
+import { fakeValhalla, makeRoadsDb, matchedResponse } from './helpers.js';
+import { bearer, call, driveEast, eastPoints, eastRoads, extApp, HOUR, MIN, post, T0, type ExtApp } from './ext-helpers.js';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'nubi-test-'));
 const V = 'veh-owner';
 
+/** 동쪽으로 이어진 합성 도로 3개(각 1km)와 그 세 도로를 모두 인정으로 돌려주는 가짜 Valhalla. */
+const setupRecognition = async (gate?: { p: Promise<void> | null }) => {
+  const roadsPath = await makeRoadsDb(join(tmp(), 'r.sqlite'), eastRoads(3));
+  return extApp({
+    roadsPath,
+    valhalla: {
+      fetchFn: fakeValhalla(async () => {
+        if (gate?.p) await gate.p; // 매칭을 일부러 붙잡아 둔다(확정 전 상태를 보려고)
+        return matchedResponse([{ way_id: 1, length: 1 }, { way_id: 2, length: 1 }, { way_id: 3, length: 1 }], 40);
+      }),
+    },
+  });
+};
+
 const guestCode = async (e: ExtApp, vehicleId = V) => call(e, '/guest/code', post('', { vehicleId, gear: 'P' }));
 const claim = async (e: ExtApp, code: string, extra: Record<string, unknown> = {}, headers: Record<string, string> = {}) =>
   call(e, '/guest/claim', post('', { code, consent: true, ...extra }, headers));
-const sit = async (e: ExtApp, vehicleId = V, headers: Record<string, string> = {}) => {
+const sit = async (e: ExtApp, vehicleId = V, headers: Record<string, string> = {}, extra: Record<string, unknown> = {}) => {
   const c = await guestCode(e, vehicleId);
-  return claim(e, c.body.code, {}, headers);
+  return claim(e, c.body.code, extra, headers);
 };
 const active = async (e: ExtApp, vehicleId = V) => (await call(e, `/guest/sessions?vehicleId=${vehicleId}`)).body.active as number;
 
@@ -71,7 +85,7 @@ describe('게스트 코드·세션', () => {
     const pair = (await call(e, '/pair/code', post('', { vehicleId: V, gear: 'P' }))).body;
     expect((await claim(e, pair.code)).status).toBe(404);
     const g = (await guestCode(e)).body;
-    expect((await call(e, '/pair/claim', post('', { code: g.code }))).status).toBe(404);
+    expect((await call(e, '/pair/claim', post('', { consent: true, code: g.code }))).status).toBe(404);
   });
 
   it('차량당 동시 4명 상한: 5번째는 409(코드 발급도 409)', async () => {
@@ -161,7 +175,7 @@ describe('게스트 코드·세션', () => {
   it('게스트가 자기 차(차주 계정)에서 트립을 시작하면 그 게스트 세션이 끝난다. 다른 차량 트립은 영향 없음', async () => {
     const e = extApp();
     // 차주 계정(자기 차 'car-mine')이 V의 게스트로 앉는다
-    const mine = (await call(e, '/pair/claim', post('', { code: (await call(e, '/pair/code', post('', { vehicleId: 'car-mine', gear: 'P' }))).body.code }))).body;
+    const mine = (await call(e, '/pair/claim', post('', { consent: true, code: (await call(e, '/pair/code', post('', { vehicleId: 'car-mine', gear: 'P' }))).body.code }))).body;
     const s = await sit(e, V, bearer(mine.token));
     expect(s.status).toBe(200);
     expect(s.body.token).toBe(mine.token);
@@ -201,45 +215,42 @@ describe('게스트 코드·세션', () => {
     expect((await claim(e, c.body.code)).status).toBe(429);
   });
 
-  it('세션 데이터 삭제: 본인만(403), 도로·시군구 기록이 사라지고 다시 지울 수 없다(404)', async () => {
-    const e = extApp();
-    const a = (await sit(e)).body;
+  it('세션 데이터 삭제: 본인만(403), 도로·시군구 기록과 닉네임이 사라지고 다시 지울 수 없다(404)', async () => {
+    const e = await setupRecognition();
+    const a = (await sit(e, V, {}, { nickname: '지수' })).body;
     const b = (await sit(e)).body;
-    e.db.prepare("INSERT INTO driven_ways VALUES (?, 1, 1, ?, ?, 't', '209901')").run(V, new Date(T0 + MIN).toISOString(), new Date(T0 + 2 * MIN).toISOString());
-    expect((e.db.prepare('SELECT COUNT(*) AS n FROM guest_ways').get() as any).n).toBe(2);
+    await driveEast(e, V, T0 + 1000, 80);
+    expect((await call(e, '/me/summary', { headers: bearer(a.token) })).body.coverage.drivenKm).toBe(2);
+    expect((await call(e, '/me/summary', { headers: bearer(b.token) })).body.coverage.drivenKm).toBe(2);
+    expect((e.db.prepare('SELECT COUNT(*) AS n FROM guest_trip_ways').get() as any).n).toBe(4);
     expect((await call(e, `/guest/${a.sessionId}/data`, { method: 'DELETE' })).status).toBe(401);
     expect((await call(e, `/guest/${a.sessionId}/data`, { method: 'DELETE', headers: bearer(b.token) })).status).toBe(403);
     expect((await call(e, `/guest/${a.sessionId}/data`, { method: 'DELETE', headers: bearer(a.token) })).status).toBe(200);
-    expect(e.db.prepare('SELECT session_id FROM guest_ways').all()).toEqual([{ session_id: b.sessionId }]);
+    expect(e.db.prepare('SELECT DISTINCT session_id FROM guest_trip_ways').all()).toEqual([{ session_id: b.sessionId }]);
+    expect(e.db.prepare('SELECT nickname, deleted_at FROM guest_sessions WHERE id = ?').get(a.sessionId)).toMatchObject({ nickname: null });
     expect(await active(e)).toBe(1);
     expect((await call(e, `/guest/${a.sessionId}/data`, { method: 'DELETE', headers: bearer(a.token) })).status).toBe(404);
   });
+
+  it('게스트 탈퇴(DELETE /me): 세션·닉네임·계정·토큰을 지우고 차주는 쓸 수 없다(403)', async () => {
+    const e = extApp();
+    const g = (await sit(e, V, {}, { nickname: '민수' })).body;
+    const owner = (await call(e, '/pair/claim', post('', { consent: true, code: (await call(e, '/pair/code', post('', { vehicleId: 'car-x', gear: 'P' }))).body.code }))).body;
+    expect((await call(e, '/me', { method: 'DELETE', headers: bearer(owner.token) })).status).toBe(403);
+    expect((await call(e, '/me', { method: 'DELETE' })).status).toBe(401);
+    expect((await call(e, '/me', { method: 'DELETE', headers: bearer(g.token) })).body).toEqual({ ok: true });
+    expect(e.db.prepare('SELECT COUNT(*) AS n FROM guest_sessions').get()).toEqual({ n: 0 });
+    expect(e.db.prepare("SELECT COUNT(*) AS n FROM accounts WHERE kind = 'guest'").get()).toEqual({ n: 0 });
+    expect((await call(e, '/me/summary', { headers: bearer(g.token) })).status).toBe(401);
+    expect(await active(e)).toBe(0);
+  });
 });
 
-describe('게스트 기록 인정(/me)', () => {
-  const W = (id: number, lengthM: number, roadKey: string, at: [number, number]): SynthWay => ({ id, roadKey, lengthM, highway: 'residential', at });
-  const setup = async () => {
-    const roadsPath = await makeRoadsDb(join(tmp(), 'r.sqlite'), [W(1, 1000, 'nm:a', [126.978, 37.5665]), W(2, 1000, 'nm:b', [127.0, 37.57])]);
-    const e = extApp({
-      roadsPath,
-      valhalla: { fetchFn: fakeValhalla(() => matchedResponse([{ way_id: 1, length: 1 }, { way_id: 2, length: 1 }], 40)) },
-    });
-    return e;
-  };
-  /** 시각을 [offsetMs]만큼 민 점으로 트립 하나를 매칭까지 돌린다. */
-  const drive = async (e: ExtApp, vehicleId: string, offsetMs: number) => {
-    const pts = makePoints(40, 25, 37.5665, 126.978, 12).map((p) => ({ ...p, ts: new Date(Date.parse(p.ts) + offsetMs).toISOString() }));
-    const start = await call(e, '/trips', post('', { localId: crypto.randomUUID(), vehicleId, driverId: vehicleId, startedAt: pts[0]!.ts }));
-    const tripId = start.body.tripId as string;
-    await call(e, `/trips/${tripId}/points`, post('', { points: pts }));
-    await call(e, `/trips/${tripId}/end`, post('', { endedAt: pts.at(-1)!.ts }));
-    await e.app.matching.idle();
-  };
-
+describe('게스트 기록 인정(/me): 트립의 점 시각이 세션 창과 겹치는 부분', () => {
   it('세션 중 트립은 게스트의 도로·시군구로 인정되고 차주 기록과 별개이며, 내린 뒤 트립은 인정되지 않는다', async () => {
-    const e = await setup();
+    const e = await setupRecognition();
     const a = (await sit(e)).body;
-    await drive(e, V, 0);
+    await driveEast(e, V, T0 + 1000, 80);
     const sum = await call(e, '/me/summary', { headers: bearer(a.token) });
     expect(sum.status).toBe(200);
     expect(sum.body.role).toBe('guest');
@@ -248,61 +259,138 @@ describe('게스트 기록 인정(/me)', () => {
     expect(sum.body.regions.colored).toBeGreaterThan(0);
     expect(sum.body).not.toHaveProperty('vehicleId');
     const regs = (await call(e, '/me/regions', { headers: bearer(a.token) })).body.items as any[];
-    expect(regs.filter((r) => r.level >= 1).map((r) => r.displayName).sort()).toEqual(['서울 종로구', '서울 중구']);
+    expect(regs.filter((r) => r.level >= 1).map((r) => r.displayName)).toContain('서울 중구');
     // 내린다
     e.clock.t = T0 + 2 * HOUR;
     await call(e, `/guest/${a.sessionId}/end`, { method: 'POST', headers: bearer(a.token) });
-    await drive(e, V, 3 * HOUR); // 내린 뒤의 트립(시각이 세션 종료 뒤)
+    await driveEast(e, V, T0 + 3 * HOUR, 120); // 내린 뒤의 트립(시각이 세션 종료 뒤)
     const after = (await call(e, '/me/summary', { headers: bearer(a.token) })).body;
     expect(after.coverage.drivenKm).toBe(2);
     expect(after.activeSessionId).toBeNull();
-    // 차주 기록은 별개: 차량 쪽 집계는 그대로 있다
-    expect((await call(e, `/coverage/summary?vehicleId=${V}`)).body.drivenKm).toBe(2);
-    // 게스트가 아닌 사람의 /me는 인증이 필요하다
+    // 차주(차량) 기록은 별개: 3km까지 달렸다
+    expect((await call(e, `/coverage/summary?vehicleId=${V}`)).body.drivenKm).toBe(3);
     expect((await call(e, '/me/summary')).status).toBe(401);
     expect((await call(e, '/me/regions', { headers: bearer('k'.repeat(43)) })).status).toBe(401);
   });
 
-  it('세션 전 트립은 소급하지 않고, 두 게스트는 서로의 기록을 볼 수 없다', async () => {
-    const e = await setup();
-    await drive(e, V, -2 * HOUR); // 세션 전
+  it('정차 중 탑승·하차(트립 도중): 겹친 점 구간의 도로만 인정하고 앞뒤 도로는 인정하지 않는다', async () => {
+    const e = await setupRecognition();
+    // 3km 트립(점 120개, 2초 간격). 점 40(1km 지점)에서 탑승, 점 78(약 1.95km 지점)에서 하차 → 두 번째 도로(1~2km)만
+    e.clock.t = T0 + 80_000;
     const a = (await sit(e)).body;
+    e.clock.t = T0 + 156_000;
+    await call(e, `/guest/${a.sessionId}/end`, { method: 'POST', headers: bearer(a.token) });
+    await driveEast(e, V, T0, 120);
+    const sum = (await call(e, '/me/summary', { headers: bearer(a.token) })).body;
+    expect(sum.coverage.drivenKm).toBeGreaterThan(0.9);
+    expect(sum.coverage.drivenKm).toBeLessThanOrEqual(1);
+    expect(sum.coverage.roadsStarted).toBe(1);
+    expect(e.db.prepare('SELECT way_id FROM guest_trip_ways').all()).toEqual([{ way_id: 2 }]);
+    // 같은 트립을 차량 쪽에서는 전부(3km) 인정한다
+    expect((await call(e, `/coverage/summary?vehicleId=${V}`)).body.drivenKm).toBe(3);
+  });
+
+  it('커버리지는 겹친 점이 덮은 비율만 쓴다(차량의 MAX 커버리지를 복사하지 않는다)', async () => {
+    const e = await setupRecognition();
+    await driveEast(e, V, T0 - 5 * HOUR, 120); // 세션 전: 차량은 3km 전부 인정(커버리지 1)
+    const a = (await sit(e)).body;
+    // 두 번째 트립: 세션이 점 60(1.5km 지점)부터 걸친다 → 두 번째 도로는 절반만, 세 번째는 전부
+    const pts = eastPoints(120, T0 + 1000);
+    e.clock.t = Date.parse(pts[60]!.ts);
+    const b = (await sit(e)).body; // 다른 게스트: 점 60부터 탑승(이 사람만 부분 겹침)
+    await driveEast(e, V, T0 + 1000, 120, pts);
+    expect((await call(e, `/coverage/summary?vehicleId=${V}`)).body.drivenKm).toBe(3);
+    const sa = (await call(e, '/me/summary', { headers: bearer(a.token) })).body.coverage.drivenKm;
+    const sb = (await call(e, '/me/summary', { headers: bearer(b.token) })).body.coverage.drivenKm;
+    expect(sa).toBe(3); // 처음부터 앉은 게스트: 전부
+    expect(sb).toBeGreaterThan(1.4); // 점 60부터: 두 번째 도로 절반(약 0.53) + 세 번째 도로 전부(약 1)
+    expect(sb).toBeLessThan(1.6);
+    const cov = e.db.prepare('SELECT way_id, coverage FROM guest_trip_ways WHERE session_id = ? ORDER BY way_id').all(b.sessionId) as { way_id: number; coverage: number }[];
+    expect(cov.map((r) => r.way_id)).toEqual([2, 3]);
+    expect(cov[0]!.coverage).toBeGreaterThan(0.45);
+    expect(cov[0]!.coverage).toBeLessThan(0.65);
+  });
+
+  it('매칭이 끝나지 않은 트립은 도로로 인정하지 않고, 끝나면 반영한다. 세션 전 트립은 소급하지 않는다', async () => {
+    const gate: { p: Promise<void> | null } = { p: null };
+    const e = await setupRecognition(gate);
+    await driveEast(e, V, T0 - 2 * HOUR, 80); // 세션 전
+    const a = (await sit(e)).body;
+    let release!: () => void;
+    gate.p = new Promise<void>((r) => (release = r));
     expect((await call(e, '/me/summary', { headers: bearer(a.token) })).body.coverage.drivenKm).toBe(0);
+    const pts = eastPoints(80, T0 + 1000);
+    const start = await call(e, '/trips', post('', { localId: 'l-pending', vehicleId: V, driverId: V, startedAt: pts[0]!.ts }));
+    await call(e, `/trips/${start.body.tripId}/points`, post('', { points: pts }));
+    await call(e, `/trips/${start.body.tripId}/end`, post('', { endedAt: pts.at(-1)!.ts }));
+    // 아직 매칭 중이라 확정 전
+    expect((await call(e, '/me/summary', { headers: bearer(a.token) })).body.coverage.drivenKm).toBe(0);
+    release();
+    await e.app.matching.idle();
+    expect((await call(e, '/me/summary', { headers: bearer(a.token) })).body.coverage.drivenKm).toBe(2);
+  });
+
+  it('두 게스트는 서로의 기록을 볼 수 없고, 한 명이 지워도 다른 사람 것은 남는다', async () => {
+    const e = await setupRecognition();
+    const a = (await sit(e)).body;
     const b = (await sit(e)).body;
-    await drive(e, V, 0);
-    const sa = (await call(e, '/me/summary', { headers: bearer(a.token) })).body;
-    const sb = (await call(e, '/me/summary', { headers: bearer(b.token) })).body;
-    expect(sa.coverage.drivenKm).toBe(2);
-    expect(sb.coverage.drivenKm).toBe(2);
-    // 한 명이 지우면 다른 사람 것은 남는다
+    await driveEast(e, V, T0 + 1000, 80);
+    expect((await call(e, '/me/summary', { headers: bearer(a.token) })).body.coverage.drivenKm).toBe(2);
+    expect((await call(e, '/me/summary', { headers: bearer(b.token) })).body.coverage.drivenKm).toBe(2);
     await call(e, `/guest/${a.sessionId}/data`, { method: 'DELETE', headers: bearer(a.token) });
     expect((await call(e, '/me/summary', { headers: bearer(a.token) })).body.coverage.drivenKm).toBe(0);
     expect((await call(e, '/me/summary', { headers: bearer(b.token) })).body.coverage.drivenKm).toBe(2);
   });
 
-  it('차주 계정의 /me/summary는 차량 기록(vehicleId 포함)을 준다', async () => {
-    const e = await setup();
-    const owner = (await call(e, '/pair/claim', post('', { code: (await call(e, '/pair/code', post('', { vehicleId: V, gear: 'P' }))).body.code }))).body;
-    await drive(e, V, 0);
-    const s = (await call(e, '/me/summary', { headers: bearer(owner.token) })).body;
-    expect(s).toMatchObject({ role: 'owner', vehicleId: V });
-    expect(s.coverage.drivenKm).toBe(2);
-    expect(s.regions.colored).toBeGreaterThan(0);
+  it('방문·숙박은 내리기 전에 도착했을 때만 인정한다(마지막 점이 창 밖이면 통과만)', async () => {
+    const e = await setupRecognition();
+    const a = (await sit(e)).body;
+    const pts = eastPoints(80, T0 + 1000);
+    // 트립 종료 지점이 중구라고 보고 방문 이벤트를 직접 만든다(판정은 다음 트립이 하지만 이벤트는 그 트립 id에 묶인다)
+    const tripId = await driveEast(e, V, T0 + 1000, 80, pts);
+    e.db.prepare("INSERT INTO region_events (vehicle_id, code, kind, at, trip_id) VALUES (?, '11140', 'visit', ?, ?)").run(V, new Date(T0 + HOUR).toISOString(), tripId);
+    const level = async () => ((await call(e, '/me/regions', { headers: bearer(a.token) })).body.items as any[]).find((r) => r.code === '11140').level as number;
+    expect(await level()).toBe(2); // 끝까지 탑승 → 방문
+    // 마지막 점 전에 내린 다른 게스트: 방문은 인정하지 않고 통과만
+    const e2 = await setupRecognition();
+    const a2 = (await sit(e2)).body;
+    const t2 = await driveEast(e2, V, T0 + 1000, 80, pts);
+    e2.db.prepare("INSERT INTO region_events (vehicle_id, code, kind, at, trip_id) VALUES (?, '11140', 'visit', ?, ?)").run(V, new Date(T0 + HOUR).toISOString(), t2);
+    e2.clock.t = Date.parse(pts[50]!.ts);
+    await call(e2, `/guest/${a2.sessionId}/end`, { method: 'POST', headers: bearer(a2.token) });
+    const lv2 = ((await call(e2, '/me/regions', { headers: bearer(a2.token) })).body.items as any[]).find((r) => r.code === '11140').level as number;
+    expect(lv2).toBe(1);
   });
 
-  it('게스트 도로 기록은 세션 시간 창만: 세션 중 다시 달리기·바랜 길 되살림도 트리거로 반영', async () => {
-    const e = await setup();
-    const a = (await sit(e)).body;
-    // 직접 driven_ways를 넣어 트리거를 확인(INSERT → guest_ways, UPDATE로 늘어난 커버리지 → 반영, 창 밖 시각 → 무시)
-    const ins = (way: number, cov: number, last: number) =>
-      e.db
-        .prepare("INSERT INTO driven_ways VALUES (?, ?, ?, ?, ?, 't', '209901') ON CONFLICT (vehicle_id, way_id) DO UPDATE SET coverage = MAX(coverage, excluded.coverage), last_driven_at = MAX(last_driven_at, excluded.last_driven_at)")
-        .run(V, way, cov, new Date(last).toISOString(), new Date(last).toISOString());
-    ins(1, 0.5, T0 + MIN);
-    ins(2, 0.9, T0 - HOUR); // 세션 전
-    ins(1, 0.8, T0 + 2 * MIN);
-    const rows = e.db.prepare('SELECT way_id, coverage FROM guest_ways ORDER BY way_id').all();
-    expect(rows).toEqual([{ way_id: 1, coverage: 0.8 }]);
-    expect(a.sessionId).toBeTruthy();
+  it('차주 계정이 다른 차에 게스트로 탄 기록도 내 기록(/me/summary·/me/regions)에 합쳐진다', async () => {
+    const e = await setupRecognition();
+    const owner = (await call(e, '/pair/claim', post('', { consent: true, code: (await call(e, '/pair/code', post('', { vehicleId: 'my-own-car', gear: 'P' }))).body.code }))).body;
+    // 내 차는 아무것도 안 달렸다
+    expect((await call(e, '/me/summary', { headers: bearer(owner.token) })).body.coverage.drivenKm).toBe(0);
+    const s = await sit(e, V, bearer(owner.token));
+    expect(s.status).toBe(200);
+    await driveEast(e, V, T0 + 1000, 80);
+    const sum = (await call(e, '/me/summary', { headers: bearer(owner.token) })).body;
+    expect(sum).toMatchObject({ role: 'owner', vehicleId: 'my-own-car', activeSessionId: s.body.sessionId });
+    expect(sum.coverage.drivenKm).toBe(2);
+    expect(sum.regions.colored).toBeGreaterThan(0);
+    const regs = ((await call(e, '/me/regions', { headers: bearer(owner.token) })).body.items as any[]).filter((r) => r.level > 0);
+    expect(regs.map((r) => r.displayName)).toContain('서울 중구');
+    // 웹 페이지 링크(24시간 읽기 전용)에서도 합쳐져 보인다
+    const link = (await call(e, '/me/link', { method: 'POST', headers: bearer(owner.token) })).body.url as string;
+    const sent = await e.app.request(link.replace('http://localhost', ''));
+    expect(sent.status).toBe(303);
+    const page = await e.app.request('/me', { headers: { cookie: sent.headers.get('set-cookie')!.split(';')[0]! } });
+    expect(await page.text()).toMatch(/<b>2<\/b><span>달린 도로 km/);
+  });
+
+  it('차주 계정의 /me/summary는 차량 기록(vehicleId 포함)을 준다', async () => {
+    const e = await setupRecognition();
+    const owner = (await call(e, '/pair/claim', post('', { consent: true, code: (await call(e, '/pair/code', post('', { vehicleId: V, gear: 'P' }))).body.code }))).body;
+    await driveEast(e, V, T0 + 1000, 80);
+    const s = (await call(e, '/me/summary', { headers: bearer(owner.token) })).body;
+    expect(s).toMatchObject({ role: 'owner', vehicleId: V });
+    expect(s.coverage.drivenKm).toBe(3); // 합성 매칭이 세 도로를 모두 인정(차량 기준)
+    expect(s.regions.colored).toBeGreaterThan(0);
   });
 });

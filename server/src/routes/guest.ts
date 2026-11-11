@@ -2,9 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
-import { authenticate, bearerOf, checkCode, clientKey, CODE_RE, codeGuardOf, issueCode, issueToken, publicBase, RateLimiter, type CodeGuard, type TokenInfo } from '../ext/auth.js';
+import { authenticate, bearerOf, checkCode, clientKey, CODE_RE, codeGuardOf, issueCode, issueToken, publicBase, RateLimiter, revokeTokens, type CodeGuard, type TokenInfo } from '../ext/auth.js';
 import { activeCount, endSession, expireIdle, MAX_GUESTS, onTripStarted } from '../ext/sessions.js';
-import { guestCoverage, guestRegionLevels, ownerCoverage, ownerRegionLevels, regionItems, regionSummary, type RegionLevels } from '../ext/stats.js';
+import { accountCoverage, accountRegionLevels, regionItems, regionSummary, type AccountView } from '../ext/stats.js';
 import { iso, parseBody, readJson, type ExtDeps } from '../ext/util.js';
 import { canonicalVehicleId } from '../matching/pipeline.js';
 import { ATTRIBUTION } from '../roads/index.js';
@@ -17,12 +17,13 @@ const claimBody = z.object({ code: z.string().regex(CODE_RE), consent: z.boolean
 const vehicleBody = z.object({ vehicleId: id });
 
 export type JoinResult =
-  | { ok: true; sessionId: string; token: string }
+  | { ok: true; sessionId: string; accountId: string; token: string | null; reused: boolean }
   | { ok: false; status: 400 | 403 | 404 | 409 | 410 | 429; error: string };
 
 /**
  * 게스트 세션 열기(JSON API와 웹 페이지 `/g/:code`가 함께 쓴다). 동의 전에는 세션이 열리지 않는다.
- * [existing]이 있으면(차주·기존 게스트의 Bearer) 그 계정으로 앉는다. 없으면 익명 게스트 계정을 새로 만든다.
+ * [existing]이 있으면(차주·기존 게스트의 Bearer나 웹 쿠키) 그 계정으로 앉는다. 없으면 익명 게스트 계정을 새로 만든다.
+ * [opts.apiToken]이 false면(웹 페이지) API 토큰을 만들지 않는다(쿠키 토큰은 페이지가 따로 낸다).
  */
 export const joinGuest = (
   deps: ExtDeps,
@@ -30,6 +31,7 @@ export const joinGuest = (
   key: string,
   input: { code: string; consent: boolean; nickname?: string },
   existing: { info: TokenInfo; token: string } | null,
+  opts: { apiToken?: boolean } = {},
 ): JoinResult => {
   const { db, now } = deps;
   if (guard.blocked(key)) return { ok: false, status: 429, error: 'too_many_requests' };
@@ -55,11 +57,11 @@ export const joinGuest = (
   db.exec('BEGIN');
   try {
     let account = accountId;
-    let token = existing?.token ?? '';
+    let token: string | null = existing?.token ?? null;
     if (!account) {
       account = randomUUID();
       db.prepare("INSERT INTO accounts (id, kind, nickname, created_at, consent_at) VALUES (?, 'guest', ?, ?, ?)").run(account, input.nickname ?? null, iso(now()), iso(now()));
-      token = issueToken(db, 'account', account, now());
+      token = opts.apiToken === false ? null : issueToken(db, 'account', account, now());
     }
     db.prepare('INSERT INTO guest_sessions (id, vehicle_id, account_id, nickname, consent_at, started_at) VALUES (?, ?, ?, ?, ?, ?)').run(
       sessionId,
@@ -71,7 +73,36 @@ export const joinGuest = (
     );
     db.prepare('UPDATE link_codes SET used_at = ? WHERE code = ?').run(iso(now()), input.code);
     db.exec('COMMIT');
-    return { ok: true, sessionId, token };
+    return { ok: true, sessionId, accountId: account, token, reused: accountId !== null };
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+};
+
+/** 게스트 계정 하나의 모든 세션 기록을 지운다(세션 행은 닉네임을 비우고 삭제 표시, 인정 도로는 삭제). */
+export const eraseGuestSessions = (deps: ExtDeps, accountId: string, sessionIds?: string[]): void => {
+  const { db, now } = deps;
+  const ids = sessionIds ?? (db.prepare('SELECT id FROM guest_sessions WHERE account_id = ? AND deleted_at IS NULL').all(accountId) as { id: string }[]).map((r) => r.id);
+  for (const id of ids) {
+    endSession(db, id, now(), 'deleted');
+    db.prepare('DELETE FROM guest_trip_ways WHERE session_id = ?').run(id);
+    db.prepare('DELETE FROM guest_trip_cache WHERE session_id = ?').run(id);
+    db.prepare('UPDATE guest_sessions SET deleted_at = ?, nickname = NULL WHERE id = ?').run(iso(now()), id);
+  }
+};
+
+/** 게스트 계정 탈퇴: 세션 기록·닉네임·토큰·계정을 지운다. */
+export const withdrawGuest = (deps: ExtDeps, accountId: string): void => {
+  const { db, now } = deps;
+  db.exec('BEGIN');
+  try {
+    eraseGuestSessions(deps, accountId);
+    db.prepare('DELETE FROM guest_sessions WHERE account_id = ?').run(accountId);
+    revokeTokens(db, 'account', accountId, now());
+    db.prepare("DELETE FROM auth_tokens WHERE kind = 'account' AND subject = ?").run(accountId);
+    db.prepare('DELETE FROM accounts WHERE id = ?').run(accountId);
+    db.exec('COMMIT');
   } catch (e) {
     db.exec('ROLLBACK');
     throw e;
@@ -100,16 +131,16 @@ export const guestRoutes = (deps: ExtDeps) => {
   const who = (c: Context): { info: TokenInfo; token: string } | null | 'invalid' => {
     const token = bearerOf(c);
     if (!token) return hasAuthHeader(c) ? 'invalid' : null;
-    const info = authenticate(db, c);
+    const info = authenticate(deps, c);
     return info ? { info, token } : 'invalid';
   };
   const hasAuthHeader = (c: Context) => (c.req.header('authorization') ?? '') !== '';
 
-  const myLevels = (info: TokenInfo): { levels: RegionLevels; owner: boolean } | null => {
-    if (info.kind !== 'account') return null;
-    if (info.role === 'owner' && info.vehicleId) return { levels: ownerRegionLevels(db, canonicalVehicleId(db, info.vehicleId)), owner: true };
-    return { levels: guestRegionLevels(db, deps.getRegions(), info.accountId), owner: false };
-  };
+  const viewOf = (info: Extract<TokenInfo, { kind: 'account' }>): AccountView => ({
+    accountId: info.accountId,
+    owner: info.role === 'owner' && info.vehicleId !== null,
+    vehicleId: info.vehicleId ? canonicalVehicleId(db, info.vehicleId) : null,
+  });
 
   return new Hono()
     // 게스트가 자기 차에서 트립을 시작하면 세션을 끝낸다. 트립 라우트는 건드리지 않고 시작 요청의 성공 응답을 본다.
@@ -146,6 +177,7 @@ export const guestRoutes = (deps: ExtDeps) => {
       // consent가 false(동의 안 함)면 이유를 따로 알린다. 그 밖의 형식 오류는 invalid_body.
       if (!parsed.success) return c.json({ error: (raw as { consent?: unknown } | undefined)?.consent === false ? 'consent_required' : 'invalid_body' }, 400);
       const r = joinGuest(deps, guard, clientKey(c), parsed.data, w);
+      if (!r.ok && (r.status === 404 || r.status === 410)) await guard.delayIfNeeded();
       return r.ok ? c.json({ sessionId: r.sessionId, token: r.token }, 200) : c.json({ error: r.error }, r.status);
     })
     .post('/guest/end-all', async (c) => {
@@ -186,7 +218,7 @@ export const guestRoutes = (deps: ExtDeps) => {
       endSession(db, session.id, now(), endedBy);
       return c.json({ ok: true as const, endedAt: iso(now()), alreadyEnded: false as const }, 200);
     })
-    // 게스트는 세션 단위로 자기 기록을 지울 수 있다(plan 9-3). 열려 있으면 끝내고 그 세션의 도로 기록을 지운다.
+    // 게스트는 세션 단위로 자기 기록을 지울 수 있다(plan 9-3). 열려 있으면 끝내고 그 세션의 도로 기록과 닉네임을 지운다.
     .delete('/guest/:id/data', (c) => {
       const w = who(c);
       if (!w || w === 'invalid') return c.json({ error: 'unauthorized' }, 401);
@@ -195,9 +227,7 @@ export const guestRoutes = (deps: ExtDeps) => {
       if (w.info.kind !== 'account' || w.info.accountId !== s.account_id) return c.json({ error: 'forbidden' }, 403);
       db.exec('BEGIN');
       try {
-        endSession(db, s.id, now(), 'deleted');
-        db.prepare('DELETE FROM guest_ways WHERE session_id = ?').run(s.id);
-        db.prepare('UPDATE guest_sessions SET deleted_at = ? WHERE id = ?').run(iso(now()), s.id);
+        eraseGuestSessions(deps, s.account_id, [s.id]);
         db.exec('COMMIT');
       } catch (e) {
         db.exec('ROLLBACK');
@@ -205,26 +235,23 @@ export const guestRoutes = (deps: ExtDeps) => {
       }
       return c.json({ ok: true as const }, 200);
     })
-    // 내 기록 요약. 차주 토큰이면 내 차량, 게스트 토큰이면 내가 앉았던 세션의 기록만.
+    // 내 기록 요약. 차주 토큰이면 내 차량 + 내가 게스트로 탄 기록, 게스트 토큰이면 내가 앉았던 세션의 기록만.
     .get('/me/summary', (c) => {
       const w = who(c);
       if (!w || w === 'invalid' || w.info.kind !== 'account') return c.json({ error: 'unauthorized' }, 401);
       const info = w.info;
-      const mine = myLevels(info)!;
+      const v = viewOf(info);
       const regions = deps.getRegions();
       const roads = deps.getRoads();
-      const items = regions ? regionItems(db, regions, mine.levels) : null;
-      const coverage = roads ? (mine.owner ? ownerCoverage(db, roads, canonicalVehicleId(db, info.vehicleId!)) : guestCoverage(db, roads, info.accountId)) : null;
-      const active = mine.owner
-        ? undefined
-        : (() => {
-            for (const s of db.prepare('SELECT vehicle_id FROM guest_sessions WHERE account_id = ? AND ended_at IS NULL').all(info.accountId) as { vehicle_id: string }[]) expireIdle(db, now(), s.vehicle_id);
-            return db.prepare('SELECT id FROM guest_sessions WHERE account_id = ? AND ended_at IS NULL AND deleted_at IS NULL').get(info.accountId) as { id: string } | undefined;
-          })();
+      const items = regions ? regionItems(db, regions, accountRegionLevels(deps, v)) : null;
+      const coverage = roads ? accountCoverage(deps, roads, v) : null;
+      for (const s of db.prepare('SELECT vehicle_id FROM guest_sessions WHERE account_id = ? AND ended_at IS NULL').all(info.accountId) as { vehicle_id: string }[]) expireIdle(db, now(), s.vehicle_id);
+      const active = db.prepare('SELECT id FROM guest_sessions WHERE account_id = ? AND ended_at IS NULL AND deleted_at IS NULL').get(info.accountId) as { id: string } | undefined;
       return c.json(
         {
-          role: mine.owner ? ('owner' as const) : ('guest' as const),
-          ...(mine.owner ? { vehicleId: info.vehicleId } : { activeSessionId: active?.id ?? null }),
+          role: v.owner ? ('owner' as const) : ('guest' as const),
+          ...(v.owner ? { vehicleId: info.vehicleId } : {}),
+          activeSessionId: active?.id ?? null,
           regions: items ? regionSummary(items) : null,
           coverage,
           snapshotMonth: roads?.month ?? null,
@@ -239,7 +266,21 @@ export const guestRoutes = (deps: ExtDeps) => {
       if (!w || w === 'invalid' || w.info.kind !== 'account') return c.json({ error: 'unauthorized' }, 401);
       const regions = deps.getRegions();
       if (!regions) return c.json({ error: 'regions_db_unavailable' }, 503);
-      const mine = myLevels(w.info)!;
-      return c.json({ items: regionItems(db, regions, mine.levels), attribution: REGIONS_ATTRIBUTION }, 200);
+      return c.json({ items: regionItems(db, regions, accountRegionLevels(deps, viewOf(w.info))), attribution: REGIONS_ATTRIBUTION }, 200);
+    })
+    // 내 기록 웹 페이지 링크(읽기 전용, 24시간). 긴 수명 API 토큰을 URL에 싣지 않는다.
+    .post('/me/link', (c) => {
+      const w = who(c);
+      if (!w || w === 'invalid' || w.info.kind !== 'account') return c.json({ error: 'unauthorized' }, 401);
+      const token = issueToken(db, 'account', w.info.accountId, now(), 'view');
+      return c.json({ url: `${publicBase(deps, c)}/me?v=${token}`, expiresAt: iso(now() + 24 * 3_600_000) }, 200);
+    })
+    // 게스트 탈퇴: 세션 기록·닉네임·계정을 지운다(차주는 DELETE /pair).
+    .delete('/me', (c) => {
+      const w = who(c);
+      if (!w || w === 'invalid' || w.info.kind !== 'account') return c.json({ error: 'unauthorized' }, 401);
+      if (w.info.role !== 'guest') return c.json({ error: 'forbidden' }, 403);
+      withdrawGuest(deps, w.info.accountId);
+      return c.json({ ok: true as const }, 200);
     });
 };

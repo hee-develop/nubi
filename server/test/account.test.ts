@@ -2,21 +2,20 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { fakeValhalla, makePoints, makeRoadsDb, matchedResponse, type SynthWay } from './helpers.js';
-import { bearer, call, extApp, HOUR, post, T0, type ExtApp } from './ext-helpers.js';
+import { fakeValhalla, makeRoadsDb, matchedResponse } from './helpers.js';
+import { bearer, call, eastPoints, eastRoads, extApp, HOUR, post, T0, type ExtApp } from './ext-helpers.js';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'nubi-test-'));
 const V = 'veh-1';
 const put = (body: unknown, headers: Record<string, string> = {}) => ({ method: 'PUT', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
-const W = (id: number, lengthM: number, roadKey: string, at: [number, number]): SynthWay => ({ id, roadKey, lengthM, highway: 'residential', at });
 
 const setup = async (extra: Parameters<typeof extApp>[0] = {}) => {
-  const roadsPath = await makeRoadsDb(join(tmp(), 'r.sqlite'), [W(1, 1000, 'nm:a', [126.978, 37.5665]), W(2, 1000, 'nm:b', [127.0, 37.57])]);
-  return extApp({ roadsPath, valhalla: { fetchFn: fakeValhalla(() => matchedResponse([{ way_id: 1, length: 1 }, { way_id: 2, length: 1 }], 40)) }, ...extra });
+  const roadsPath = await makeRoadsDb(join(tmp(), 'r.sqlite'), eastRoads(2));
+  return extApp({ roadsPath, valhalla: { fetchFn: fakeValhalla(() => matchedResponse([{ way_id: 1, length: 1 }, { way_id: 2, length: 1 }], 40)) }, ...extra, ext: { debug: true, ...extra.ext } });
 };
 /** [dayOffset]일 [hour]시(UTC)부터 달리는 트립 하나를 매칭까지. */
-const drive = async (e: ExtApp, vehicleId: string, atMs: number, n = 40) => {
-  const pts = makePoints(n, 25, 37.5665, 126.978, 12).map((p, i) => ({ ...p, ts: new Date(atMs + i * 2000).toISOString() }));
+const drive = async (e: ExtApp, vehicleId: string, atMs: number, n = 80) => {
+  const pts = eastPoints(n, atMs);
   const start = await call(e, '/trips', post('', { localId: crypto.randomUUID(), vehicleId, driverId: vehicleId, startedAt: pts[0]!.ts }));
   const tripId = start.body.tripId as string;
   const up = await call(e, `/trips/${tripId}/points`, post('', { points: pts }));
@@ -66,7 +65,7 @@ describe('설정', () => {
     expect((e.db.prepare('SELECT COUNT(*) AS n FROM trip_points').get() as any).n).toBe(0);
     await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: false }));
     const b = await drive(e, V, T0 + HOUR);
-    expect(b.up.body.accepted).toBe(40);
+    expect(b.up.body.accepted).toBe(80);
   });
 
   it('토큰 인증 required: 설정은 그 차량 토큰만(401·403)', async () => {
@@ -92,7 +91,7 @@ describe('데이터 삭제(위치정보 동의 철회)', () => {
     expect((await call(e, '/me/summary', { headers: bearer(guest.token) })).body.coverage.drivenKm).toBe(2);
     const del = await call(e, `/vehicles/${V}/data`, { method: 'DELETE' });
     expect(del.status).toBe(200);
-    expect(del.body).toMatchObject({ ok: true, deleted: { trips: 1, points: 40, ways: 2 } });
+    expect(del.body).toMatchObject({ ok: true, deleted: { trips: 1, points: 80, ways: 2 } });
     expect(del.body.deleted.regions).toBeGreaterThan(0);
     expect((await call(e, `/trips?vehicleId=${V}`)).body.trips).toEqual([]);
     expect((await call(e, `/coverage/summary?vehicleId=${V}`)).body).toMatchObject({ drivenKm: 0, roadsStarted: 0 });
@@ -134,7 +133,7 @@ describe('리포트(KST)', () => {
     const day = (await call(e, `/reports/daily?vehicleId=${V}&date=2026-11-12`)).body;
     expect(day).toMatchObject({ date: '2026-11-12', tripCount: 2, newKm: 2, newWays: 2, revivedKm: 0 });
     expect(day.distanceKm).toBeGreaterThan(1.5);
-    expect(day.newRegions.map((r: any) => r.displayName).sort()).toEqual(['서울 종로구', '서울 중구']);
+    expect(day.newRegions.map((r: any) => r.displayName)).toEqual(['서울 중구']);
     expect(day.newStays).toEqual([]);
     const next = (await call(e, `/reports/daily?vehicleId=${V}&date=2026-11-13`)).body;
     expect(next).toMatchObject({ tripCount: 1, newKm: 0, newRegions: [] }); // 이미 칠한 길·시군구

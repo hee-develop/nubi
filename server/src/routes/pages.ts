@@ -1,15 +1,16 @@
 import { Hono, type Context } from 'hono';
+import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { bodyLimit } from 'hono/body-limit';
-import { clientKey, checkCode, codeGuardOf, CODE_RE, lookupToken, type TokenInfo } from '../ext/auth.js';
+import { clientKey, checkCode, codeGuardOf, CODE_RE, issueToken, lookupToken, publicBase, type TokenInfo } from '../ext/auth.js';
 import { esc, htmlResponse, page } from '../ext/html.js';
 import { monthLabel, nationalMapInner } from '../ext/cards.js';
-import { miniMapSvg, pngAvailable } from '../ext/render.js';
+import { miniMapSvg } from '../ext/render.js';
 import { endSession, expireIdle } from '../ext/sessions.js';
-import { guestCoverage, guestRegionLevels, guestWays, ownerCoverage, ownerRegionLevels, ownerWays, regionItems, regionSummary, type RegionLevels } from '../ext/stats.js';
+import { accountCoverage, accountRegionLevels, accountWays, regionItems, regionSummary, type AccountView } from '../ext/stats.js';
 import { iso, type ExtDeps } from '../ext/util.js';
 import { canonicalVehicleId } from '../matching/pipeline.js';
 import { claimPair } from './pair.js';
-import { joinGuest } from './guest.js';
+import { eraseGuestSessions, joinGuest, withdrawGuest } from './guest.js';
 
 const LOGO = '<div class="logo">누비</div>';
 const notice = (title: string, msg: string, extra = '') => page({ title, body: `${LOGO}<h1>${esc(title)}</h1><div class="card err"><p>${esc(msg)}</p></div>${extra}<p class="foot">누비</p>` });
@@ -30,7 +31,17 @@ const levelLine = (s: ReturnType<typeof regionSummary>) => `통과 ${s.byLevel['
 export const pagesRoutes = (deps: ExtDeps) => {
   const { db, now } = deps;
   const guard = codeGuardOf(deps);
-  const home = (t: string) => `/me?t=${encodeURIComponent(t)}`;
+  const COOKIE = 'nubi_me';
+  /** 웹 세션 쿠키(HttpOnly·SameSite=Lax, https면 Secure). 토큰은 URL에 싣지 않는다. */
+  const putCookie = (c: Context, token: string, scope: 'web' | 'view') =>
+    setCookie(c, COOKIE, token, { httpOnly: true, sameSite: 'Lax', secure: publicBase(deps, c).startsWith('https:'), path: '/', maxAge: scope === 'web' ? 7 * 86_400 : 86_400 });
+  type AccountInfo = Extract<TokenInfo, { kind: 'account' }>;
+  /** 쿠키의 웹 세션. [scopes]에 든 것만(읽기 전용 view는 내리기·삭제에 쓸 수 없다). */
+  const sessionOf = (c: Context, scopes: ('web' | 'view')[]): { info: AccountInfo; token: string } | null => {
+    const t = getCookie(c, COOKIE) ?? '';
+    const info = /^[A-Za-z0-9_-]{16,256}$/.test(t) ? lookupToken(db, t, now(), scopes) : null;
+    return info && info.kind === 'account' ? { info, token: t } : null;
+  };
 
   /** 코드 페이지 공통: 코드 상태를 보고 오류면 안내 페이지를 돌려준다. 실패는 시도 제한에 센다. */
   const checkPageCode = (c: Context, kind: 'pair' | 'guest', code: string): { html: string; status: 404 | 410 | 429 } | { vehicleId: string } => {
@@ -87,12 +98,20 @@ ${nickname ? '<label class="muted" for="nick">별명(선택)</label><input id="n
       const code = c.req.param('code');
       if (!CODE_RE.test(code)) return htmlResponse(c, codeErrorPage('code_not_found').html, 404);
       const f = await form(c);
-      const r = joinGuest(deps, guard, clientKey(c), { code, consent: f.consent, ...(f.nickname ? { nickname: f.nickname } : {}) }, null);
-      if (r.ok) return c.redirect(home(r.token), 303);
+      // 같은 브라우저로 다시 오면 같은 게스트 계정을 쓴다(쿠키)
+      const prev = sessionOf(c, ['web']);
+      const existing = prev && prev.info.role === 'guest' ? prev : null;
+      const r = joinGuest(deps, guard, clientKey(c), { code, consent: f.consent, ...(f.nickname ? { nickname: f.nickname } : {}) }, existing, { apiToken: false });
+      if (r.ok) {
+        if (!r.reused) putCookie(c, issueToken(db, 'account', r.accountId, now(), 'web'), 'web');
+        return c.redirect('/me', 303);
+      }
       if (r.error === 'consent_required')
         return htmlResponse(c, notice('동의가 필요해요', '위치 기록을 내 기록으로 받으려면 동의 항목을 체크해 주세요. 동의 전에는 아무것도 시작되지 않아요.', `<a class="btn ghost" href="/g/${esc(code)}">돌아가기</a>`), 400);
       if (r.error === 'guest_limit') return htmlResponse(c, notice('자리가 다 찼어요', '이 차에는 한 번에 4명까지 같이 탈 수 있어요. 차주에게 문의해 주세요.'), 409);
+      if (r.error === 'already_in_session') return htmlResponse(c, notice('이미 다른 차에 타고 있어요', '먼저 내 기록 화면에서 내린 뒤 다시 시도해 주세요.', '<a class="btn ghost" href="/me">내 기록 보기</a>'), 409);
       const e = codeErrorPage(r.error);
+      await guard.delayIfNeeded();
       return htmlResponse(c, e.html, e.status);
     })
     // ---- 차주 연결 ----
@@ -125,44 +144,55 @@ ${nickname ? '<label class="muted" for="nick">별명(선택)</label><input id="n
         const e = codeErrorPage(st.error);
         return htmlResponse(c, e.html, e.status);
       }
-      const made = claimPair(deps, st.vehicleId, now(), iso(now()));
+      const made = claimPair(deps, st.vehicleId, now(), iso(now()), { apiToken: false });
       if (!made) return htmlResponse(c, notice('이미 연결된 차예요', '이 차는 다른 계정에 연결되어 있어요. 연결을 해제한 뒤 다시 시도해 주세요.'), 409);
       db.prepare('UPDATE link_codes SET used_at = ? WHERE code = ?').run(iso(now()), code);
-      return c.redirect(home(made.token), 303);
+      putCookie(c, issueToken(db, 'account', made.accountId, now(), 'web'), 'web');
+      return c.redirect('/me', 303);
     })
-    // ---- 내 기록(토큰) ----
+    // ---- 내 기록(쿠키 또는 24시간 읽기 전용 링크) ----
     .get('/me', (c) => {
-      const t = c.req.query('t') ?? '';
-      const info = /^[A-Za-z0-9_-]{16,256}$/.test(t) ? lookupToken(db, t) : null;
-      if (!info || info.kind !== 'account') return htmlResponse(c, notice('링크가 올바르지 않아요', '내 기록 링크가 만료됐거나 올바르지 않아요. QR을 다시 스캔해 주세요.'), 401);
-      return htmlResponse(c, mePage(info, t));
+      // 24시간 읽기 전용 링크(?v=): 쿠키로 바꿔 심고 주소에서 토큰을 지운다.
+      const v = c.req.query('v');
+      if (v !== undefined) {
+        const info = /^[A-Za-z0-9_-]{16,256}$/.test(v) ? lookupToken(db, v, now(), ['view']) : null;
+        if (!info) return htmlResponse(c, notice('링크가 만료됐어요', '내 기록 링크는 24시간 동안만 쓸 수 있어요. 새 링크를 받아 주세요.'), 401);
+        putCookie(c, v, 'view');
+        return c.redirect('/me', 303);
+      }
+      const sess = sessionOf(c, ['web', 'view']);
+      if (!sess) return htmlResponse(c, notice('내 기록을 열 수 없어요', 'QR을 다시 스캔하거나 새 링크를 받아 주세요.'), 401);
+      return htmlResponse(c, mePage(sess.info, getCookie(c, COOKIE) !== undefined && lookupToken(db, sess.token, now(), ['web']) !== null));
     })
     .post('/me/leave', async (c) => {
-      const info = tokenFromForm(await c.req.parseBody().catch(() => ({})));
-      if (!info) return htmlResponse(c, notice('링크가 올바르지 않아요', '다시 시도해 주세요.'), 401);
-      if (info.info.role === 'guest') {
-        for (const s of db.prepare('SELECT id FROM guest_sessions WHERE account_id = ? AND ended_at IS NULL').all(info.info.accountId) as { id: string }[]) endSession(db, s.id, now(), 'guest');
+      const sess = sessionOf(c, ['web']);
+      if (!sess) return htmlResponse(c, notice('다시 열어 주세요', '이 작업은 QR로 연 화면에서만 할 수 있어요.'), 401);
+      if (sess.info.role === 'guest') {
+        for (const s of db.prepare('SELECT id FROM guest_sessions WHERE account_id = ? AND ended_at IS NULL').all(sess.info.accountId) as { id: string }[]) endSession(db, s.id, now(), 'guest');
       }
-      return c.redirect(home(info.token), 303);
+      return c.redirect('/me', 303);
     })
     .post('/me/delete-session', async (c) => {
-      const info = tokenFromForm(await c.req.parseBody().catch(() => ({})));
-      if (!info) return htmlResponse(c, notice('링크가 올바르지 않아요', '다시 시도해 주세요.'), 401);
-      if (info.info.role === 'guest') {
+      const sess = sessionOf(c, ['web']);
+      if (!sess) return htmlResponse(c, notice('다시 열어 주세요', '이 작업은 QR로 연 화면에서만 할 수 있어요.'), 401);
+      if (sess.info.role === 'guest') {
         db.exec('BEGIN');
         try {
-          for (const s of db.prepare('SELECT id FROM guest_sessions WHERE account_id = ? AND deleted_at IS NULL').all(info.info.accountId) as { id: string }[]) {
-            endSession(db, s.id, now(), 'deleted');
-            db.prepare('DELETE FROM guest_ways WHERE session_id = ?').run(s.id);
-            db.prepare('UPDATE guest_sessions SET deleted_at = ? WHERE id = ?').run(iso(now()), s.id);
-          }
+          eraseGuestSessions(deps, sess.info.accountId);
           db.exec('COMMIT');
         } catch (e) {
           db.exec('ROLLBACK');
           throw e;
         }
       }
-      return c.redirect(home(info.token), 303);
+      return c.redirect('/me', 303);
+    })
+    .post('/me/withdraw', async (c) => {
+      const sess = sessionOf(c, ['web']);
+      if (!sess || sess.info.role !== 'guest') return htmlResponse(c, notice('다시 열어 주세요', '이 작업은 QR로 연 화면에서만 할 수 있어요.'), 401);
+      withdrawGuest(deps, sess.info.accountId);
+      deleteCookie(c, COOKIE, { path: '/' });
+      return htmlResponse(c, notice('탈퇴했어요', '같이 탄 기록과 별명을 모두 지웠어요.'), 200);
     })
     // ---- 공유 카드 ----
     .get('/s/:id', async (c) => {
@@ -171,8 +201,7 @@ ${nickname ? '<label class="muted" for="nick">별명(선택)</label><input id="n
         : undefined;
       if (!row) return htmlResponse(c, notice('공유 카드를 찾을 수 없어요', '삭제됐거나 주소가 올바르지 않아요.'), 404);
       const meta = JSON.parse(row.meta_json) as { label: string; lines: string[]; aria: string };
-      const ext = (await pngAvailable()) ? 'png' : 'svg';
-      const img = `/share/cards/${c.req.param('id')}.${ext}`;
+      const img = `/share/cards/${c.req.param('id')}.png`;
       const base = (deps.options.publicUrl ?? process.env.NUBI_PUBLIC_URL ?? new URL(c.req.url).origin).replace(/\/+$/, '');
       const install = deps.options.installUrl ?? process.env.NUBI_INSTALL_URL;
       const body = `${LOGO}<p class="muted">${esc(meta.label)}</p>
@@ -183,45 +212,36 @@ ${install ? `<a class="btn" href="${esc(install)}">누비 설치하기</a>` : ''
       return htmlResponse(c, page({ title: `누비 · ${meta.lines[0] ?? '공유 카드'}`, description: meta.lines.join(' · '), ogImage: `${base}${img}`, body }), 200, 'public, max-age=300');
     });
 
-  function tokenFromForm(f: Record<string, string | File | (string | File)[]>): { info: Extract<TokenInfo, { kind: 'account' }>; token: string } | null {
-    const t = typeof f['t'] === 'string' ? f['t'] : '';
-    const info = /^[A-Za-z0-9_-]{16,256}$/.test(t) ? lookupToken(db, t) : null;
-    return info && info.kind === 'account' ? { info, token: t } : null;
-  }
-
-  function mePage(info: Extract<TokenInfo, { kind: 'account' }>, token: string): string {
+  function mePage(info: AccountInfo, canAct: boolean): string {
     const regions = deps.getRegions();
     const roads = deps.getRoads();
     const owner = info.role === 'owner' && info.vehicleId !== null;
-    let levels: RegionLevels;
-    let active = false;
-    let sessionCount = 0;
-    if (owner) levels = ownerRegionLevels(db, canonicalVehicleId(db, info.vehicleId!));
-    else {
-      for (const s of db.prepare('SELECT vehicle_id FROM guest_sessions WHERE account_id = ? AND ended_at IS NULL').all(info.accountId) as { vehicle_id: string }[]) expireIdle(db, now(), s.vehicle_id);
-      active = !!db.prepare('SELECT 1 AS x FROM guest_sessions WHERE account_id = ? AND ended_at IS NULL AND deleted_at IS NULL').get(info.accountId);
-      sessionCount = (db.prepare('SELECT COUNT(*) AS n FROM guest_sessions WHERE account_id = ? AND deleted_at IS NULL').get(info.accountId) as { n: number }).n;
-      levels = guestRegionLevels(db, regions, info.accountId);
-    }
+    const view: AccountView = { accountId: info.accountId, owner, vehicleId: info.vehicleId ? canonicalVehicleId(db, info.vehicleId) : null };
+    for (const s of db.prepare('SELECT vehicle_id FROM guest_sessions WHERE account_id = ? AND ended_at IS NULL').all(info.accountId) as { vehicle_id: string }[]) expireIdle(db, now(), s.vehicle_id);
+    const active = !!db.prepare('SELECT 1 AS x FROM guest_sessions WHERE account_id = ? AND ended_at IS NULL AND deleted_at IS NULL').get(info.accountId);
+    const sessionCount = (db.prepare('SELECT COUNT(*) AS n FROM guest_sessions WHERE account_id = ? AND deleted_at IS NULL').get(info.accountId) as { n: number }).n;
+    const levels = accountRegionLevels(deps, view);
     const items = regions ? regionItems(db, regions, levels) : null;
     const sum = items ? regionSummary(items) : null;
-    const cov = roads ? (owner ? ownerCoverage(db, roads, canonicalVehicleId(db, info.vehicleId!)) : guestCoverage(db, roads, info.accountId)) : null;
+    const cov = roads ? accountCoverage(deps, roads, view) : null;
     const stats: Level[] = [
       ...(sum ? [{ n: sum.colored, label: `시군구 / ${sum.total}` }, { n: sum.depop.colored, label: `인구감소지역 / ${sum.depop.total}` }] : []),
       ...(cov ? [{ n: cov.nationalPercent, label: '전국 완료율 %' }, { n: cov.drivenKm, label: '달린 도로 km' }] : []),
     ];
-    const map = roads || regions ? miniMapSvg(nationalMapInner(deps, levels, roads ? (owner ? ownerWays(db, canonicalVehicleId(db, info.vehicleId!)) : guestWays(db, info.accountId)) : []), '전국 지도에 색칠한 내 도로와 시군구') : '';
+    const map = roads || regions ? miniMapSvg(nationalMapInner(deps, levels, roads ? accountWays(deps, view) : []), '전국 지도에 색칠한 내 도로와 시군구') : '';
     const recent = (items ?? [])
       .filter((i) => i.level > 0 && i.lastAt)
       .sort((a, b) => (b.lastAt! > a.lastAt! ? 1 : -1))
       .slice(0, 5);
     const lvName = ['', '통과', '방문', '숙박'];
-    const guestPanel = owner
+    const showGuest = !owner || sessionCount > 0;
+    const act = (action: string, label: string, cls = 'btn ghost') => (canAct ? `<form method="post" action="${action}"><button class="${cls}" type="submit">${label}</button></form>` : '');
+    const guestPanel = !showGuest
       ? ''
-      : `<div class="card"><p><b>${active ? '지금 같이 타고 있어요' : '내린 상태예요'}</b></p>
+      : `<div class="card"><p><b>${active ? '지금 같이 타고 있어요' : owner ? '다른 차에 같이 탄 기록' : '내린 상태예요'}</b></p>
 <p class="muted">같이 탄 기록 ${sessionCount}번${active ? ' · 이 차가 달리는 동안의 길이 자동으로 채워져요' : ''}</p>
-${active ? `<form method="post" action="/me/leave"><input type="hidden" name="t" value="${esc(token)}"><button class="btn ghost" type="submit">내리기</button></form>` : ''}
-<form method="post" action="/me/delete-session"><input type="hidden" name="t" value="${esc(token)}"><button class="btn ghost" type="submit">같이 탄 기록 모두 지우기</button></form></div>`;
+${active ? act('/me/leave', '내리기') : ''}${act('/me/delete-session', '같이 탄 기록 모두 지우기')}${owner ? '' : act('/me/withdraw', '탈퇴하고 모두 지우기')}
+${canAct ? '' : '<p class="muted">읽기 전용 링크예요. 내리기·삭제는 QR로 연 화면에서 할 수 있어요.</p>'}</div>`;
     return page({
       title: '내 누비 지도',
       description: '내 누비 지도 요약',
