@@ -15,10 +15,14 @@ env:
     visible: '대기'
     timeout: 20000
 - assertNotVisible: '권한 필요'
-# 정차 화면(시안 03): 헤더 칩, 게스트 QR 자리표시(준비 중), 오른쪽 이웃 카드 틀
+# 정차 화면(시안 03): 헤더 칩, 정차 메뉴 탭, 게스트 QR 카드(같이 탄 사람 추가, '준비 중' 표기 없음), 오른쪽 이웃 카드 틀
 - assertVisible: '정차 중.*'
 - assertVisible: '게스트 QR'
-- assertVisible: '준비 중'
+- assertVisible: '같이 탄 사람 추가'
+- assertNotVisible: '준비 중'
+- assertVisible: '도감'
+- assertVisible: '오늘'
+- assertVisible: '설정'
 # 정차 지도(사양 05a): 지도와 패널이 함께 보이고(패널의 게스트 QR이 위에서 이미 보임), 지도 버튼·레이어 토글이 있다.
 # 지도 뷰의 요약(contentDescription)은 debug 빌드에서만 있다: way=그린 way 수, live=잠정 way 수, new=처음 달린 잠정 way 수
 - extendedWaitUntil:
@@ -49,6 +53,10 @@ env:
 - assertNotVisible: '안 가 본 이웃'
 - assertNotVisible: '길안내'
 - assertNotVisible: '준비 중'
+- assertNotVisible: '같이 탄 사람 추가'
+- assertNotVisible: '도감'
+- assertNotVisible: '오늘'
+- assertNotVisible: '설정'
 - assertNotVisible: '도로'
 - assertNotVisible: '시군구'
 - assertNotVisible: '내 위치'
@@ -73,12 +81,15 @@ env:
 
 # 3-1. 정차 지도 조작: 레이어 토글(도로·시군구), 확대·축소, 전국, 내 위치. 지도와 패널(샘플·거리 줄)이 같은 화면에 있다
 - assertVisible: '지도 way=.*'
-- tapOn: '도로'
+# 정차 메뉴 탭 '도로'와 이름이 같아 레이어 토글은 id로 누른다
+- tapOn:
+    id: 'map_btn_roads'
 - extendedWaitUntil:
     visible: '지도 .* roads=off .*'
     timeout: 10000
 - assertVisible: '샘플 30'
-- tapOn: '도로'
+- tapOn:
+    id: 'map_btn_roads'
 - extendedWaitUntil:
     visible: '지도 .* roads=on .*'
     timeout: 10000

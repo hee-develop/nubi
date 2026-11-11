@@ -1,0 +1,192 @@
+# 정차 메뉴 E2E(사양 05d). 앞 3개 flow 다음에 돈다(서버에는 앞 flow의 트립·도감이 남아 있다).
+# P에서 탭 5개(지도·도감·도로·오늘·설정)가 열리는지, 게스트 QR(6자리 코드·남은 시간)이 뜨고 기어 D에서 바로 사라지는지, 기록 멈춤 토글 뒤 '기록 멈춤' 상태 문구가 보이는지,
+# 설정의 데이터 지우기가 2단계 확인을 거치는지 본다. 데이터 지우기는 이 flow의 마지막이고 서버 쪽 삭제는 스크립트가 확인한다.
+# 글자 검증은 정규식(전체 일치)이다. 정차 메뉴 탭 '도로'는 지도 탭의 레이어 토글 '도로'와 이름이 같아, 지도 탭이 아닐 때(토글이 없을 때)만 누른다.
+appId: com.nubi.car
+name: 정차 메뉴
+env:
+  SHOT_DIR: e2e/output/car
+---
+# 1. 상태를 비우고 기어 P: 탭 5개가 보인다(지도 탭이 기본)
+- launchApp
+- openLink: nubi-debug://signal?reset=1&vin=${APP_VIN}
+- extendedWaitUntil:
+    visible: '대기'
+    timeout: 20000
+- openLink: nubi-debug://signal?gear=P
+- extendedWaitUntil:
+    visible: '정차 중 · P'
+    timeout: 10000
+- assertVisible: '지도'
+- assertVisible: '도감'
+- assertVisible: '오늘'
+- assertVisible: '설정'
+- extendedWaitUntil:
+    visible: '지도 way=.*'
+    timeout: 20000
+- takeScreenshot: ${SHOT_DIR}/30-menu-map
+
+# 2. 도감: 시군구 229칸(시도별)·인구감소지역 92칸 요약, 시도 제목
+- tapOn: '도감'
+- extendedWaitUntil:
+    visible: '시군구 [0-9]+/229 · 인구감소지역 [0-9]+/92'
+    timeout: 20000
+- assertVisible: '서울특별시 [0-9]+/25'
+- assertVisible: '칸 색: .*'
+- assertNotVisible: '게스트 QR'
+- takeScreenshot: ${SHOT_DIR}/31-menu-dex
+
+# 3. 도로: 거의 다 달린 도로가 위, 그 아래 달린 도로
+- tapOn: '도로'
+- extendedWaitUntil:
+    visible: '거의 다 달린 도로'
+    timeout: 10000
+- assertVisible: '달린 도로'
+- extendedWaitUntil:
+    notVisible: '불러오는 중'
+    timeout: 20000
+- takeScreenshot: ${SHOT_DIR}/32-menu-roads
+
+# 4. 오늘: 오늘·이번 달 리포트(새 도로 km, 처음 지난 시군구, 트립 수, 되살린 거리)와 공유 QR
+- tapOn: '오늘'
+- extendedWaitUntil:
+    visible: '새 도로 [0-9.]+km'
+    timeout: 20000
+- assertVisible: '이번 달'
+- assertVisible: '처음 지난 시군구: .*'
+- assertVisible: '트립 [0-9]+번 · [0-9.]+km'
+- assertVisible: '되살린 거리 [0-9.]+km'
+- tapOn: '전국 카드 공유 QR'
+- extendedWaitUntil:
+    visible: '폰 카메라로 스캔하면 전국 카드를 볼 수 있어요'
+    timeout: 20000
+- takeScreenshot: ${SHOT_DIR}/33-menu-today-share-qr
+- tapOn: '닫기'
+- assertNotVisible: '폰 카메라로 스캔하면 전국 카드를 볼 수 있어요'
+
+# 5. 설정: 기록 멈춤 토글 → 상태 문구 '기록 멈춤'(지도 탭 헤더에서도 보인다) → 다시 끈다
+- tapOn: '설정'
+- extendedWaitUntil:
+    visible: '기록 멈춤: 꺼짐'
+    timeout: 20000
+- assertVisible: '주행 중 지도: 켜짐'
+- assertVisible: '음성 안내: 켜짐'
+- assertVisible: '내 지역: 지정 안 함'
+- assertVisible: '차주 연결 QR'
+- assertVisible: '데이터 지우기'
+- assertNotVisible: '기록 멈춤'
+- takeScreenshot: ${SHOT_DIR}/34-menu-settings
+- tapOn: '기록 멈춤: 꺼짐'
+- extendedWaitUntil:
+    visible: '기록 멈춤: 켜짐'
+    timeout: 20000
+- assertVisible: '기록 멈춤'
+- takeScreenshot: ${SHOT_DIR}/35-menu-recording-paused
+- tapOn: '지도'
+- extendedWaitUntil:
+    visible: '지도 way=.*'
+    timeout: 10000
+- assertVisible: '기록 멈춤'
+- takeScreenshot: ${SHOT_DIR}/35b-menu-paused-map
+- tapOn: '설정'
+- tapOn: '기록 멈춤: 켜짐'
+- extendedWaitUntil:
+    visible: '기록 멈춤: 꺼짐'
+    timeout: 20000
+- assertNotVisible: '기록 멈춤'
+
+# 6. 음성·주행 중 지도 토글, 내 지역 고르기
+- tapOn: '음성 안내: 켜짐'
+- extendedWaitUntil:
+    visible: '음성 안내: 꺼짐'
+    timeout: 10000
+- tapOn: '음성 안내: 꺼짐'
+- extendedWaitUntil:
+    visible: '음성 안내: 켜짐'
+    timeout: 10000
+- tapOn: '주행 중 지도: 켜짐'
+- extendedWaitUntil:
+    visible: '주행 중 지도: 꺼짐'
+    timeout: 20000
+- tapOn: '주행 중 지도: 꺼짐'
+- extendedWaitUntil:
+    visible: '주행 중 지도: 켜짐'
+    timeout: 20000
+- tapOn: '내 지역: 지정 안 함'
+- extendedWaitUntil:
+    visible: '내 지역을 골라 주세요'
+    timeout: 20000
+- tapOn: '종로구'
+- extendedWaitUntil:
+    visible: '내 지역: 서울 종로구'
+    timeout: 20000
+- tapOn: '내 지역: 서울 종로구'
+- tapOn: '지정 안 함'
+- extendedWaitUntil:
+    visible: '내 지역: 지정 안 함'
+    timeout: 20000
+
+# 7. 차주 연결 QR: 6자리 코드와 남은 시간(P에서만)
+- tapOn: '차주 연결 QR'
+- extendedWaitUntil:
+    visible: '차주 폰에서 스캔해 연결해요 · 코드 [0-9]{6} · 남은 시간 [0-9]:[0-9]{2}'
+    timeout: 20000
+- takeScreenshot: ${SHOT_DIR}/36-menu-pair-qr
+- tapOn: '닫기'
+- assertNotVisible: '차주 폰에서 스캔해 연결해요.*'
+
+# 8. 게스트 QR(지도 탭의 게스트 카드): 같이 탄 사람 추가 → QR·6자리 코드·남은 시간
+- tapOn: '지도'
+- extendedWaitUntil:
+    visible: '같이 탄 사람 추가'
+    timeout: 10000
+- tapOn: '같이 탄 사람 추가'
+- extendedWaitUntil:
+    visible: '코드 [0-9]{6} · 남은 시간 [0-9]:[0-9]{2}'
+    timeout: 20000
+- assertNotVisible: '준비 중'
+- takeScreenshot: ${SHOT_DIR}/37-guest-qr
+
+# 9. 기어 D가 되면 QR·코드·메뉴가 바로 사라지고, 다시 P가 돼도 옛 코드는 되살아나지 않는다(plan 9-2)
+- openLink: nubi-debug://signal?gear=D
+- extendedWaitUntil:
+    notVisible: '코드 [0-9]{6}.*'
+    timeout: 5000
+- assertNotVisible: '게스트 QR'
+- assertNotVisible: '같이 탄 사람 추가'
+- assertNotVisible: '도감'
+- assertNotVisible: '오늘'
+- assertNotVisible: '설정'
+- assertNotVisible: '지도 불러오는 중'
+- takeScreenshot: ${SHOT_DIR}/38-guest-qr-gone-gear-d
+- openLink: nubi-debug://signal?gear=P
+- extendedWaitUntil:
+    visible: '같이 탄 사람 추가'
+    timeout: 10000
+- assertNotVisible: '코드 [0-9]{6}.*'
+
+# 10. 데이터 지우기 2단계 확인: 1단계에서 취소 → 2단계에서 취소 → 끝까지 진행
+- tapOn: '설정'
+- tapOn: '데이터 지우기'
+- extendedWaitUntil:
+    visible: '위치정보 이용 동의를 철회하고.*'
+    timeout: 10000
+- assertVisible: '계속'
+- takeScreenshot: ${SHOT_DIR}/39-delete-confirm1
+- tapOn: '취소'
+- assertNotVisible: '위치정보 이용 동의를 철회하고.*'
+- tapOn: '데이터 지우기'
+- tapOn: '계속'
+- extendedWaitUntil:
+    visible: '정말 지울까요.*'
+    timeout: 10000
+- takeScreenshot: ${SHOT_DIR}/40-delete-confirm2
+- tapOn: '취소'
+- assertNotVisible: '정말 지울까요.*'
+- tapOn: '데이터 지우기'
+- tapOn: '계속'
+- tapOn: '지우기'
+- extendedWaitUntil:
+    visible: '지웠어요. 위치정보 동의가 철회됐어요'
+    timeout: 30000
+- takeScreenshot: ${SHOT_DIR}/41-delete-done

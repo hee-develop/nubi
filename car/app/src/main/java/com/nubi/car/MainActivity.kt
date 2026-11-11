@@ -528,7 +528,8 @@ class MainActivity : Activity() {
         // 현재 시군구를 모르면 제목 자리에 기존 상태 문구(대기·기록 중·종료됨 등)를 보인다.
         v.placeTitle.text = placeName ?: state
         v.nowLabel.visibility = if (placeName != null) View.VISIBLE else View.GONE
-        v.stateText.visibility = if (placeName != null) View.VISIBLE else View.GONE
+        // 지도가 아닌 탭에서는 제목 자리(지금 시군구)가 가려지므로 상태 문구(기록 멈춤 등)를 헤더에 보인다
+        v.stateText.visibility = if (placeName != null || menu.selected != com.nubi.car.screens.MenuTab.MAP) View.VISIBLE else View.GONE
         v.stateText.text = state
         // 단계 배지와 마지막 이벤트(24시간 내 방문·숙박)
         if (placeName != null && here != null) {

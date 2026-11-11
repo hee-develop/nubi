@@ -30,6 +30,8 @@ object DebugSignals {
             engine.reset()
             TripEngineProvider.coverage(context).clear()
             TripEngineProvider.place(context).clear()
+            TripEngineProvider.summary(context).onTripStarted()
+            TripEngineProvider.intro(context).clear()
         }
         value("vin")?.let { TripEngineProvider.vehicleIdResolver(context).onVin(it) }
         if (value("real") == "1") engine.setRealLocationAccepted(true)

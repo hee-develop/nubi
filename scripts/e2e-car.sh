@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 차량 앱 E2E(Maestro + 서버 검증): debug 앱을 설치하고 서버를 띄운 뒤 flow를 돌리고, 서버에 저장된 트립을 검증한다.
 # 사용: pnpm e2e:car   (Pleos 에뮬레이터 emulator-5554만 쓴다. 꺼져 있으면 실행 전에 띄워 두세요)
-# flow 3개를 순서대로 돈다: 주행 기록(trip-recording, GPX e2e-north) → 도로 색칠(road-coloring, GPX e2e-sejong) → 시군구 색칠(region-coloring, GPX e2e-junggu 2회). 도로 색칠은 실제 Valhalla(nubi-valhalla, 포트 8002)를 쓴다.
+# flow 4개를 순서대로 돈다: 주행 기록(trip-recording, GPX e2e-north) → 도로 색칠(road-coloring, GPX e2e-sejong) → 시군구 색칠(region-coloring, GPX e2e-junggu 2회) → 정차 메뉴(parked-menu: 탭·QR·기록 멈춤·데이터 지우기, 마지막에 서버 삭제와 음성 로그 확인). 도로 색칠은 실제 Valhalla(nubi-valhalla, 포트 8002)를 쓴다.
 # 환경 변수: E2E_OUT은 산출물 루트(기본 e2e/output/car), PORT는 서버 포트(기본 8787), VALHALLA_PORT는 Valhalla 포트(기본 8002),
 #            NUBI_REGIONS_DB는 지역(시군구) DB(기본 server/data/regions/regions.sqlite, 없으면 테스트 픽스처를 명시해 넘김),
 #            NUBI_ROADS_DB는 도로 DB(기본: server/data/roads-*.sqlite 중 최신, 없으면 server/test/fixtures/roads-test.sqlite를 이 스크립트가 **명시**해 서버에 넘긴다. 서버 자체는 조용히 대체하지 않는다).
@@ -114,7 +114,7 @@ done
 curl -fs "http://127.0.0.1:$PORT/health" >/dev/null || { echo "서버가 뜨지 않았습니다. $RUN_DIR/server.log 를 확인하세요." >&2; exit 1; }
 
 BASE_URL="http://127.0.0.1:$PORT"
-LOGTAGS=(NubiLoc NubiTrip NubiVehicle NubiCarSignals NubiService NubiDebug NubiUpload NubiVehicleId NubiCipher NubiCoverage AndroidRuntime)
+LOGTAGS=(NubiLoc NubiTrip NubiVehicle NubiCarSignals NubiService NubiDebug NubiUpload NubiVehicleId NubiCipher NubiCoverage NubiVoice NubiExtras NubiIntro AndroidRuntime)
 
 RETRIED=()
 # flow 하나를 돌린다. 인자: <이름> <flow yaml> <GPX> <점 수>
@@ -149,6 +149,16 @@ run_flow() {
     [ "$attempt" -eq 1 ] && RETRIED+=("$name")
   done
   return "$rc"
+}
+
+# 음성 안내 확인(사양 05d): 앞 flow들의 logcat에 TTS 요청·오디오 포커스 GRANTED·반납이 남았는지. 소리 자체는 확인하지 못한다.
+verify_voice() {
+  local logs=("$RUN_DIR"/app-logcat-*.txt)
+  grep -h "NubiVoice" "${logs[@]}" >"$RUN_DIR/voice-log.txt" || true
+  for pat in "TTS 요청 I01" "TTS 요청 I03" "오디오 포커스 GRANTED(MAY_DUCK)" "오디오 포커스 반납"; do
+    grep -q "$pat" "$RUN_DIR/voice-log.txt" || { echo "음성 로그에 '$pat'가 없습니다. $RUN_DIR/voice-log.txt" >&2; return 1; }
+  done
+  echo "음성 로그 확인: I01 $(grep -c 'TTS 요청 I01' "$RUN_DIR/voice-log.txt")회, I03 $(grep -c 'TTS 요청 I03' "$RUN_DIR/voice-log.txt")회"
 }
 
 write_summary() {
@@ -203,5 +213,27 @@ run_flow region-coloring "e2e/maestro/car/region-coloring.yaml" "$ROOT/car/app/s
 
 echo "== 서버 검증: 시군구 색칠"
 E2E_BASE_URL="$BASE_URL" node "$ROOT/scripts/verify-trip.mjs" --regions "$ROOT/car/app/src/debug/assets/e2e-sejong.gpx" "$ROOT/car/app/src/debug/assets/e2e-junggu.gpx" | tee "$RUN_DIR/region-coloring-verify.txt"
+echo "== Maestro 실행: 정차 메뉴 (스크린샷: $SHOTS)"
+"${ADB[@]}" logcat -c || true
+set +e
+"$MAESTRO" test "e2e/maestro/car/parked-menu.yaml" --device "$SERIAL" -e SHOT_DIR="$SHOTS" -e APP_VIN="$APP_VIN" --test-output-dir "$RUN_DIR/maestro/parked-menu"
+MENU_RC=$?
+set -e
+"${ADB[@]}" logcat -d -s "${LOGTAGS[@]}" >"$RUN_DIR/app-logcat-parked-menu-attempt1.txt" 2>&1 || true
+[ "$MENU_RC" -eq 0 ] || { echo "Maestro(정차 메뉴) 실패(재시도 안 함). 출력: $RUN_DIR/maestro/parked-menu" >&2; exit 1; }
+
+echo "== 서버 검증: 데이터 지우기·기록 멈춤 해제"
+# 정차 메뉴 flow가 데이터를 지웠다: 이 차량의 트립이 모두 없어지고 위치정보 동의 철회가 기록돼야 한다
+curl -fs "$BASE_URL/trips?vehicleId=$E2E_VEHICLE_ID&limit=200" >"$RUN_DIR/trips-after-delete.json"
+curl -fs "$BASE_URL/vehicles/$E2E_VEHICLE_ID/settings" >"$RUN_DIR/settings-after-delete.json"
+node -e '
+const t = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+const s = JSON.parse(require("node:fs").readFileSync(process.argv[2], "utf8"));
+const items = Array.isArray(t) ? t : (t.items ?? t.trips ?? []);
+if (items.length !== 0) { console.error("실패: 데이터 지우기 뒤에도 트립이 " + items.length + "개 남았습니다"); process.exit(1); }
+if (!s.consentWithdrawnAt) { console.error("실패: 위치정보 동의 철회가 기록되지 않았습니다"); process.exit(1); }
+console.log("데이터 지우기 확인: 트립 0개, 동의 철회 " + s.consentWithdrawnAt);
+' "$RUN_DIR/trips-after-delete.json" "$RUN_DIR/settings-after-delete.json" | tee "$RUN_DIR/delete-verify.txt"
+verify_voice | tee -a "$RUN_DIR/delete-verify.txt"
 write_summary
 echo "== 통과. 산출물: $RUN_DIR"
