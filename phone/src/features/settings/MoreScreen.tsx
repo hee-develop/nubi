@@ -1,4 +1,5 @@
 import { useRouter } from 'expo-router';
+import { isInsecureLive } from '../../api';
 import { Button, Card, Screen, Txt } from '../../components/ui';
 import { t } from '../../lib/i18n';
 import { useSession } from '../../state/session';
@@ -22,6 +23,7 @@ export const MoreScreen = () => {
         <Txt bold>{t('more.settings')}</Txt>
         <Button testID="more-settings" label={t('more.settingsBtn')} variant="secondary" onPress={() => router.push('/settings')} />
       </Card>
+      {isInsecureLive({ mode: api.mode, baseUrl: api.baseUrl }) ? <Txt color="#f59e0b" testID="more-insecure">{t('more.insecure')}</Txt> : null}
       <Txt muted size={12} testID="more-mode">{t('more.mode', { mode: api.mode })}</Txt>
     </Screen>
   );

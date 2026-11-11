@@ -12,7 +12,7 @@ import { cardImageSource, shareCard } from './shareFile';
 const KINDS: ShareKind[] = ['national', 'trip', 'road'];
 
 export const ShareScreen = () => {
-  const { api, pairing } = useSession();
+  const { api, pairing, dataVersion } = useSession();
   const vehicleId = pairing?.vehicleId ?? '';
   const [kind, setKind] = useState<ShareKind>('national');
   const [tripId, setTripId] = useState<string | null>(null);
@@ -22,8 +22,8 @@ export const ShareScreen = () => {
   const [errorKey, setErrorKey] = useState<TKey | null>(null);
   const [notice, setNotice] = useState<TKey | null>(null);
 
-  const trips = useApiData(() => api.trips(vehicleId, 8), [api, vehicleId]);
-  const roads = useApiData(() => api.coverageRoads(vehicleId, { sort: 'percent', limit: 8 }), [api, vehicleId]);
+  const trips = useApiData(() => api.trips(vehicleId, 8), [api, vehicleId, dataVersion]);
+  const roads = useApiData(() => api.coverageRoads(vehicleId, { sort: 'percent', limit: 8 }), [api, vehicleId, dataVersion]);
 
   const canCreate = kind === 'national' || (kind === 'trip' && !!tripId) || (kind === 'road' && !!roadKey);
 

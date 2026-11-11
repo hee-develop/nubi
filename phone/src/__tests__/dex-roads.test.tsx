@@ -1,5 +1,7 @@
 import { fireEvent, screen } from '@testing-library/react-native';
+import { Pressable } from 'react-native';
 import { ApiError } from '../api';
+import { useSession } from '../state/session';
 import { DexScreen, groupBySido } from '../features/dex/DexScreen';
 import { RoadsScreen } from '../features/roads/RoadsScreen';
 import { flush, makeApi, renderApp } from '../test/utils';
@@ -75,5 +77,51 @@ describe('도로', () => {
     await renderApp(<RoadsScreen />, { api: makeApi({ coverageRoads: never as never }) });
     expect(screen.getByTestId('roads-all-loading')).toBeTruthy();
     await flush();
+  });
+});
+
+describe('도로 더 보기', () => {
+  const pageApi = (failMore: { on: boolean }) =>
+    makeApi({
+      coverageRoads: (async (v: string, q: { limit?: number; offset?: number; filter?: string }) => {
+        if (q.offset && failMore.on) throw new ApiError('offline', 0, 'timeout');
+        const all = await makeApi().coverageRoads(v, { ...q, limit: 50, offset: 0 } as never);
+        const offset = q.offset ?? 0;
+        return q.filter === 'almost' ? all : { ...all, offset, limit: 5, items: all.items.slice(offset, offset + 5) };
+      }) as never,
+    });
+
+  test('더 보기가 실패하면 오류 문구를 보이고, 다시 누르면 이어서 불러온다', async () => {
+    const fail = { on: true };
+    await renderApp(<RoadsScreen />, { api: pageApi(fail) });
+    await fireEvent.press(screen.getByTestId('roads-more'));
+    await flush();
+    expect(screen.getByTestId('roads-more-error')).toBeTruthy();
+    fail.on = false;
+    await fireEvent.press(screen.getByTestId('roads-more'));
+    await flush();
+    expect(screen.queryByTestId('roads-more-error')).toBeNull();
+    expect(screen.getByTestId('road-mock-road-6')).toBeTruthy(); // 둘째 페이지 항목
+  });
+
+  test('다시 조회(데이터 무효화)하면 더 불러온 항목을 비우고 첫 페이지부터', async () => {
+    const fail = { on: false };
+    const Harness = () => {
+      const { invalidate } = useSession();
+      return (
+        <>
+          <RoadsScreen />
+          <Pressable testID="inv" onPress={invalidate} />
+        </>
+      );
+    };
+    await renderApp(<Harness />, { api: pageApi(fail) });
+    await fireEvent.press(screen.getByTestId('roads-more'));
+    await flush();
+    expect(screen.getByTestId('road-mock-road-6')).toBeTruthy();
+    await fireEvent.press(screen.getByTestId('inv'));
+    await flush();
+    expect(screen.queryByTestId('road-mock-road-6')).toBeNull(); // 첫 페이지(5개)만 다시
+    expect(screen.getByTestId('roads-more')).toBeTruthy();
   });
 });

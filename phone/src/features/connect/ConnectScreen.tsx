@@ -1,21 +1,12 @@
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { StyleSheet, TextInput, View } from 'react-native';
-import { ApiError } from '../../api';
 import { Button, Card, Screen, Txt } from '../../components/ui';
+import { ConsentBox } from '../../components/ConsentBox';
+import { claimErrorKey } from '../../lib/errors';
 import { t, type TKey } from '../../lib/i18n';
 import { colors, MIN_TOUCH } from '../../lib/theme';
 import { useSession } from '../../state/session';
-
-export const claimErrorKey = (e: unknown): TKey => {
-  if (e instanceof ApiError) {
-    if (e.kind === 'offline') return 'connect.err.offline';
-    if (e.code === 'code_expired') return 'connect.err.expired';
-    if (e.code === 'code_not_found') return 'connect.err.notFound';
-    if (e.code === 'invalid_code') return 'connect.err.invalid';
-  }
-  return 'connect.err.unknown';
-};
 
 /** 6자리 코드 입력 + 연결 실행. ScanScreen의 수동 입력도 이 컴포넌트를 쓴다. */
 export const CodeEntry = ({ mode, onSubmit, busy, errorKey }: { mode: 'pair' | 'guest'; onSubmit: (code: string) => void; busy: boolean; errorKey: TKey | null }) => {
@@ -49,13 +40,15 @@ export const ConnectScreen = () => {
   const router = useRouter();
   const { api, savePairing } = useSession();
   const [busy, setBusy] = useState(false);
+  const [agreed, setAgreed] = useState(false);
   const [errorKey, setErrorKey] = useState<TKey | null>(null);
 
   const claim = async (code: string) => {
+    if (!agreed) return;
     setBusy(true);
     setErrorKey(null);
     try {
-      const r = await api.pairClaim(code);
+      const r = await api.pairClaim(code, true);
       await savePairing(r);
       router.replace('/(tabs)');
     } catch (e) {
@@ -68,14 +61,19 @@ export const ConnectScreen = () => {
   return (
     <Screen title={t('connect.title')} subtitle={t('connect.subtitle')}>
       <Card>
+        <Txt bold>{t('connect.consent.title')}</Txt>
+        <Txt testID="connect-consent-text">{t('connect.consent.body')}</Txt>
+        <ConsentBox testID="connect-consent" checked={agreed} onToggle={() => setAgreed((a) => !a)} label={t('connect.consent.check')} />
+      </Card>
+      <Card>
         <Txt bold>{t('connect.scanTitle')}</Txt>
         <Txt muted>{t('connect.scanBody')}</Txt>
-        <Button testID="connect-scan" label={t('connect.scan')} onPress={() => router.push('/scan?mode=pair')} />
+        <Button testID="connect-scan" label={t('connect.scan')} disabled={!agreed} onPress={() => router.push('/scan?mode=pair&consent=1')} />
       </Card>
       <Card>
         <Txt bold>{t('connect.codeTitle')}</Txt>
         <Txt muted>{t('connect.codeBody')}</Txt>
-        <CodeEntry mode="pair" onSubmit={claim} busy={busy} errorKey={errorKey} />
+        <CodeEntry mode="pair" onSubmit={claim} busy={busy || !agreed} errorKey={errorKey} />
       </Card>
       <Card>
         <Txt bold>{t('connect.guestTitle')}</Txt>

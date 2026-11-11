@@ -110,7 +110,7 @@ export const styles = StyleSheet.create({
   btnSecondary: { backgroundColor: colors.panel2 },
   btnDanger: { borderColor: colors.danger, backgroundColor: 'transparent' },
   btnText: { color: colors.text, fontSize: 16, fontWeight: '800' },
-  chip: { minHeight: 40, minWidth: MIN_TOUCH, paddingHorizontal: 14, borderRadius: 20, borderWidth: 1.5, borderColor: colors.line, backgroundColor: colors.panel, alignItems: 'center', justifyContent: 'center' },
+  chip: { minHeight: MIN_TOUCH, minWidth: MIN_TOUCH, paddingHorizontal: 14, borderRadius: 20, borderWidth: 1.5, borderColor: colors.line, backgroundColor: colors.panel, alignItems: 'center', justifyContent: 'center' },
   chipOn: { backgroundColor: colors.accent, borderColor: colors.accent },
   chipText: { color: colors.muted, fontSize: 15, fontWeight: '700' },
   bar: { height: 8, borderRadius: 4, backgroundColor: colors.line, overflow: 'hidden' },

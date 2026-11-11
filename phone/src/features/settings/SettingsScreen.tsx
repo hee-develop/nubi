@@ -1,9 +1,9 @@
 import { useRouter } from 'expo-router';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Modal, ScrollView, StyleSheet, Switch, TextInput, View } from 'react-native';
 import { ConfirmModal } from '../../components/ConfirmModal';
 import { Button, Card, Chip, Screen, StateView, Txt } from '../../components/ui';
-import { ApiError, type VehicleSettings } from '../../api';
+import { ApiError, type SettingsPatch, type VehicleSettings } from '../../api';
 import { useApiData } from '../../hooks/useApiData';
 import { t, type TKey } from '../../lib/i18n';
 import { colors, MIN_TOUCH } from '../../lib/theme';
@@ -48,43 +48,64 @@ const RegionPicker = ({ visible, current, onPick, onClose }: { visible: boolean;
 
 export const SettingsScreen = () => {
   const router = useRouter();
-  const { api, pairing, clearPairing } = useSession();
+  const { api, pairing, clearPairing, dataVersion, invalidate } = useSession();
   const vehicleId = pairing?.vehicleId ?? '';
-  const settings = useApiData(() => api.getSettings(vehicleId), [api, vehicleId]);
-  const guests = useApiData(() => api.guestSessions(vehicleId), [api, vehicleId]);
+  const settings = useApiData(() => api.getSettings(vehicleId), [api, vehicleId, dataVersion]);
+  const guests = useApiData(() => api.guestSessions(vehicleId), [api, vehicleId, dataVersion]);
   const [local, setLocal] = useState<VehicleSettings | null>(null);
   const [saveError, setSaveError] = useState<TKey | null>(null);
   const [pickRegion, setPickRegion] = useState(false);
   const [disconnectOpen, setDisconnectOpen] = useState(false);
   const [disconnectFailed, setDisconnectFailed] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [storageWarn, setStorageWarn] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const seq = useRef(0);
   const [deleteStep, setDeleteStep] = useState<0 | 1 | 2>(0);
   const [typed, setTyped] = useState('');
   const [deleteState, setDeleteState] = useState<'idle' | 'busy' | 'done' | 'error'>('idle');
 
   const current = local ?? settings.data;
 
-  const save = async (patch: Partial<VehicleSettings>) => {
-    if (!current) return;
-    const next = { ...current, ...patch };
-    setLocal(next);
+  /** 저장 중에는 다른 변경을 받지 않고, 요청 순번이 바뀐 오래된 응답은 버린다. 서버는 부분 갱신(PUT)이다. */
+  const save = async (patch: SettingsPatch) => {
+    if (!current || saving) return;
+    const prev = current;
+    const mine = ++seq.current;
+    setLocal({ ...current, ...patch });
+    setSaving(true);
     setSaveError(null);
     try {
-      setLocal(await api.putSettings(vehicleId, next));
+      const saved = await api.putSettings(vehicleId, patch);
+      if (mine === seq.current) setLocal(saved);
     } catch (e) {
-      setLocal(current);
-      setSaveError(e instanceof ApiError && e.kind === 'offline' ? 'settings.err.offline' : 'settings.err.save');
+      if (mine === seq.current) {
+        setLocal(prev);
+        setSaveError(e instanceof ApiError && e.kind === 'offline' ? 'settings.err.offline' : 'settings.err.save');
+      }
+    } finally {
+      if (mine === seq.current) setSaving(false);
     }
   };
 
   const disconnect = async (serverToo: boolean) => {
+    if (disconnecting) return;
+    setDisconnecting(true);
     setDisconnectFailed(false);
     try {
       if (serverToo && pairing) await api.pairDelete(pairing.token);
-      await clearPairing();
+      const persisted = await clearPairing();
+      if (!persisted) {
+        // 저장소에서 못 지웠다: 사용자에게 알리고 확인 뒤에 이동한다.
+        setStorageWarn(true);
+        return;
+      }
       setDisconnectOpen(false);
       router.replace('/connect');
     } catch {
       setDisconnectFailed(true);
+    } finally {
+      setDisconnecting(false);
     }
   };
 
@@ -92,11 +113,11 @@ export const SettingsScreen = () => {
     setDeleteState('busy');
     try {
       await api.deleteData(vehicleId);
+      invalidate();
       setDeleteState('done');
       setDeleteStep(0);
       setTyped('');
       setLocal(null);
-      settings.reload();
     } catch {
       setDeleteState('error');
     }
@@ -109,16 +130,16 @@ export const SettingsScreen = () => {
         <StateView status={settings.status} onRetry={settings.reload} testID="settings">
           {current ? (
             <>
-              <ToggleRow testID="set-paused" label={t('settings.paused')} note={t('settings.pausedNote')} value={current.recordingPaused} onChange={(v) => void save({ recordingPaused: v })} />
-              <ToggleRow testID="set-stats" label={t('settings.stats')} note={t('settings.statsNote')} value={current.statsOptIn} onChange={(v) => void save({ statsOptIn: v })} />
-              <ToggleRow testID="set-driving" label={t('settings.drivingMap')} note={t('settings.drivingMapNote')} value={current.drivingMap} onChange={(v) => void save({ drivingMap: v })} />
+              <ToggleRow testID="set-paused" label={t('settings.paused')} note={t('settings.pausedNote')} value={current.recordingPaused} onChange={(v) => void save({ recordingPaused: v })} disabled={saving} />
+              <ToggleRow testID="set-stats" label={t('settings.stats')} note={t('settings.statsNote')} value={current.statsOptIn} onChange={(v) => void save({ statsOptIn: v })} disabled={saving} />
+              <ToggleRow testID="set-driving" label={t('settings.drivingMap')} note={t('settings.drivingMapNote')} value={current.drivingMap} onChange={(v) => void save({ drivingMap: v })} disabled={saving} />
               <View style={styles.row}>
                 <View style={{ flex: 1 }}>
                   <Txt bold>{t('settings.home')}</Txt>
                   <Txt muted size={13} testID="set-home-value">{current.homeRegion ?? t('settings.home.none')}</Txt>
                   <Txt muted size={13}>{t('settings.homeNote')}</Txt>
                 </View>
-                <Button testID="set-home" label={t('settings.home.change')} variant="secondary" onPress={() => setPickRegion(true)} />
+                <Button testID="set-home" label={t('settings.home.change')} variant="secondary" disabled={saving} onPress={() => setPickRegion(true)} />
               </View>
               {saveError ? <Txt color={colors.danger} testID="set-error">{t(saveError)}</Txt> : null}
             </>
@@ -143,11 +164,17 @@ export const SettingsScreen = () => {
 
       <RegionPicker visible={pickRegion} current={current?.homeRegion ?? null} onClose={() => setPickRegion(false)} onPick={(code) => { setPickRegion(false); void save({ homeRegion: code }); }} />
 
-      <ConfirmModal visible={disconnectOpen} testID="disconnect" title={t('settings.disconnectTitle')} body={t('settings.disconnectBody')} confirmLabel={t('settings.disconnect')} cancelLabel={t('common.cancel')} onConfirm={() => void disconnect(true)} onCancel={() => setDisconnectOpen(false)}>
+      <ConfirmModal visible={disconnectOpen} testID="disconnect" title={t('settings.disconnectTitle')} body={t('settings.disconnectBody')} confirmLabel={t('settings.disconnect')} cancelLabel={t('common.cancel')} confirmDisabled={disconnecting || storageWarn} onConfirm={() => void disconnect(true)} onCancel={() => setDisconnectOpen(false)}>
+        {storageWarn ? (
+          <View style={{ gap: 8 }}>
+            <Txt color={colors.danger} testID="disconnect-storage">{t('settings.disconnectStorage')}</Txt>
+            <Button testID="disconnect-storage-ok" label={t('common.ok')} onPress={() => { setStorageWarn(false); setDisconnectOpen(false); router.replace('/connect'); }} />
+          </View>
+        ) : null}
         {disconnectFailed ? (
           <View style={{ gap: 8 }}>
             <Txt color={colors.danger} testID="disconnect-error">{t('settings.disconnectFailed')}</Txt>
-            <Button testID="disconnect-local" label={t('settings.disconnectLocal')} variant="secondary" onPress={() => void disconnect(false)} />
+            <Button testID="disconnect-local" label={t('settings.disconnectLocal')} variant="secondary" disabled={disconnecting} onPress={() => void disconnect(false)} />
           </View>
         ) : null}
       </ConfirmModal>

@@ -2,9 +2,27 @@ import { buildRegions, buildRoads, buildTrips } from './mock-data';
 import { ApiError, type NubiApi, type VehicleSettings } from './types';
 
 export const MOCK_VEHICLE_ID = 'mock-vehicle-0001';
-/** 목 연결 코드: 000000 = 만료, 111111 = 사용 중 아님(알 수 없는 코드), 그 밖의 6자리 = 성공. */
+/**
+ * 목 코드(T2와 같은 오류 코드): 000000 만료(410 code_expired), 111111 없음(404 code_not_found), 222222 이미 씀(410 code_used),
+ * 333333 이미 연결됨(409 already_paired, 차주 연결만), 444444 시도 제한(429 too_many_requests),
+ * 555555 게스트 가득(409 guest_limit), 666666 이미 세션 중(409 already_in_session), 777777 내 차(409 own_vehicle). 그 밖의 6자리는 성공.
+ */
 export const MOCK_CODE_EXPIRED = '000000';
 export const MOCK_CODE_UNKNOWN = '111111';
+export const MOCK_CODE_USED = '222222';
+export const MOCK_CODE_ALREADY_PAIRED = '333333';
+export const MOCK_CODE_RATE = '444444';
+export const MOCK_CODE_GUEST_LIMIT = '555555';
+export const MOCK_CODE_IN_SESSION = '666666';
+export const MOCK_CODE_OWN_VEHICLE = '777777';
+
+const checkCommon = (code: string) => {
+  if (!/^\d{6}$/.test(code)) throw new ApiError('http', 400, 'invalid_body');
+  if (code === MOCK_CODE_RATE) throw new ApiError('http', 429, 'too_many_requests');
+  if (code === MOCK_CODE_UNKNOWN) throw new ApiError('http', 404, 'code_not_found');
+  if (code === MOCK_CODE_USED) throw new ApiError('http', 410, 'code_used');
+  if (code === MOCK_CODE_EXPIRED) throw new ApiError('http', 410, 'code_expired');
+};
 const ATTRIBUTION = '© OpenStreetMap contributors';
 const SNAPSHOT = '2026-11';
 
@@ -20,8 +38,11 @@ export const createMockApi = (opts: MockOptions = {}): NubiApi => {
   let regions = buildRegions();
   let roads = buildRoads();
   let trips = buildTrips(MOCK_VEHICLE_ID);
-  let settings: VehicleSettings = { recordingPaused: false, homeRegion: null, statsOptIn: true, drivingMap: true };
-  const guests = new Map<string, boolean>();
+  const defaultSettings = (): VehicleSettings => ({ recordingPaused: false, homeRegion: null, statsOptIn: true, drivingMap: true, hideHomeInCards: true, consentWithdrawnAt: null });
+  let settings = defaultSettings();
+  /** sessionId → 상태. 내리면 ended, 기록 삭제하면 deleted. */
+  const guests = new Map<string, { ended: boolean; deleted: boolean }>();
+  const activeGuests = () => [...guests.values()].filter((g) => !g.ended).length;
   let deleted = false;
 
   const base = { snapshotMonth: SNAPSHOT, attribution: ATTRIBUTION };
@@ -91,40 +112,76 @@ export const createMockApi = (opts: MockOptions = {}): NubiApi => {
     trips: (vehicleId, limit = 10) => withWait(() => ({ trips: deleted ? [] : trips.slice(0, limit).map((t) => ({ ...t, vehicleId })) })),
 
     reportsDaily: (_v, date) =>
-      withWait(() => ({ date, newKm: deleted ? 0 : 18.4, newRegions: deleted ? [] : [{ code: '11110', displayName: '서울 종로구' }], tripCount: deleted ? 0 : 2, distanceKm: deleted ? 0 : 41.2 })),
+      withWait(() => ({
+        date,
+        tripCount: deleted ? 0 : 2,
+        distanceKm: deleted ? 0 : 41.2,
+        newKm: deleted ? 0 : 18.4,
+        newWays: deleted ? 0 : 36,
+        revivedKm: 0,
+        newRegions: deleted ? [] : [{ code: '11110', displayName: '서울 종로구', sidoName: '서울' }],
+        newStays: [],
+      })),
     reportsMonthly: (_v, month) =>
       withWait(() => ({
         month,
-        newKm: deleted ? 0 : 212.6,
-        newRegions: deleted ? [] : [{ code: '11110', displayName: '서울 종로구' }, { code: '51720', displayName: '강원 홍천군' }],
         tripCount: deleted ? 0 : 19,
         distanceKm: deleted ? 0 : 610.3,
+        newKm: deleted ? 0 : 212.6,
+        newWays: deleted ? 0 : 410,
+        revivedKm: deleted ? 0 : 3.2,
+        newRegions: deleted ? [] : [{ code: '11110', displayName: '서울 종로구', sidoName: '서울' }, { code: '51720', displayName: '강원 홍천군', sidoName: '강원' }],
+        newStays: [],
+        daysDriven: deleted ? 0 : 9,
       })),
 
-    pairClaim: (code) =>
+    pairClaim: (code, consent) =>
       withWait(() => {
-        if (!/^\d{6}$/.test(code)) throw new ApiError('http', 400, 'invalid_code');
-        if (code === MOCK_CODE_EXPIRED) throw new ApiError('http', 410, 'code_expired');
-        if (code === MOCK_CODE_UNKNOWN) throw new ApiError('http', 404, 'code_not_found');
+        if (consent === false) throw new ApiError('http', 400, 'consent_required');
+        checkCommon(code);
+        if (code === MOCK_CODE_ALREADY_PAIRED) throw new ApiError('http', 409, 'already_paired');
         return { accountId: 'mock-account-1', token: `mock-token-${code}`, vehicleId: MOCK_VEHICLE_ID };
       }),
     pairDelete: api(() => undefined),
     guestClaim: (input) =>
       withWait(() => {
         if (input.consent !== true) throw new ApiError('http', 400, 'consent_required');
-        if (!/^\d{6}$/.test(input.code)) throw new ApiError('http', 400, 'invalid_code');
-        if (input.code === MOCK_CODE_EXPIRED) throw new ApiError('http', 410, 'code_expired');
-        if (input.code === MOCK_CODE_UNKNOWN) throw new ApiError('http', 404, 'code_not_found');
+        checkCommon(input.code);
+        if (input.code === MOCK_CODE_GUEST_LIMIT) throw new ApiError('http', 409, 'guest_limit');
+        if (input.code === MOCK_CODE_IN_SESSION) throw new ApiError('http', 409, 'already_in_session');
+        if (input.code === MOCK_CODE_OWN_VEHICLE) throw new ApiError('http', 409, 'own_vehicle');
         const sessionId = `mock-guest-${guests.size + 1}`;
-        guests.set(sessionId, true);
+        guests.set(sessionId, { ended: false, deleted: false });
         return { sessionId, token: `mock-guest-token-${sessionId}` };
       }),
     guestEnd: (sessionId) =>
       withWait(() => {
-        guests.delete(sessionId);
+        const g = guests.get(sessionId);
+        if (!g) throw new ApiError('http', 404, 'not_found');
+        const already = g.ended;
+        g.ended = true;
+        return { ok: true as const, endedAt: '2026-11-11T09:00:00.000Z', alreadyEnded: already };
       }),
-    guestSessions: () => withWait(() => ({ active: guests.size })),
-    meSummary: () => withWait(() => ({ regionsColored: 3, regionsTotal: 229, newKm: 14.2, tripCount: 1 })),
+    guestDeleteData: (sessionId) =>
+      withWait(() => {
+        const g = guests.get(sessionId);
+        if (!g) throw new ApiError('http', 404, 'not_found');
+        g.deleted = true;
+      }),
+    guestSessions: () => withWait(() => ({ active: activeGuests() })),
+    meSummary: (token) =>
+      withWait(() => {
+        const id = token.replace('mock-guest-token-', '');
+        const g = guests.get(id);
+        const deleted = !!g?.deleted;
+        return {
+          role: 'guest' as const,
+          activeSessionId: g && !g.ended ? id : null,
+          regions: { total: 229, colored: deleted ? 0 : 3, byLevel: { '1': deleted ? 0 : 2, '2': 0, '3': deleted ? 0 : 1 }, depop: { total: 92, colored: deleted ? 0 : 1 } },
+          coverage: { nationalPercent: deleted ? 0 : 0.0004, drivenKm: deleted ? 0 : 14.2, totalKm: 1_000_000, roadsStarted: deleted ? 0 : 4, roadsCompleted: 0 },
+          snapshotMonth: SNAPSHOT,
+        };
+      }),
 
     shareCreate: (req) =>
       withWait(() => {
@@ -135,18 +192,20 @@ export const createMockApi = (opts: MockOptions = {}): NubiApi => {
       }),
 
     getSettings: () => withWait(() => ({ ...settings })),
-    putSettings: (_v, s) =>
+    putSettings: (_v, patch) =>
       withWait(() => {
-        settings = { ...s };
+        if (patch.homeRegion && !regions.some((r) => r.code === patch.homeRegion)) throw new ApiError('http', 400, 'invalid_region');
+        settings = { ...settings, ...patch };
         return { ...settings };
       }),
     deleteData: () =>
       withWait(() => {
         deleted = true;
-        settings = { recordingPaused: false, homeRegion: null, statsOptIn: true, drivingMap: true };
+        settings = { ...defaultSettings(), recordingPaused: true, consentWithdrawnAt: '2026-11-11T09:00:00.000Z' };
         trips = [];
         roads = [];
         regions = regions.map((r) => ({ ...r, level: 0, faded: false }));
+        return { ok: true as const, deleted: { trips: 5, points: 2150, ways: 1200, regions: 5 } };
       }),
   };
 };

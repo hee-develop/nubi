@@ -1,9 +1,11 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { createApi, type NubiApi } from '../api';
 import { KEYS, readJson, storage } from './storage';
+import { getOwnerToken, setOwnerToken } from './token';
 
 export type Pairing = { accountId: string; token: string; vehicleId: string };
-export type GuestSession = { sessionId: string; token: string; nickname?: string };
+/** ended: 내리기를 마친 세션(기록 열람·삭제를 위해 토큰은 남겨 둔다). */
+export type GuestSession = { sessionId: string; token: string; nickname?: string; ended?: boolean };
 
 type Ctx = {
   api: NubiApi;
@@ -11,16 +13,22 @@ type Ctx = {
   pairing: Pairing | null;
   guest: GuestSession | null;
   savePairing(p: Pairing): Promise<void>;
-  clearPairing(): Promise<void>;
+  /** 저장소에서 못 지웠으면 false(메모리 상태는 비운다). */
+  clearPairing(): Promise<boolean>;
   saveGuest(g: GuestSession): Promise<void>;
-  clearGuest(): Promise<void>;
+  clearGuest(): Promise<boolean>;
+  /** 데이터 삭제 등으로 서버 기록이 바뀌면 부른다. 이 값에 의존하는 화면이 다시 조회한다. */
+  dataVersion: number;
+  invalidate(): void;
 };
 
 const SessionContext = createContext<Ctx | null>(null);
 
 export const SessionProvider = ({ api, children }: { api?: NubiApi; children: ReactNode }) => {
-  const resolvedApi = useMemo(() => api ?? createApi(), [api]);
+  // 차주 토큰은 호출 때마다 읽어 모든 차량 API 요청에 Bearer로 붙인다(api를 다시 만들지 않는다).
+  const resolvedApi = useMemo(() => api ?? createApi(undefined, getOwnerToken), [api]);
   const [ready, setReady] = useState(false);
+  const [dataVersion, setDataVersion] = useState(0);
   const [pairing, setPairing] = useState<Pairing | null>(null);
   const [guest, setGuest] = useState<GuestSession | null>(null);
 
@@ -29,6 +37,7 @@ export const SessionProvider = ({ api, children }: { api?: NubiApi; children: Re
     (async () => {
       const [p, g] = await Promise.all([readJson<Pairing>(KEYS.pairing), readJson<GuestSession>(KEYS.guest)]);
       if (!alive) return;
+      setOwnerToken(p?.token ?? null);
       setPairing(p);
       setGuest(g);
       setReady(true);
@@ -40,24 +49,29 @@ export const SessionProvider = ({ api, children }: { api?: NubiApi; children: Re
 
   const savePairing = useCallback(async (p: Pairing) => {
     await storage.set(KEYS.pairing, JSON.stringify(p));
+    setOwnerToken(p.token);
     setPairing(p);
   }, []);
   const clearPairing = useCallback(async () => {
-    await storage.remove(KEYS.pairing);
+    const ok = await storage.remove(KEYS.pairing);
+    setOwnerToken(null);
     setPairing(null);
+    return ok;
   }, []);
   const saveGuest = useCallback(async (g: GuestSession) => {
     await storage.set(KEYS.guest, JSON.stringify(g));
     setGuest(g);
   }, []);
   const clearGuest = useCallback(async () => {
-    await storage.remove(KEYS.guest);
+    const ok = await storage.remove(KEYS.guest);
     setGuest(null);
+    return ok;
   }, []);
+  const invalidate = useCallback(() => setDataVersion((n) => n + 1), []);
 
   const value = useMemo(
-    () => ({ api: resolvedApi, ready, pairing, guest, savePairing, clearPairing, saveGuest, clearGuest }),
-    [resolvedApi, ready, pairing, guest, savePairing, clearPairing, saveGuest, clearGuest],
+    () => ({ api: resolvedApi, ready, pairing, guest, savePairing, clearPairing, saveGuest, clearGuest, dataVersion, invalidate }),
+    [resolvedApi, ready, pairing, guest, savePairing, clearPairing, saveGuest, clearGuest, dataVersion, invalidate],
   );
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 };

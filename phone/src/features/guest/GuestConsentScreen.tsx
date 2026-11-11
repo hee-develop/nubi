@@ -1,12 +1,12 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useState } from 'react';
-import { Pressable, StyleSheet, TextInput, View } from 'react-native';
-import { ApiError } from '../../api';
+import { StyleSheet, TextInput } from 'react-native';
 import { Button, Card, Screen, Txt } from '../../components/ui';
+import { ConsentBox } from '../../components/ConsentBox';
+import { claimErrorKey } from '../../lib/errors';
 import { t, type TKey } from '../../lib/i18n';
 import { colors, MIN_TOUCH } from '../../lib/theme';
 import { useSession } from '../../state/session';
-import { claimErrorKey } from '../connect/ConnectScreen';
 
 /** 위치정보 이용 동의 화면. 동의 체크 없이는 참여할 수 없고, 서버도 consent:true가 아니면 400을 돌려준다. */
 export const GuestConsentScreen = () => {
@@ -19,6 +19,7 @@ export const GuestConsentScreen = () => {
   const [errorKey, setErrorKey] = useState<TKey | null>(null);
 
   const join = async () => {
+    if (!agreed) return;
     setBusy(true);
     setErrorKey(null);
     try {
@@ -27,7 +28,7 @@ export const GuestConsentScreen = () => {
       await saveGuest({ sessionId: r.sessionId, token: r.token, ...(nick ? { nickname: nick } : {}) });
       router.replace('/guest');
     } catch (e) {
-      setErrorKey(e instanceof ApiError && e.code === 'consent_required' ? 'guest.err.consent' : claimErrorKey(e));
+      setErrorKey(claimErrorKey(e));
     } finally {
       setBusy(false);
     }
@@ -41,10 +42,7 @@ export const GuestConsentScreen = () => {
         <Txt muted size={13}>{t('guest.consent.retention')}</Txt>
       </Card>
       <Card>
-        <Pressable testID="consent-check" accessibilityRole="checkbox" accessibilityState={{ checked: agreed }} onPress={() => setAgreed((a) => !a)} style={styles.row}>
-          <View style={[styles.box, agreed && styles.boxOn]}>{agreed ? <Txt color={colors.accentText} bold>✓</Txt> : null}</View>
-          <Txt style={{ flex: 1 }}>{t('guest.consent.check')}</Txt>
-        </Pressable>
+        <ConsentBox testID="consent-check" checked={agreed} onToggle={() => setAgreed((a) => !a)} label={t('guest.consent.check')} />
         <TextInput testID="consent-nickname" style={styles.input} value={nickname} onChangeText={setNickname} placeholder={t('guest.consent.nickname')} placeholderTextColor={colors.muted} maxLength={12} accessibilityLabel={t('guest.consent.nickname')} />
         {errorKey ? <Txt color={colors.danger} testID="consent-error">{t(errorKey)}</Txt> : null}
         <Button testID="consent-join" label={t('guest.consent.join')} onPress={() => void join()} disabled={!agreed || busy || !code} />
@@ -55,8 +53,5 @@ export const GuestConsentScreen = () => {
 };
 
 const styles = StyleSheet.create({
-  row: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: MIN_TOUCH },
-  box: { width: 28, height: 28, borderRadius: 8, borderWidth: 2, borderColor: colors.muted, alignItems: 'center', justifyContent: 'center' },
-  boxOn: { backgroundColor: colors.accent, borderColor: colors.accent },
   input: { minHeight: MIN_TOUCH, borderRadius: 12, borderWidth: 1.5, borderColor: colors.line, backgroundColor: colors.panel2, color: colors.text, fontSize: 16, paddingHorizontal: 12 },
 });

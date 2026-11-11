@@ -6,12 +6,13 @@ import { Button, Card, Screen, Txt } from '../../components/ui';
 import { t, type TKey } from '../../lib/i18n';
 import { colors } from '../../lib/theme';
 import { useSession } from '../../state/session';
-import { claimErrorKey, CodeEntry } from './ConnectScreen';
+import { claimErrorKey } from '../../lib/errors';
+import { CodeEntry } from './ConnectScreen';
 import { parseQr } from './qr';
 
 /** 카메라는 사용 시점(이 화면)에 권한을 요청한다. 거부되면 설정 열기와 코드 직접 입력으로 이어 간다. */
 export const ScanScreen = () => {
-  const { mode: modeParam } = useLocalSearchParams<{ mode?: string }>();
+  const { mode: modeParam, consent } = useLocalSearchParams<{ mode?: string; consent?: string }>();
   const mode: 'pair' | 'guest' = modeParam === 'guest' ? 'guest' : 'pair';
   const router = useRouter();
   const { api, savePairing } = useSession();
@@ -19,10 +20,12 @@ export const ScanScreen = () => {
   const [busy, setBusy] = useState(false);
   const [errorKey, setErrorKey] = useState<TKey | null>(null);
   const handled = useRef(false);
+  const lastBad = useRef(0);
 
   const proceed = async (code: string, kind: 'pair' | 'guest' | null) => {
     const k = kind ?? mode;
     if (k !== mode) {
+      lastBad.current = Date.now();
       setErrorKey(mode === 'pair' ? 'scan.err.wrongGuest' : 'scan.err.wrongPair');
       handled.current = false;
       return;
@@ -31,10 +34,16 @@ export const ScanScreen = () => {
       router.replace({ pathname: '/guest/consent', params: { code } });
       return;
     }
+    // 차주 연결은 연결 화면에서 위치정보 이용 동의를 받은 경우에만 보낸다.
+    if (consent !== '1') {
+      setErrorKey('connect.err.consentNeeded');
+      handled.current = false;
+      return;
+    }
     setBusy(true);
     setErrorKey(null);
     try {
-      await savePairing(await api.pairClaim(code));
+      await savePairing(await api.pairClaim(code, true));
       router.replace('/(tabs)');
     } catch (e) {
       setErrorKey(claimErrorKey(e));
@@ -46,8 +55,11 @@ export const ScanScreen = () => {
 
   const onScanned = (raw: string) => {
     if (handled.current) return;
+    // 카메라는 같은 QR을 초당 여러 번 알려 준다. 잘못된 QR은 1.5초에 한 번만 처리한다.
+    if (Date.now() - lastBad.current < 1500) return;
     const q = parseQr(raw);
     if (!q) {
+      lastBad.current = Date.now();
       setErrorKey('scan.err.unknownQr');
       return;
     }

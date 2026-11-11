@@ -7,17 +7,17 @@ import { colors } from '../../lib/theme';
 import { useSession } from '../../state/session';
 
 export const HomeScreen = () => {
-  const { api, pairing } = useSession();
+  const { api, pairing, dataVersion } = useSession();
   const vehicleId = pairing?.vehicleId ?? '';
   const national = useApiData(async () => {
     const [cov, reg] = await Promise.all([api.coverageSummary(vehicleId), api.regionsSummary(vehicleId)]);
     return { cov, reg };
-  }, [api, vehicleId]);
+  }, [api, vehicleId, dataVersion]);
   const reports = useApiData(async () => {
     const [daily, monthly] = await Promise.all([api.reportsDaily(vehicleId, kstDate()), api.reportsMonthly(vehicleId, kstMonth())]);
     return { daily, monthly };
-  }, [api, vehicleId]);
-  const trips = useApiData(() => api.trips(vehicleId, 5), [api, vehicleId]);
+  }, [api, vehicleId, dataVersion]);
+  const trips = useApiData(() => api.trips(vehicleId, 5), [api, vehicleId, dataVersion]);
 
   return (
     <Screen title={t('home.title')} subtitle={t('home.subtitle')}>

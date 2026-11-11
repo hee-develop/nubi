@@ -27,3 +27,8 @@ test('숫자 형식·KST 날짜', () => {
   expect(kstDate(Date.parse('2026-11-11T16:00:00Z'))).toBe('2026-11-12'); // UTC 16시 = KST 다음날 01시
   expect(kstMonth(Date.parse('2026-11-30T16:00:00Z'))).toBe('2026-12');
 });
+
+test('ja 동의 문구(연결·게스트)와 오류 문구가 채워져 있다', () => {
+  for (const k of ['connect.consent.title', 'connect.consent.body', 'connect.consent.check', 'guest.consent.retention', 'guest.consent.subtitle', 'guest.consent.nickname', 'guest.consent.body', 'guest.consent.check', 'connect.err.used', 'connect.err.alreadyPaired', 'connect.err.consent'] as const)
+    expect(ja[k]).toBeTruthy();
+});

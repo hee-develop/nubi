@@ -5,6 +5,7 @@ import { MapScreen } from '../features/map/MapScreen';
 import { ShareScreen } from '../features/share/ShareScreen';
 import * as wv from '../test/webview-mock';
 import { flush, makeApi, PAIRING, renderApp } from '../test/utils';
+import { cardFileName } from '../features/share/shareFile';
 
 describe('공유', () => {
   test('전국 카드: 만들기 → 미리보기 → 공유 시트', async () => {
@@ -91,6 +92,23 @@ describe('지도 탭', () => {
     await fireEvent.press(screen.getByTestId('state-retry'));
     expect(screen.getByTestId('map-loading')).toBeTruthy();
   });
+  test('서버 origin만 허용하고 밖으로 나가는 이동은 막는다', async () => {
+    await renderApp(<MapScreen />, { api: createApi({ mode: 'hybrid', baseUrl: 'http://10.0.2.2:8792/' }) });
+    expect(wv.last.props?.originWhitelist).toEqual(['http://10.0.2.2:8792']);
+    expect(wv.last.props?.onShouldStartLoadWithRequest?.({ url: 'http://10.0.2.2:8792/viewer?vehicleId=v' })).toBe(true);
+    expect(wv.last.props?.onShouldStartLoadWithRequest?.({ url: 'https://evil.example/' })).toBe(false);
+    expect(wv.last.props?.onShouldStartLoadWithRequest?.({ url: 'http://10.0.2.2:8792.evil.example/' })).toBe(false);
+  });
+  test('HTTP 오류는 불러오지 못했습니다, 연결 실패는 연결되지 않았습니다로 구분', async () => {
+    await renderApp(<MapScreen />, { api: createApi({ mode: 'hybrid', baseUrl: 'http://h' }) });
+    const { act } = jest.requireActual('@testing-library/react-native');
+    await act(async () => wv.last.props?.onHttpError?.());
+    expect(screen.getByTestId('map-error')).toBeTruthy();
+    expect(screen.getByText('불러오지 못했습니다')).toBeTruthy();
+    await fireEvent.press(screen.getByTestId('state-retry'));
+    await act(async () => wv.last.props?.onError?.());
+    expect(screen.getByTestId('map-offline')).toBeTruthy();
+  });
   test('mock 모드는 서버 지도 대신 안내(empty)', async () => {
     await renderApp(<MapScreen />);
     expect(screen.getByTestId('map-mock-empty')).toBeTruthy();
@@ -99,4 +117,9 @@ describe('지도 탭', () => {
     await renderApp(<MapScreen />, { pairing: null });
     expect(screen.getByTestId('state-empty')).toBeTruthy();
   });
+});
+
+test('공유 캐시 파일 이름에는 안전한 문자만', () => {
+  expect(cardFileName({ id: '../../etc/pass wd', url: '', imageUrl: '' }, 'png')).toBe('nubi-card-______etc_pass_wd.png');
+  expect(cardFileName({ id: 'abc-123_X', url: '', imageUrl: '' }, 'svg')).toBe('nubi-card-abc-123_X.svg');
 });

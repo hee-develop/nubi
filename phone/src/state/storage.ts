@@ -20,12 +20,14 @@ export const storage = {
       /* 메모리에는 남았다 */
     }
   },
-  async remove(key: string): Promise<void> {
+  /** 지우지 못했으면 false. 메모리 값은 항상 지운다(호출자가 저장소 실패를 사용자에게 알릴 수 있게 한다). */
+  async remove(key: string): Promise<boolean> {
     memory.delete(key);
     try {
       await SecureStore.deleteItemAsync(key);
+      return true;
     } catch {
-      /* 무시 */
+      return false;
     }
   },
 };

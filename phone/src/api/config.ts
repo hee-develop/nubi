@@ -15,3 +15,6 @@ export const resolveApiConfig = (env: Record<string, string | undefined> = proce
   const mode: ApiMode = raw === 'mock' || raw === 'hybrid' || raw === 'live' ? raw : baseUrl ? 'hybrid' : 'mock';
   return { mode: baseUrl ? mode : 'mock', baseUrl };
 };
+
+/** live 모드인데 TLS가 아닌 http 주소면 true(경고 대상). */
+export const isInsecureLive = (cfg: ApiConfig) => cfg.mode === 'live' && cfg.baseUrl.startsWith('http://');

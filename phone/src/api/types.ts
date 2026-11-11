@@ -21,13 +21,23 @@ export type RegionsList = Omit<RegionsListRaw, 'items'> & { items: RegionItem[] 
 export type TripsList = InferResponseType<Client['trips']['$get'], 200>;
 export type TripSummary = TripsList['trips'][number];
 
-// ---- 계약 타입 (T2, 아직 서버에 없음) ----
+// ---- T2 실제 응답 형태 (docs/specs/05b-server-ext.md, server/src/routes/*). T2를 합친 뒤에는 RPC 추론으로 바꾼다. ----
 export type PairClaimResult = { accountId: string; token: string; vehicleId: string };
 export type GuestClaimResult = { sessionId: string; token: string };
 export type GuestSessions = { active: number };
+export type GuestEndResult = { ok: true; endedAt: string; alreadyEnded: boolean };
 
-/** 계약서에 shape가 없어 이 앱이 가정한 형태(가정). T2 구현과 다르면 여기만 고친다. */
-export type MeSummary = { regionsColored: number; regionsTotal: number; newKm: number; tripCount: number };
+export type RegionSummaryMe = { total: number; colored: number; byLevel: Record<'1' | '2' | '3', number>; depop: { total: number; colored: number } };
+export type CoverageMe = { nationalPercent: number; drivenKm: number; totalKm: number; roadsStarted: number; roadsCompleted: number };
+/** GET /me/summary. 차주는 vehicleId, 게스트는 activeSessionId(세션이 끝났으면 null). 도로·시군구 DB가 없으면 regions·coverage가 null. */
+export type MeSummary = {
+  role: 'owner' | 'guest';
+  vehicleId?: string;
+  activeSessionId?: string | null;
+  regions: RegionSummaryMe | null;
+  coverage: CoverageMe | null;
+  snapshotMonth: string | null;
+};
 
 export type ShareKind = 'national' | 'trip' | 'road';
 export type ShareCardRequest = { vehicleId: string; kind: ShareKind; tripIds?: string[]; roadKey?: string };
@@ -35,26 +45,29 @@ export type ShareCard = { id: string; url: string; imageUrl: string };
 
 export type VehicleSettings = {
   recordingPaused: boolean;
-  /** 내 지역 시군구 코드. 지정 안 함이면 null. */
+  /** 내 지역 시군구 코드(5자리). 지정 안 함이면 null. */
   homeRegion: string | null;
   statsOptIn: boolean;
   drivingMap: boolean;
+  hideHomeInCards: boolean;
+  consentWithdrawnAt: string | null;
 };
+/** PUT은 부분 갱신이다. 읽기 전용 필드는 보내지 않는다. */
+export type SettingsPatch = Partial<Pick<VehicleSettings, 'recordingPaused' | 'homeRegion' | 'statsOptIn' | 'drivingMap' | 'hideHomeInCards'>>;
+export type DeleteDataResult = { ok: true; deleted: { trips: number; points: number; ways: number; regions: number } };
 
-export type DailyReport = {
-  date: string;
-  newKm: number;
-  newRegions: { code: string; displayName: string }[];
+type ReportRegion = { code: string; displayName: string; sidoName: string };
+type ReportBase = {
   tripCount: number;
   distanceKm: number;
-};
-export type MonthlyReport = {
-  month: string;
   newKm: number;
-  newRegions: { code: string; displayName: string }[];
-  tripCount: number;
-  distanceKm: number;
+  newWays: number;
+  revivedKm: number;
+  newRegions: ReportRegion[];
+  newStays: ReportRegion[];
 };
+export type DailyReport = ReportBase & { date: string };
+export type MonthlyReport = ReportBase & { month: string; daysDriven: number };
 
 /** 앱이 쓰는 오류 분류. offline = 네트워크에 못 닿음, http = 서버가 오류 코드를 줌. */
 export class ApiError extends Error {
@@ -85,14 +98,16 @@ export interface NubiApi {
   // 새 API
   reportsDaily(vehicleId: string, date: string): Promise<DailyReport>;
   reportsMonthly(vehicleId: string, month: string): Promise<MonthlyReport>;
-  pairClaim(code: string): Promise<PairClaimResult>;
+  /** consent는 폰에서 받은 차주 위치정보 이용 동의 값이다(true만 보낸다). */
+  pairClaim(code: string, consent: boolean): Promise<PairClaimResult>;
   pairDelete(token: string): Promise<void>;
   guestClaim(input: { code: string; consent: true; nickname?: string }): Promise<GuestClaimResult>;
-  guestEnd(sessionId: string, token: string): Promise<void>;
+  guestEnd(sessionId: string, token: string): Promise<GuestEndResult>;
+  guestDeleteData(sessionId: string, token: string): Promise<void>;
   guestSessions(vehicleId: string): Promise<GuestSessions>;
   meSummary(token: string): Promise<MeSummary>;
   shareCreate(req: ShareCardRequest): Promise<ShareCard>;
   getSettings(vehicleId: string): Promise<VehicleSettings>;
-  putSettings(vehicleId: string, s: VehicleSettings): Promise<VehicleSettings>;
-  deleteData(vehicleId: string): Promise<void>;
+  putSettings(vehicleId: string, patch: SettingsPatch): Promise<VehicleSettings>;
+  deleteData(vehicleId: string): Promise<DeleteDataResult>;
 }

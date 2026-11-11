@@ -34,10 +34,10 @@ const Tile = ({ r }: { r: RegionItem }) => {
 };
 
 export const DexScreen = () => {
-  const { api, pairing } = useSession();
+  const { api, pairing, dataVersion } = useSession();
   const vehicleId = pairing?.vehicleId ?? '';
   const [tab, setTab] = useState<'all' | 'depop'>('all');
-  const list = useApiData(() => api.regionsList(vehicleId), [api, vehicleId]);
+  const list = useApiData(() => api.regionsList(vehicleId), [api, vehicleId, dataVersion]);
   const data = list.data;
   const shown = useMemo(() => {
     const items = data?.items ?? [];

@@ -3,14 +3,24 @@ import { ApiError } from './types';
 export type FetchLike = typeof fetch;
 
 /** 네트워크 실패는 offline, HTTP 오류는 http로 분류해 던진다. 화면은 이 분류로 상태(offline/error)를 고른다. */
+export const REQUEST_TIMEOUT_MS = 12_000;
+
 export const makeApiFetch =
-  (baseFetch: FetchLike = fetch): FetchLike =>
+  (baseFetch: FetchLike = fetch, timeoutMs: number = REQUEST_TIMEOUT_MS): FetchLike =>
   async (input, init) => {
     let res: Response;
+    const ctrl = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      ctrl.abort();
+    }, timeoutMs);
     try {
-      res = await baseFetch(input, init);
+      res = await baseFetch(input, { ...init, signal: ctrl.signal });
     } catch {
-      throw new ApiError('offline', 0, 'network');
+      throw new ApiError('offline', 0, timedOut ? 'timeout' : 'network');
+    } finally {
+      clearTimeout(timer);
     }
     if (!res.ok) {
       let code = `http_${res.status}`;

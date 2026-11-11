@@ -7,6 +7,9 @@ import type { ShareCard } from '../../api';
 export const MOCK_IMAGE = require('../../../assets/icon.png') as number;
 export const isMockCard = (c: ShareCard) => c.imageUrl.startsWith('mock:');
 
+/** 캐시 파일 이름은 영문·숫자·_·-만 쓴다(서버가 준 id를 경로에 그대로 넣지 않는다). */
+export const cardFileName = (c: ShareCard, ext: string) => `nubi-card-${c.id.replace(/[^\w-]/g, '_')}.${ext}`;
+
 export const cardImageSource = (c: ShareCard) => (isMockCard(c) ? MOCK_IMAGE : { uri: c.imageUrl });
 
 /** 카드 이미지를 캐시에 내려받아 로컬 파일 URI로 만든다. 공유 시트는 로컬 파일이 필요하다. */
@@ -17,7 +20,7 @@ export const prepareShareFile = async (c: ShareCard): Promise<string> => {
     return a.localUri ?? a.uri;
   }
   const ext = c.imageUrl.split('?')[0]!.endsWith('.svg') ? 'svg' : 'png';
-  const f = await File.downloadFileAsync(c.imageUrl, new File(Paths.cache, `nubi-card-${c.id}.${ext}`), { idempotent: true });
+  const f = await File.downloadFileAsync(c.imageUrl, new File(Paths.cache, cardFileName(c, ext)), { idempotent: true });
   return f.uri;
 };
 
