@@ -1,6 +1,6 @@
 # 05c. 폰 앱 (T3, 2026-11-11 야간)
 
-계약서 `docs/specs/05-night-plan.md`의 T3 트랙. 폰은 차량 중심 앱의 보조다: 차에서 할 수 없는 입력(연결·동의·설정)과 열람·공유를 맡는다. 코드는 `phone/`에만 있다.
+계약서 `docs/specs/05-night-plan.md`의 T3 트랙. 응답 형태·오류 코드는 T2 실제 구현(`docs/specs/05b-server-ext.md`, `server/src/routes/*`)에 맞췄다(계약서보다 우선). 폰은 차량 중심 앱의 보조다: 차에서 할 수 없는 입력(연결·동의·설정)과 열람·공유를 맡는다. 코드는 `phone/`에만 있다.
 
 ## 1. 화면과 상태
 
@@ -41,20 +41,41 @@
 - 에뮬레이터에서 호스트 서버는 `http://10.0.2.2:<포트>`(T3는 8792). Android `usesCleartextTraffic`는 `expo-build-properties`로 켠다(개발용. 제출 빌드에서는 끌 것).
 - 목 코드: `000000` = 만료, `111111` = 없는 코드, 그 밖의 6자리 = 성공.
 
-## 3. 목으로 둔 API (서버에 아직 없음)
+## 3. 목으로 둔 API (hybrid에서 목, T2 합친 뒤 live)
 
-`/reports/daily`, `/reports/monthly`, `/pair/claim`, `DELETE /pair`, `/guest/claim`, `/guest/:id/end`, `/guest/sessions`, `/me/summary`, `/share/cards`, `GET/PUT /vehicles/:id/settings`, `DELETE /vehicles/:id/data`. 또 `/regions/list`의 `faded`(없으면 바램 아님으로 처리), `/coverage/roads?filter=almost`(서버가 모르는 쿼리라 무시되므로 hybrid에서는 상단 카드에 전체 상위가 나온다 — T2 병합 시 해소).
+`/reports/daily`·`monthly`, `/pair/claim`, `DELETE /pair`, `/guest/claim`, `/guest/:id/end`, `DELETE /guest/:id/data`, `/guest/sessions`, `/me/summary`, `/share/cards`, `GET/PUT /vehicles/:id/settings`, `DELETE /vehicles/:id/data`. 또 `/regions/list`의 `faded`(없으면 바램 아님), `/coverage/roads?filter=almost`(서버가 모르면 무시).
 
-## 4. 가정과 한계
+## 4. T2와 맞춘 요청·응답·오류 코드
 
-- `GET /me/summary` 응답 형태가 계약서에 없어 `{ regionsColored, regionsTotal, newKm, tripCount }`로 가정(`MeSummary`). 다르면 타입과 `GuestSessionScreen`만 고친다.
-- 리포트 응답도 `{ date|month, newKm, newRegions[{code,displayName}], tripCount, distanceKm }`로 가정.
-- 공유 이미지: 목 카드는 앱 아이콘 이미지를 미리보기·공유에 쓴다. 실서버 카드는 `imageUrl`(png 또는 svg)을 캐시에 받아 공유한다. svg는 Android `Image`가 못 그릴 수 있어 서버가 png를 주는 쪽이 맞다.
-- 지도는 서버 `/viewer` 웹 페이지(WebView)라 차량 지도(T1)와 별개다. 신규 지도 라이브러리는 넣지 않았다.
-- 내 지역은 시군구 코드를 그대로 표시(이름 조회 없음).
-- ja 문자열은 핵심 화면 위주 부분 번역, 나머지는 ko로 대체. en 없음. 푸시 알림·구독(2단계)·트립 상세·'내 주행 아님'은 이번 범위 밖.
-- Expo Go로 실행 확인(dev client 미빌드). 네이티브 설정(카메라 권한 문구, cleartext)은 prebuild·dev client에서만 완전히 반영된다.
+| 호출 | 폰이 보내는 것 | 폰이 읽는 것 / 오류 코드 → 문구 |
+|---|---|---|
+| `POST /pair/claim` | `{ code, consent: true }`(연결 화면에서 위치정보 동의 체크 후) | `{ accountId, token, vehicleId }` / 400 `consent_required`·`invalid_body`, 404 `code_not_found`, 410 `code_expired`·`code_used`, 409 `already_paired`, 429 `too_many_requests` |
+| `DELETE /pair` | Bearer 차주 토큰 | `{ ok, vehicleId }` |
+| `POST /guest/claim` | `{ code, consent: true, nickname? }`(Bearer 없음) | `{ sessionId, token }` / 위 코드 + 409 `guest_limit`·`already_in_session`·`own_vehicle` |
+| `POST /guest/:id/end` | Bearer 게스트 토큰 | `{ ok, endedAt, alreadyEnded }`(재호출도 200) / 404·401이면 서버에 세션이 없으니 로컬 세션을 지운다 |
+| `DELETE /guest/:id/data` | Bearer 게스트 토큰 | `{ ok }` |
+| `GET /me/summary` | Bearer 게스트 토큰 | `{ role, vehicleId? \| activeSessionId?, regions: {total,colored,byLevel,depop:{total,colored}} \| null, coverage: {nationalPercent,drivenKm,totalKm,roadsStarted,roadsCompleted} \| null, snapshotMonth }` (null·누락은 0으로 표시) |
+| `GET /reports/daily\|monthly` | `vehicleId`, `date`/`month`(KST) | `{ tripCount, distanceKm, newKm, newWays, revivedKm, newRegions[], newStays[], (monthly) daysDriven }` |
+| `GET/PUT /vehicles/:id/settings` | PUT은 **부분 갱신**(바꾼 필드만) | `{ recordingPaused, homeRegion, statsOptIn, drivingMap, hideHomeInCards, consentWithdrawnAt }` / 400 `invalid_region` |
+| `DELETE /vehicles/:id/data` | - | `{ ok, deleted: {trips,points,ways,regions} }` (기록 멈춤·동의 철회 표시가 남는다) |
+| `POST /share/cards` | `{ vehicleId, kind, tripIds? \| roadKey? }` | `{ id, url, imageUrl }` / 409 `too_short`·`not_completed`, 429 |
+
+- 토큰: 차주 토큰을 SecureStore(`nubi.pairing`)에 두고 **모든 차량 API(Hono RPC 포함)에 `Authorization: Bearer`를 붙인다**(`NUBI_AUTH=optional|required`). claim 두 호출은 토큰 없이 보낸다. 게스트 호출은 게스트 토큰을 명시한다.
+- 요청 타임아웃 12초 → `ApiError('offline', 0, 'timeout')`(화면에서는 offline 상태, 연결·게스트 claim은 '응답이 늦습니다').
+- 게스트 세션: 내리기에 성공하면 로컬 세션을 `ended`로 두고 토큰을 남겨 기록 열람·`내 기록 삭제`(2단계 확인 후 `DELETE /guest/:id/data`)를 계속 쓸 수 있다. offline이면 '서버에는 아직 탑승 중일 수 있음' 안내와 '이 폰에서만 끝내기'를 보인다.
+- 차주 위치정보 이용 동의: 연결 화면에 동의 문구·체크. 체크 전에는 QR 스캔·코드 연결이 모두 비활성이고, QR 스캔은 `consent=1` 파라미터 없이는 claim하지 않는다.
+- 목 코드: `000000` 만료, `111111` 없음, `222222` 사용됨, `333333` 이미 연결(차주), `444444` 시도 제한, `555555` 게스트 가득, `666666` 이미 세션 중, `777777` 내 차. 그 밖의 6자리는 성공.
+
+## 5. 가정과 한계
+
+- **`/viewer`는 production(`NODE_ENV=production`)에서 라우트가 없다**(`NUBI_VIEWER=1`이 아니면). 지도 탭은 시연 서버에서만 열린다. 아침에 사용자가 결정할 사항이라 그대로 둔다.
+- `NUBI_AUTH=required`에서 `/viewer`는 토큰을 못 실어 열려도 그 안의 API 호출이 401이다(T2 한계). WebView는 서버 origin 밖 이동을 막는다(`originWhitelist`·`onShouldStartLoadWithRequest`).
+- Android http(cleartext): `app.config.ts`가 `NUBI_ALLOW_CLEARTEXT=1` 또는 EAS `development` 프로필일 때만 켠다(preview·production은 항상 끔). live 모드에서 http 주소를 쓰면 더보기 탭에 경고와 콘솔 경고가 나온다. Expo Go에서는 이 설정과 무관하게 동작한다.
+- 공유 이미지: 목 카드는 앱 아이콘을 쓴다. 서버가 `.svg`를 주면 Android `Image`가 못 그릴 수 있어 PNG(변환기 설치)가 필요하다. 공유 캐시 파일명은 `[\w-]`만 쓴다.
+- 내 지역은 시군구 코드를 그대로 표시(이름 조회 없음). 푸시·구독·트립 상세·'내 주행 아님'·지역 소개 카드(`/regions/:code/intro`)는 범위 밖.
+- ja 문자열은 핵심 화면·동의 문구·오류 문구 위주 부분 번역, 나머지는 ko로 대체. en 없음. RN Android에는 `keep-all`이 없어 ko 줄바꿈이 단어 중간에서 끊길 수 있다.
+- 에뮬레이터 확인은 첫 작업 때 Expo Go(mock)로 연결·홈·도감·도로·더보기·공유 화면까지만 했다. 5556을 chagok 세션과 공유해 이번 수정은 테스트·타입·린트로만 검증했다.
 
 ## 5. 검증
 
-`pnpm typecheck`, `pnpm phone:test`(Jest: API 목·live 경로·QR 파싱·화면별 상태·i18n), `pnpm --filter @nubi/phone lint --max-warnings 0`. 에뮬레이터 `emulator-5556` + Expo Go 실행 스크린샷은 작업 보고 참조.
+`pnpm typecheck`, `pnpm phone:test`(Jest: API 목·live 경로·토큰 헤더·타임아웃·QR 파싱·화면별 상태·i18n·라우팅 가드), `pnpm --filter @nubi/phone lint --max-warnings 0`. 에뮬레이터 `emulator-5556` + Expo Go 실행 스크린샷은 작업 보고 참조.
