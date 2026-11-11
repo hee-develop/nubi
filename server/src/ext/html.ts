@@ -45,9 +45,9 @@ export const page = (o: PageOpts): string => `<!doctype html>
  * HTML 응답. 토큰·코드가 URL에 있는 페이지라 캐시·Referer 유출을 막는다(no-store, no-referrer).
  * CSP: 스크립트는 허용하지 않는다(폼 POST로만 동작). 이미지는 같은 출처와 data: 만.
  */
-export const htmlResponse = (c: Context, html: string, status: 200 | 400 | 401 | 403 | 404 | 409 | 410 | 429 | 503 = 200) =>
-  c.html(html, status, {
-    'cache-control': 'no-store',
+export const htmlResponse = (c: Context, html: string, status: 200 | 303 | 400 | 401 | 403 | 404 | 409 | 410 | 429 | 503 = 200, cache = 'no-store') =>
+  c.html(html, status as 200, {
+    'cache-control': cache,
     'referrer-policy': 'no-referrer',
     'x-content-type-options': 'nosniff',
     'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",

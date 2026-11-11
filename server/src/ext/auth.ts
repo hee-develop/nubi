@@ -116,6 +116,17 @@ export class CodeGuard {
   }
 }
 
+const guards = new WeakMap<object, CodeGuard>();
+/** 연결·게스트 코드 시도 제한은 JSON API와 웹 페이지가 한 카운터를 나눠 쓴다(페이지로 코드 유효성을 캐내지 못하게). */
+export const codeGuardOf = (deps: ExtDeps): CodeGuard => {
+  let g = guards.get(deps);
+  if (!g) {
+    g = new CodeGuard(deps.now, deps.options.rateLimit);
+    guards.set(deps, g);
+  }
+  return g;
+};
+
 /**
  * 6자리 숫자 코드를 새로 낸다(같은 종류·차량의 안 쓴 이전 코드는 지운다). 만료·사용된 코드는 1시간 남겼다가 지운다.
  * 코드 공간이 작아서(100만) 충돌하면 다시 뽑는다.

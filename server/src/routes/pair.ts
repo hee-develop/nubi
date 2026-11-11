@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
-import { authenticate, checkCode, clientKey, CODE_RE, CodeGuard, issueCode, issueToken, publicBase, RateLimiter } from '../ext/auth.js';
+import { authenticate, checkCode, clientKey, CODE_RE, codeGuardOf, issueCode, issueToken, publicBase, RateLimiter } from '../ext/auth.js';
 import { iso, parseBody, type ExtDeps } from '../ext/util.js';
 import { canonicalVehicleId } from '../matching/pipeline.js';
 
@@ -54,7 +54,7 @@ export const unpair = (deps: ExtDeps, vehicleId: string, nowMs: number): boolean
 /** 차주 연결(plan 9-1): 차가 P에서 6자리 코드(5분)를 내고, 폰이 코드로 계정을 만들어 연결한다. 차 1대에 차주 1명. */
 export const pairRoutes = (deps: ExtDeps) => {
   const { db, now } = deps;
-  const guard = new CodeGuard(now, deps.options.rateLimit);
+  const guard = codeGuardOf(deps);
   const issueLimit = new RateLimiter(deps.options.rateLimit?.max ? deps.options.rateLimit.max * 3 : 30, deps.options.rateLimit?.windowMs ?? 5 * 60_000, now);
   return new Hono()
     .use('/pair/*', bodyLimit({ maxSize: 4 * 1024, onError: (c) => c.json({ error: 'payload_too_large' }, 413) }))

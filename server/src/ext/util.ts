@@ -30,6 +30,8 @@ export type ExtOptions = {
   fetchFn?: typeof fetch;
   /** `POST /debug/age` 등록 여부. 생략하면 NODE_ENV가 production이 아닐 때만 등록한다. */
   debug?: boolean;
+  /** 공유 페이지 `/s/:id`의 '누비 설치' 링크(`NUBI_INSTALL_URL`). 없으면 링크를 내지 않는다. */
+  installUrl?: string;
   /** 공유 카드 PNG 변환에 쓸 글꼴 파일(`NUBI_CARD_FONT`). 생략하면 시스템 글꼴. */
   fontFile?: string;
   /** 요청 횟수 제한 조정(테스트용). */

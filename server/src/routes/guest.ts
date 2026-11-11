@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
-import { authenticate, bearerOf, checkCode, clientKey, CODE_RE, CodeGuard, issueCode, issueToken, publicBase, RateLimiter, type TokenInfo } from '../ext/auth.js';
+import { authenticate, bearerOf, checkCode, clientKey, CODE_RE, codeGuardOf, issueCode, issueToken, publicBase, RateLimiter, type CodeGuard, type TokenInfo } from '../ext/auth.js';
 import { activeCount, endSession, expireIdle, MAX_GUESTS, onTripStarted } from '../ext/sessions.js';
 import { guestCoverage, guestRegionLevels, ownerCoverage, ownerRegionLevels, regionItems, regionSummary, type RegionLevels } from '../ext/stats.js';
 import { iso, parseBody, readJson, type ExtDeps } from '../ext/util.js';
@@ -93,7 +93,7 @@ const canEnd = (db: ExtDeps['db'], info: TokenInfo | null, session: { vehicle_id
 /** 게스트 탑승(plan 9장): 코드 발급 → 동의 → 세션 → 인정 → 종료, 차주는 인원만 본다. */
 export const guestRoutes = (deps: ExtDeps) => {
   const { db, now } = deps;
-  const guard = new CodeGuard(now, deps.options.rateLimit);
+  const guard = codeGuardOf(deps);
   const issueLimit = new RateLimiter(deps.options.rateLimit?.max ? deps.options.rateLimit.max * 3 : 30, deps.options.rateLimit?.windowMs ?? 5 * 60_000, now);
 
   /** 현재 Bearer가 있으면 주체를 찾는다(잘못된 토큰이면 'invalid'). */
