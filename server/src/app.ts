@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { openDb, type Db } from './db/index.js';
+import { createLiveMatcher } from './matching/live.js';
 import { createMatchingWorker, type MatchingWorker } from './matching/worker.js';
 import type { TraceDeps } from './matching/valhalla.js';
 import { attachRoads, resolveRoadsPath, VEHICLE_SET_SQL, type Roads } from './roads/index.js';
@@ -7,6 +8,7 @@ import { attachRegions, resolveRegionsPath, type Regions } from './regions/index
 import { inTx, mergeRegionAliases, resolvePending, runBatch } from './regions/judge.js';
 import { canonicalVehicleId } from './matching/pipeline.js';
 import { coverageRoutes } from './routes/coverage.js';
+import { mapRoutes } from './routes/map.js';
 import { regionsRoutes } from './routes/regions.js';
 import { tripsRoutes } from './routes/trips.js';
 import { resolveVehicleHmacKey, vehiclesRoutes } from './routes/vehicles.js';
@@ -26,6 +28,10 @@ export type AppOptions = {
   retryDelayMs?: number;
   /** 현재 시각(ms). 시군구 판정·매칭 재시도의 시계다. 생략하면 Date.now(). 테스트가 고정·전진시킨다. */
   now?: () => number;
+  /** 실시간 잠정 매칭을 켠다(기본 true). 테스트 도우미는 기존 테스트의 Valhalla 호출 수가 어긋나지 않게 기본 false로 둔다. */
+  liveMatching?: boolean;
+  /** 실시간 잠정 매칭 디바운스 간격(ms, 기본 30초). 생략하면 `NUBI_LIVE_INTERVAL_MS`. */
+  liveIntervalMs?: number;
   /** 시작 때 끝나지 않은 매칭 작업을 이어서 처리한다(서버 프로세스에서만 켠다). */
   resumeMatching?: boolean;
 };
@@ -51,6 +57,19 @@ export const createApp = (db: Db = openDb(), options: AppOptions = {}) => {
     retryDelayMs: options.retryDelayMs,
     now,
   });
+  const liveEnv = Number(process.env.NUBI_LIVE_INTERVAL_MS);
+  const live = createLiveMatcher({
+    db,
+    roads: () => roads,
+    trace: options.valhalla,
+    intervalMs: options.liveIntervalMs ?? (Number.isFinite(liveEnv) && liveEnv > 0 ? liveEnv : undefined),
+    now,
+  });
+  try {
+    live.purge();
+  } catch (e) {
+    console.warn(`잠정 매칭 정리 실패: ${e instanceof Error ? e.message : String(e)}`);
+  }
   /** 새 트립 Start·점 업로드 때 지난 트립의 방문·숙박을 판정한다. 판정 오류가 트립 업로드를 막지 않게 삼킨다. */
   const tick = (vehicleId: string, onlyIfPending: boolean) => {
     if (!regions) return;
@@ -80,6 +99,11 @@ export const createApp = (db: Db = openDb(), options: AppOptions = {}) => {
     setInterval(
       () => {
         try {
+          live.purge();
+        } catch {
+          // 정리는 다음 주기에 다시 한다
+        }
+        try {
           regionsBatch();
         } catch (e) {
           console.warn(`시군구 배치 실패: ${e instanceof Error ? e.message : String(e)}`);
@@ -90,7 +114,16 @@ export const createApp = (db: Db = openDb(), options: AppOptions = {}) => {
   }
   const app = new Hono()
     .get('/health', (c) => c.json({ ok: true as const }))
-    .route('/trips', tripsRoutes(db, worker.enqueue, { onStarted: (v) => tick(v, false), onPoints: (v) => tick(v, true) }))
+    .route(
+      '/trips',
+      tripsRoutes(db, worker.enqueue, {
+        onStarted: (v) => tick(v, false),
+        onPoints: (v, t) => {
+          tick(v, true);
+          if (options.liveMatching !== false) live.schedule(t);
+        },
+      }),
+    )
     .route(
       '/regions',
       regionsRoutes(db, () => regions),
@@ -99,9 +132,13 @@ export const createApp = (db: Db = openDb(), options: AppOptions = {}) => {
     .route(
       '/',
       coverageRoutes(db, () => roads),
+    )
+    .route(
+      '/',
+      mapRoutes(db, () => roads, () => regions, live, now),
     );
   if (options.viewer ?? (process.env.NUBI_VIEWER === '1' || process.env.NODE_ENV !== 'production')) app.route('/viewer', viewerRoutes());
-  return Object.assign(app, { matching: worker, regionsBatch });
+  return Object.assign(app, { matching: worker, live, regionsBatch });
 };
 
 export type AppType = ReturnType<typeof createApp>;

@@ -2,6 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { initMapSchema } from './schema-map.js';
 import { LEGACY_LOCAL_ID_INDEX, LOCAL_ID_INDEX, SCHEMA } from './schema.js';
 
 export type Db = DatabaseSync;
@@ -15,6 +16,7 @@ export const openDb = (path: string = process.env.NUBI_DB ?? defaultPath): Db =>
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA foreign_keys = ON');
   db.exec(SCHEMA);
+  initMapSchema(db);
   const columns = db.prepare('PRAGMA table_info(trips)').all() as { name: string }[];
   if (!columns.some((c) => c.name === 'local_id')) db.exec('ALTER TABLE trips ADD COLUMN local_id TEXT');
   // local_id 단독 UNIQUE였던 기존 DB는 복합 UNIQUE로 옮긴다(복합이 더 느슨하므로 기존 행은 충돌하지 않는다).

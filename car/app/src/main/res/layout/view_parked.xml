@@ -31,6 +31,16 @@
             android:textSize="@dimen/text_logo"
             android:textStyle="bold" />
 
+        <!-- 상태 문구(기록 중·종료됨 등)는 헤더의 상태 칩 옆에 둔다(제목의 '지금' 줄을 비워 시군구 이름이 한눈에 보이게) -->
+        <TextView
+            android:id="@+id/state_text"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="24dp"
+            android:textColor="@color/accent"
+            android:textSize="@dimen/text_sub"
+            android:textStyle="bold" />
+
         <TextView
             android:id="@+id/chip"
             android:layout_width="wrap_content"
@@ -56,6 +66,151 @@
         android:paddingEnd="@dimen/page_pad"
         android:paddingBottom="@dimen/page_pad">
 
+        <!-- 지도 영역(정차 지도 켬): 지도 + 버튼 오버레이. 주행 규제(DO)이면 버튼은 숨기고 지도는 만지지 않는다 -->
+        <FrameLayout
+            android:id="@+id/parked_map_area"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="3"
+            android:background="@drawable/bg_card"
+            android:visibility="gone">
+
+            <com.nubi.car.map.NubiMapView
+                android:id="@+id/map_parked"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:importantForAccessibility="yes" />
+
+            <LinearLayout
+                android:id="@+id/map_layer_row"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_margin="20dp"
+                android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/map_btn_roads"
+                android:layout_width="wrap_content"
+                android:layout_height="96dp"
+                android:minWidth="120dp"
+                android:background="@drawable/bg_map_btn"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:paddingStart="28dp"
+                android:paddingEnd="28dp"
+                android:text="@string/map_roads"
+                android:textColor="@color/text"
+                android:textSize="36sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/map_btn_regions"
+                android:layout_width="wrap_content"
+                android:layout_height="96dp"
+                android:minWidth="120dp"
+                android:background="@drawable/bg_map_btn"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:paddingStart="28dp"
+                android:paddingEnd="28dp"
+                android:text="@string/map_regions"
+                android:textColor="@color/text"
+                android:textSize="36sp"
+                android:textStyle="bold"
+                android:layout_marginStart="12dp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/map_control_col"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="end|center_vertical"
+                android:layout_marginStart="20dp"
+                android:layout_marginTop="20dp"
+                android:layout_marginEnd="24dp"
+                android:layout_marginBottom="20dp"
+                android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/map_btn_zoom_in"
+                android:layout_width="wrap_content"
+                android:layout_height="96dp"
+                android:minWidth="120dp"
+                android:background="@drawable/bg_map_btn"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:paddingStart="28dp"
+                android:paddingEnd="28dp"
+                android:text="@string/map_zoom_in"
+                android:textColor="@color/text"
+                android:textSize="36sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/map_btn_zoom_out"
+                android:layout_width="wrap_content"
+                android:layout_height="96dp"
+                android:minWidth="120dp"
+                android:background="@drawable/bg_map_btn"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:paddingStart="28dp"
+                android:paddingEnd="28dp"
+                android:text="@string/map_zoom_out"
+                android:textColor="@color/text"
+                android:textSize="36sp"
+                android:textStyle="bold"
+                android:layout_marginTop="12dp" />
+
+            <TextView
+                android:id="@+id/map_btn_me"
+                android:layout_width="wrap_content"
+                android:layout_height="96dp"
+                android:minWidth="120dp"
+                android:background="@drawable/bg_map_btn"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:paddingStart="28dp"
+                android:paddingEnd="28dp"
+                android:text="@string/map_me"
+                android:textColor="@color/text"
+                android:textSize="36sp"
+                android:textStyle="bold"
+                android:layout_marginTop="12dp" />
+
+            <TextView
+                android:id="@+id/map_btn_national"
+                android:layout_width="wrap_content"
+                android:layout_height="96dp"
+                android:minWidth="120dp"
+                android:background="@drawable/bg_map_btn"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:paddingStart="28dp"
+                android:paddingEnd="28dp"
+                android:text="@string/map_national"
+                android:textColor="@color/text"
+                android:textSize="36sp"
+                android:textStyle="bold"
+                android:layout_marginTop="12dp" />
+            </LinearLayout>
+        </FrameLayout>
+
+        <!-- 오른쪽 패널: 기존 03 요소(왼쪽 열 + 이웃 카드). 지도를 끄면 패널이 전체 너비를 쓰고 가로(03 원형)로 돌아간다 -->
+        <LinearLayout
+            android:id="@+id/panel"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_marginStart="@dimen/column_gap"
+            android:layout_weight="2"
+            android:orientation="vertical">
+
         <!-- 왼쪽 열 -->
         <LinearLayout
             android:id="@+id/left_column"
@@ -76,15 +231,6 @@
                     android:text="@string/now_label"
                     android:textColor="@color/muted"
                     android:textSize="@dimen/text_sub" />
-
-                <TextView
-                    android:id="@+id/state_text"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="20dp"
-                    android:textColor="@color/accent"
-                    android:textSize="@dimen/text_sub"
-                    android:textStyle="bold" />
             </LinearLayout>
 
             <TextView
@@ -128,6 +274,7 @@
             </LinearLayout>
 
             <LinearLayout
+                android:id="@+id/lines_block"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="36dp"
@@ -312,6 +459,7 @@
                 android:padding="28dp">
 
                 <ImageView
+                    android:id="@+id/guest_qr_image"
                     android:layout_width="@dimen/qr_size"
                     android:layout_height="@dimen/qr_size"
                     android:contentDescription="@string/guest_qr_desc"
@@ -461,6 +609,8 @@
                         android:layout_marginTop="8dp"
                         android:text="@string/poi_sight_title"
                         android:textColor="@color/text"
+                        android:maxLines="2"
+                        android:ellipsize="end"
                         android:textSize="@dimen/text_poi"
                         android:textStyle="bold" />
 
@@ -514,6 +664,8 @@
                         android:layout_marginTop="8dp"
                         android:text="@string/poi_festival_title"
                         android:textColor="@color/text"
+                        android:maxLines="2"
+                        android:ellipsize="end"
                         android:textSize="@dimen/text_poi"
                         android:textStyle="bold" />
 
@@ -560,6 +712,7 @@
                 android:layout_height="wrap_content"
                 android:textColor="@color/accent"
                 android:textSize="@dimen/text_sub" />
+        </LinearLayout>
         </LinearLayout>
     </LinearLayout>
 </LinearLayout>

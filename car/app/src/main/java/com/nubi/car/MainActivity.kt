@@ -18,6 +18,14 @@ import android.util.Log
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.nubi.car.map.HoldLast
+import com.nubi.car.map.MapMode
+import com.nubi.car.map.MapScreen
+import com.nubi.car.map.currentRegionName
+import com.nubi.car.map.drivingRegionText
+import com.nubi.car.map.mapInteractive
+import com.nubi.car.map.mapMode
+import com.nubi.car.map.uploadIntervalFor
 import com.nubi.car.trip.CoverageTracker
 import com.nubi.car.trip.Gear
 import com.nubi.car.trip.MatchingLine
@@ -41,6 +49,8 @@ import com.nubi.car.trip.limitText
 import com.nubi.car.trip.NeighborLayout
 import com.nubi.car.trip.narrowAppArea
 import com.nubi.car.trip.neighborLayout
+import com.nubi.car.trip.neighborLayoutInMap
+import com.nubi.car.trip.PANEL_TEXT_SCALE
 import com.nubi.car.trip.numbersVisible
 import com.nubi.car.trip.parseAccent
 import com.nubi.car.trip.stageDots
@@ -55,6 +65,7 @@ class MainActivity : Activity() {
     private lateinit var coverage: CoverageTracker
     private lateinit var place: PlaceTracker
     private lateinit var navi: NaviLauncher
+    private lateinit var map: MapScreen
     private lateinit var v: Views
     private val handler = Handler(Looper.getMainLooper())
 
@@ -78,8 +89,13 @@ class MainActivity : Activity() {
     /** 이번 렌더에서 카드에 보인 이웃(길안내 대상). 카드가 안 보이면 null. */
     private var shownNeighbor: Neighbor? = null
 
-    /** 마지막으로 적용한 앱 영역 모드(좁음 여부). 아직 적용 전이면 null. */
+    /** 마지막으로 적용한 앱 영역 모드(좁음 여부)와 정차 지도 사용 여부. 아직 적용 전이면 null. */
     private var appliedNarrow: Boolean? = null
+    private var appliedMap: Boolean? = null
+
+    /** 패널 글자 크기를 줄여 둔 상태인지와, 줄이기 전 글자 크기(px)를 기억해 둔 뷰들. */
+    private var panelScaled = false
+    private val originalTextSizes = HashMap<TextView, Float>()
 
     private val uxListener = CarUxRestrictionsManager.OnUxRestrictionsChangedListener { restrictions ->
         handler.post {
@@ -100,6 +116,7 @@ class MainActivity : Activity() {
         engine = TripEngineProvider.get(this)
         coverage = TripEngineProvider.coverage(this)
         place = TripEngineProvider.place(this)
+        map = TripEngineProvider.map(this)
         navi = NaviLauncher(this)
         setContentView(R.layout.activity_main)
         v = Views(findViewById(R.id.root))
@@ -109,11 +126,47 @@ class MainActivity : Activity() {
         v.naviSight.setOnClickListener { navigate() }
         v.naviFestival.setOnClickListener { navigate() }
         v.naviCompact.setOnClickListener { navigate() }
+        // 정차 지도 버튼. 주행 규제(DO)·정차 아님이면 버튼이 안 보이지만 한 번 더 막는다(fail-closed).
+        v.mapBtnZoomIn.setOnClickListener { if (mapTouchAllowed()) map.zoomIn() }
+        v.mapBtnZoomOut.setOnClickListener { if (mapTouchAllowed()) map.zoomOut() }
+        v.mapBtnMe.setOnClickListener { if (mapTouchAllowed()) map.myLocation(engine.status.lastLocation) }
+        v.mapBtnNational.setOnClickListener { if (mapTouchAllowed()) map.showNational() }
+        v.mapBtnRoads.setOnClickListener {
+            if (mapTouchAllowed()) {
+                map.toggleRoads()
+                map.refreshDescription()
+                render()
+            }
+        }
+        v.mapBtnRegions.setOnClickListener {
+            if (mapTouchAllowed()) {
+                map.toggleRegions()
+                map.refreshDescription()
+                render()
+            }
+        }
     }
+
+    private fun applyUploadInterval(visible: Boolean) {
+        engine.uploadIntervalMillis = uploadIntervalFor(
+            FeatureFlags.drivingMap, FeatureFlags.liveColoring, visible, TripEngine.UPLOAD_INTERVAL_MILLIS, TripEngine.MAP_UPLOAD_INTERVAL_MILLIS,
+        )
+    }
+
+    /** 지도 터치·버튼을 받아도 되는 상태인지(정차 지도 + DO 아님). */
+    private fun mapTouchAllowed(): Boolean = lastMapMode == MapMode.PARKED && mapInteractive(lastMapMode, distractionOptimized)
+
+    private var lastMapMode = MapMode.OFF
+
+    /** 주행 중 위 한 줄의 시군구 이름은 바뀐 뒤 5초 동안 이전 값을 유지한다(경계에서 깜빡이지 않게). */
+    private val regionHold = HoldLast(5_000L)
 
     override fun onResume() {
         super.onResume()
         registerUxRestrictions()
+        map.bind(v.mapDriving, v.mapParked) { engine.nowMillis() }
+        // 지도 화면이 실제로 보이는 동안만 업로드를 20초 간격으로 당긴다(백그라운드에서는 60초)
+        applyUploadInterval(visible = true)
         if (hasLocationPermission()) startService()
         render()
         handler.post(refresh)
@@ -121,6 +174,8 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         handler.removeCallbacks(refresh)
+        map.unbind()
+        applyUploadInterval(visible = false)
         unregisterUxRestrictions()
         navi.release()
         super.onPause()
@@ -264,6 +319,10 @@ class MainActivity : Activity() {
         val parked = usesParkedLayout(showNumbers, distractionOptimized, needsPermission, s.health == RecorderHealth.SERVICE_FAILED)
         v.drivingView.visibility = if (parked) View.GONE else View.VISIBLE
         v.parkedView.visibility = if (parked) View.VISIBLE else View.GONE
+        val mode = mapMode(FeatureFlags.drivingMap, parked)
+        lastMapMode = mode
+        v.drivingMap.visibility = if (mode == MapMode.DRIVING) View.VISIBLE else View.GONE
+        v.drivingLegacy.visibility = if (mode == MapMode.DRIVING) View.GONE else View.VISIBLE
 
         val state = limited(
             when {
@@ -310,7 +369,23 @@ class MainActivity : Activity() {
         setStatus(v.drivingStorage, storage)
         v.drivingUpload.text = uploadLine
 
-        if (parked) renderParked(s, state, health, storage, uploadLine, showNumbers, needsPermission, canAct)
+        // 주행 중 지도: 위 한 줄(기록 중 · 지금 시군구)만. 문제가 있을 때만 상태 이상 문구를 덧붙인다. 숫자·버튼·카드·QR 없음
+        if (mode == MapMode.DRIVING) {
+            v.drivingMapState.text = state
+            val rawRegion = drivingRegionText(regionHold.update(currentRegionName(map.repository.live, place.info.place?.displayName), System.currentTimeMillis()))
+            // 주행 규제 중 문자열 길이 제한: 넘으면 중간에서 자르지 않고 줄을 숨긴다(지역 이름이 잘려 오해를 부르지 않게)
+            val region = rawRegion?.let { limitText(it, distractionOptimized, maxStringLength, statusLine = false) }
+            v.drivingMapRegion.visibility = if (region == null) View.GONE else View.VISIBLE
+            v.drivingMapRegion.text = region ?: ""
+            // 기록 멈춤·저장 경고는 숫자 없이 문구만, 한 줄 폭을 넘으면 숨긴다(상태·지역 이름이 항상 먼저)
+            val warn = listOfNotNull(health, storage).takeIf { it.isNotEmpty() }?.joinToString(" · ")
+            val room = v.root.width - 2 * resources.getDimension(R.dimen.page_pad) - 200f
+            val used = v.drivingMapState.paint.measureText(state) + (region?.let { v.drivingMapRegion.paint.measureText(it) + 16f } ?: 0f) + 72f
+            setStatus(v.drivingMapHealth, warn?.takeIf { v.drivingMapHealth.paint.measureText(it) + 24f + used <= room })
+        }
+
+        if (parked) renderParked(s, state, health, storage, uploadLine, showNumbers, needsPermission, canAct, mode)
+        map.update(mode, s.state == TripState.RECORDING, s.lastLocation, mapInteractive(mode, distractionOptimized))
     }
 
     private fun setStatus(view: TextView, text: String?) {
@@ -327,6 +402,7 @@ class MainActivity : Activity() {
         showNumbers: Boolean,
         needsPermission: Boolean,
         canAct: Boolean,
+        mode: MapMode,
     ) {
         v.chip.text = when (s.gear) {
             Gear.P -> getString(R.string.chip_parked_p)
@@ -391,31 +467,94 @@ class MainActivity : Activity() {
         // 부가 요소(게스트 QR·이웃 카드·길안내 버튼): 기어 P이고 DO가 없을 때만. 앱 영역이 좁으면(두 앱을 나란히 연 경우 등) 이웃 카드는 축약형이다.
         val extras = extrasVisible(showNumbers, distractionOptimized)
         v.guestCard.visibility = if (extras) View.VISIBLE else View.GONE
-        val widthDp = (v.root.width / resources.displayMetrics.density).toInt()
+        val density = resources.displayMetrics.density
+        val widthDp = (v.root.width / density).toInt()
         val minWidthDp = resources.getInteger(R.integer.neighbor_card_min_width_dp)
-        applyAreaMode(narrowAppArea(widthDp, minWidthDp))
-        val cardLayout = neighborLayout(extras, widthDp, minWidthDp)
+        val narrow = narrowAppArea(widthDp, minWidthDp)
+        val mapOn = mode == MapMode.PARKED
+        applyAreaMode(narrow, mapOn)
+        // 정차 지도: 지도는 컨트롤(DO면 숨김), 패널은 글자를 줄이고 카드는 패널 너비에 맞춘다
+        val controls = if (mapOn && mapInteractive(mode, distractionOptimized)) View.VISIBLE else View.GONE
+        v.mapControlCol.visibility = controls
+        v.mapLayerRow.visibility = controls
+        v.mapBtnRoads.setBackgroundResource(if (map.roadsOn) R.drawable.bg_map_btn_on else R.drawable.bg_map_btn)
+        v.mapBtnRegions.setBackgroundResource(if (map.regionsOn) R.drawable.bg_map_btn_on else R.drawable.bg_map_btn)
+        scalePanel(mapOn)
+        val cardLayout = if (mapOn) {
+            // 전체형 카드가 들어가는 너비: 03 원형의 기준(neighbor_card_min_width_dp)에서 왼쪽 열·여백을 뺀 값
+            val fullCardMinDp = minWidthDp - ((2 * resources.getDimension(R.dimen.page_pad) + resources.getDimension(R.dimen.left_column_width) + resources.getDimension(R.dimen.column_gap)) / density).toInt()
+            neighborLayoutInMap(extras, narrow, (v.panel.width / density).toInt(), fullCardMinDp)
+        } else {
+            neighborLayout(extras, widthDp, minWidthDp)
+        }
         v.neighborCard.visibility = if (cardLayout == NeighborLayout.HIDDEN) View.GONE else View.VISIBLE
         shownNeighbor = null
         if (cardLayout != NeighborLayout.HIDDEN) renderNeighbor(info?.neighbor, info?.neighborsAllVisited == true, cardLayout)
         foldToFit()
     }
 
-    /** 좁은 앱 영역이면 본문을 세로로 쌓아(왼쪽 열은 너비 전체, 이웃 카드는 아래) 가로로 잘리지 않게 한다. 바뀔 때만 레이아웃 속성을 고친다. */
-    private fun applyAreaMode(narrow: Boolean) {
-        if (appliedNarrow == narrow) return
+    /**
+     * 본문 배치를 바꾼다(바뀔 때만 레이아웃 속성을 고친다).
+     * - 지도 끔(03 원형): 패널이 전체 너비. 넓으면 가로(왼쪽 열 + 이웃 카드), 좁으면 세로(왼쪽 열 + 아래 이웃 카드).
+     * - 지도 켬: 넓으면 가로로 지도 60% + 패널 40%(패널 안은 세로), 좁으면 세로로 지도 위 + 패널 아래(지도 위주, 패널은 줄임).
+     */
+    private fun applyAreaMode(narrow: Boolean, mapOn: Boolean) {
+        if (appliedNarrow == narrow && appliedMap == mapOn) return
         appliedNarrow = narrow
+        appliedMap = mapOn
         val gap = resources.getDimensionPixelSize(R.dimen.column_gap)
+        val match = LinearLayout.LayoutParams.MATCH_PARENT
+        val wrap = LinearLayout.LayoutParams.WRAP_CONTENT
         v.body.orientation = if (narrow) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
-        v.leftColumn.layoutParams = if (narrow) {
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
-        } else {
-            LinearLayout.LayoutParams(resources.getDimensionPixelSize(R.dimen.left_column_width), LinearLayout.LayoutParams.MATCH_PARENT)
+        v.parkedMapArea.visibility = if (mapOn) View.VISIBLE else View.GONE
+        v.parkedMapArea.layoutParams = if (narrow) LinearLayout.LayoutParams(match, 0, 3f) else LinearLayout.LayoutParams(0, match, 3f)
+        // 패널: 지도 켬이면 지도 옆(또는 아래)의 40%, 끔이면 본문 전체
+        v.panel.layoutParams = when {
+            !mapOn -> LinearLayout.LayoutParams(match, match)
+            narrow -> LinearLayout.LayoutParams(match, 0, 2f).apply { topMargin = gap / 2 }
+            else -> LinearLayout.LayoutParams(0, match, 2f).apply { marginStart = gap }
         }
-        v.neighborCard.layoutParams = if (narrow) {
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = gap / 2 }
+        val panelHorizontal = !mapOn && !narrow
+        v.panel.orientation = if (panelHorizontal) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+        v.leftColumn.layoutParams = if (panelHorizontal) {
+            LinearLayout.LayoutParams(resources.getDimensionPixelSize(R.dimen.left_column_width), match)
         } else {
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply { marginStart = gap }
+            LinearLayout.LayoutParams(match, 0, 1f)
+        }
+        v.neighborCard.layoutParams = if (panelHorizontal) {
+            LinearLayout.LayoutParams(0, match, 1f).apply { marginStart = gap }
+        } else {
+            LinearLayout.LayoutParams(match, wrap).apply { topMargin = gap / 2 }
+        }
+    }
+
+    /** 정차 지도 패널의 글자(와 QR)를 줄이거나 되돌린다. 처음 줄일 때 원래 크기를 기억한다. */
+    private fun scalePanel(shrink: Boolean) {
+        if (panelScaled == shrink) return
+        panelScaled = shrink
+        val factor = if (shrink) PANEL_TEXT_SCALE else 1f
+        fun walk(view: View) {
+            if (view is TextView) {
+                val orig = originalTextSizes.getOrPut(view) { view.textSize }
+                view.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, orig * factor)
+                // 한국어는 단어(어절) 단위로 줄바꿈해 '명 / 소'처럼 단어 중간에서 끊기지 않게 한다(API 33+)
+                if (android.os.Build.VERSION.SDK_INT >= 33) view.lineBreakWordStyle = android.graphics.text.LineBreakConfig.LINE_BREAK_WORD_STYLE_PHRASE
+            }
+            if (view is android.view.ViewGroup) for (i in 0 until view.childCount) walk(view.getChildAt(i))
+        }
+        walk(v.panel)
+        // 이웃 카드의 위아래 여백도 줄여 왼쪽 열(샘플·거리·업로드 줄)이 접히지 않을 높이를 만든다
+        val padH = resources.getDimensionPixelSize(R.dimen.card_pad_h)
+        val padV = if (shrink) (14 * resources.displayMetrics.density).toInt() else resources.getDimensionPixelSize(R.dimen.card_pad_v)
+        v.neighborCard.setPadding(padH, padV, padH, padV)
+        // 숫자 줄 묶음 위 여백과 본문 위 여백도 줄인다(정차 지도에서 03 요소를 한 화면에 담으려고)
+        (v.linesBlock.layoutParams as LinearLayout.LayoutParams).topMargin = if (shrink) (12 * resources.displayMetrics.density).toInt() else (36 * resources.displayMetrics.density).toInt()
+        v.linesBlock.requestLayout()
+        v.body.setPadding(v.body.paddingLeft, if (shrink) 0 else (20 * resources.displayMetrics.density).toInt(), v.body.paddingRight, v.body.paddingBottom)
+        val qr = resources.getDimensionPixelSize(R.dimen.qr_size)
+        v.guestQrImage.layoutParams = v.guestQrImage.layoutParams.apply {
+            width = (qr * factor).toInt()
+            height = (qr * factor).toInt()
         }
     }
 

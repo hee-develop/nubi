@@ -11,7 +11,7 @@ export const GEO_CACHE_MAX = 50;
 export const GEO_CACHE_TTL_MS = 5 * 60_000;
 
 /** 차량의 시군구별 기록(alias 합산) CTE `v(code, level, first_at, last_at)`. 바인딩 값은 [vehicleId] 두 번. */
-const VISITED_CTE = `v AS (
+export const VISITED_CTE = `v AS (
   SELECT code, MAX(level) AS level, MIN(first_at) AS first_at, MAX(last_at) AS last_at,
     SUM(passes) AS passes, SUM(visits) AS visits, SUM(stays) AS stays
   FROM visited_regions WHERE vehicle_id IN ${VEHICLE_SET_SQL} GROUP BY code
