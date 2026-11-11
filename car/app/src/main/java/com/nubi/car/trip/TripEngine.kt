@@ -79,6 +79,10 @@ class TripEngine(
     @Volatile
     var onTripStarted: () -> Unit = {}
 
+    /** 기어가 P가 아닌 값에서 P로 바뀌었다(정차 진입). 엔진 스레드에서 불린다. */
+    @Volatile
+    var onParked: () -> Unit = {}
+
     @Volatile
     var status: TripStatus = TripStatus()
         private set
@@ -198,8 +202,16 @@ class TripEngine(
 
     fun onGear(gear: Gear?) {
         scheduler.post {
+            val before = machine.gear
             handle(machine.onGear(gear, elapsed()))
             publish()
+            if (gear == Gear.P && before != Gear.P) {
+                try {
+                    onParked()
+                } catch (t: Throwable) {
+                    Log.w(TAG, "정차 알림 예외: ${t.javaClass.simpleName}")
+                }
+            }
         }
     }
 
@@ -454,6 +466,7 @@ class TripEngine(
             corruptLines = uploader.corruptLines,
             discardedLines = uploader.discardedLines,
             storageHeld = uploader.memoryOnly,
+            lastLocation = machine.lastAdopted?.let { LatLon(it.lat, it.lon) },
         )
         updateTimers()
     }

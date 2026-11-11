@@ -8,17 +8,21 @@ import java.io.IOException
 import java.util.concurrent.Executor
 
 class RegionsTest {
-    private val lineFmt = "시군구 %1\$d/%2\$d · 인구감소지역 %3\$d/%4\$d"
+    private val dexFmt = "시군구 {%1\$d/%2\$d}"
+    private val depopFmt = "인구감소지역 {%1\$d/%2\$d}"
     private val newFmt = "처음 지난 곳: %1\$s"
     private val visitFmt = "%1\$s 방문"
     private val stayFmt = "%1\$s에서 하룻밤"
     private val direct = Executor { it.run() }
 
     @Test
-    fun 대기_화면_한_줄은_시군구와_인구감소지역_도감이다() {
-        assertEquals("시군구 2/229 · 인구감소지역 0/92", formatRegionsLine(RegionsSummary(2, 229, 0, 92), lineFmt))
-        assertEquals("시군구 31/229 · 인구감소지역 12/92", formatRegionsLine(RegionsSummary(31, 229, 12, 92), lineFmt))
-        assertNull(formatRegionsLine(null, lineFmt))
+    fun 도감은_시군구와_인구감소지역_두_줄이다() {
+        assertEquals("시군구 {2/229}", formatRegionsDex(RegionsSummary(2, 229, 0, 92), dexFmt))
+        assertEquals("인구감소지역 {0/92}", formatRegionsDepop(RegionsSummary(2, 229, 0, 92), depopFmt))
+        assertEquals("시군구 {31/229}", formatRegionsDex(RegionsSummary(31, 229, 12, 92), dexFmt))
+        assertEquals("인구감소지역 {12/92}", formatRegionsDepop(RegionsSummary(31, 229, 12, 92), depopFmt))
+        assertNull(formatRegionsDex(null, dexFmt))
+        assertNull(formatRegionsDepop(null, depopFmt))
     }
 
     @Test

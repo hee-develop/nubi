@@ -90,6 +90,10 @@ class TripStateMachine(
 
     private var lastAccepted: Sample? = null
     private var lastAcceptedElapsed = 0L
+
+    /** 마지막으로 채택한 위치. [lastAccepted]와 달리 트립 종료·기어 P로 비워지지 않아 정차 화면의 '지금 있는 곳' 조회에 쓴다. [reset]에서만 지운다. */
+    var lastAdopted: Sample? = null
+        private set
     private val pending = ArrayList<Sample>()
     private var nextSeq = 0
     private var parkedSinceElapsed: Long? = null
@@ -125,6 +129,7 @@ class TripStateMachine(
             if (!accept) return emptyList()
         }
         lastAccepted = sample
+        lastAdopted = sample
         lastAcceptedElapsed = elapsedMillis
 
         if (state == TripState.RECORDING) {
@@ -172,6 +177,7 @@ class TripStateMachine(
         resetToIdle()
         gear = null
         parkedSinceElapsed = null
+        lastAdopted = null
     }
 
     private fun end(): List<TripEvent> {

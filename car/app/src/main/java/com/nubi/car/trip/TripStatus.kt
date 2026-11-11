@@ -1,5 +1,8 @@
 package com.nubi.car.trip
 
+/** 위경도 한 점. 값은 로그에 직접 남기지 않는다([coordForLog]). */
+data class LatLon(val lat: Double, val lon: Double)
+
 /** [END_SENT]: 점은 없고 트립 종료(End)만 전송한 drain. 화면에는 '성공: 0점' 대신 '종료 전송 완료'로 보인다. */
 enum class UploadKind { NONE, OK, END_SENT, FAILED, HELD }
 
@@ -29,6 +32,8 @@ data class TripStatus(
     val discardedLines: Int = 0,
     /** 암호화 키를 쓸 수 없어 이번 실행은 디스크에 저장하지 않고 메모리에서만 동작 중('저장 보류(키 오류)'). */
     val storageHeld: Boolean = false,
+    /** 마지막으로 채택한 위치(정차 화면의 '지금 있는 곳' 조회용). 없으면 null. 화면에 그리거나 로그에 남기지 않는다. */
+    val lastLocation: LatLon? = null,
 ) {
     companion object {
         val SERVICE_FAILED = RecorderHealth.SERVICE_FAILED

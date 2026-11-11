@@ -33,3 +33,52 @@ class DisplayRulesTest {
         assertEquals(listOf(true, false, false), foldLines(listOf(40, 0, 40), 50, pinned = 1))
     }
 }
+
+class ParkedRulesTest {
+    @Test
+    fun 강조_구간은_중괄호로_표시하고_글자에서는_뺀다() {
+        val a = parseAccent("새 도로 {12.4km}")
+        assertEquals("새 도로 12.4km", a.text)
+        assertEquals("12.4km", a.text.substring(a.accentStart, a.accentEnd))
+        val b = parseAccent("전국 {0.0009%} (+0.0003)")
+        assertEquals("전국 0.0009% (+0.0003)", b.text)
+        assertEquals("0.0009%", b.text.substring(b.accentStart, b.accentEnd))
+        assertEquals(AccentText("강조 없음"), parseAccent("강조 없음"))
+        assertEquals(false, parseAccent("짝 없음 {").hasAccent)
+    }
+
+    @Test
+    fun 단계_점은_안_감_통과_방문_숙박_순이다() {
+        assertEquals("○○○", stageDots(0))
+        assertEquals("●○○", stageDots(1))
+        assertEquals("●●○", stageDots(2))
+        assertEquals("●●●", stageDots(3))
+        assertEquals("●●●", stageDots(9))
+        assertEquals("○○○", stageDots(-1))
+    }
+
+    @Test
+    fun 주행_중_화면은_숫자가_안_보일_때_쓰고_눌러야_할_게_있으면_정차_화면을_쓴다() {
+        assertEquals(true, usesParkedLayout(showNumbers = true, distractionOptimized = true, needsPermission = false, serviceFailed = false))
+        assertEquals(false, usesParkedLayout(false, false, false, false))
+        assertEquals(true, usesParkedLayout(false, false, true, false))
+        assertEquals(true, usesParkedLayout(false, false, false, true))
+        // 주행 규제 중에는 버튼을 숨기므로 주행 중 화면 그대로
+        assertEquals(false, usesParkedLayout(false, true, true, true))
+    }
+
+    @Test
+    fun 부가_요소는_기어_P이고_주행_규제가_없을_때만() {
+        assertEquals(true, extrasVisible(true, false))
+        assertEquals(false, extrasVisible(true, true))
+        assertEquals(false, extrasVisible(false, false))
+    }
+
+    @Test
+    fun 이웃_카드는_좁은_앱_영역에서_숨긴다() {
+        assertEquals(true, neighborCardVisible(true, 1682, 1300))
+        assertEquals(false, neighborCardVisible(true, 840, 1300))
+        assertEquals(true, neighborCardVisible(true, 0, 1300))
+        assertEquals(false, neighborCardVisible(false, 1682, 1300))
+    }
+}

@@ -29,6 +29,7 @@ object DebugSignals {
             GpxPlayer.stop()
             engine.reset()
             TripEngineProvider.coverage(context).clear()
+            TripEngineProvider.place(context).clear()
         }
         value("vin")?.let { TripEngineProvider.vehicleIdResolver(context).onVin(it) }
         if (value("real") == "1") engine.setRealLocationAccepted(true)

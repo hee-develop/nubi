@@ -8,11 +8,13 @@ import java.io.IOException
 import java.util.concurrent.Executor
 
 class CoverageTest {
-    private val counted = "새 도로 %1\$skm · 전국 %2\$s%% (+%3\$s)"
+    private val road = "새 도로 {%1\$skm}"
+    private val nationalCounted = "전국 {%1\$s%%} (+%2\$s)"
+    private val nationalIdle = "전국 {%1\$s%%} 달렸어요"
     private val notCounted = "이번 주행은 집계되지 않았어요"
     private val withReason = "이번 주행은 집계되지 않았어요 (%1\$s)"
 
-    private fun line(l: MatchingLine, debug: Boolean = false) = formatMatchingLine(l, counted, notCounted, withReason, debug)
+    private fun line(l: MatchingLine, debug: Boolean = false) = formatRoadLine(l, road, notCounted, withReason, debug)
 
     private fun done(outcome: String, reason: String? = null, newKm: Double = 0.0, before: Double = 0.0, after: Double = 0.0) =
         MatchingResponse("done", null, outcome, reason, newKm, before, after)
@@ -41,9 +43,20 @@ class CoverageTest {
 
     @Test
     fun 집계되면_새_도로와_전국_완료율_증가분을_보인다() {
-        assertEquals("새 도로 1.4km · 전국 0.0011% (+0.0011)", line(MatchingLine.Counted(1.4, 0.0011, 0.0011)))
-        assertEquals("새 도로 12.0km · 전국 1.25% (+0.100)", line(MatchingLine.Counted(12.0, 1.25, 0.1)))
-        assertEquals("새 도로 0.0km · 전국 0.250% (+0.0000)", line(MatchingLine.Counted(0.04, 0.25, 0.0)))
+        assertEquals("새 도로 {1.4km}", line(MatchingLine.Counted(1.4, 0.0011, 0.0011)))
+        assertEquals("새 도로 {12.0km}", line(MatchingLine.Counted(12.0, 1.25, 0.1)))
+        assertEquals("새 도로 {0.0km}", line(MatchingLine.Counted(0.04, 0.25, 0.0)))
+        fun nat(l: MatchingLine, p: Double? = null) = formatNationalCountedLine(l, p, nationalCounted, nationalIdle)
+        assertEquals("전국 {0.0011%} (+0.0011)", nat(MatchingLine.Counted(1.4, 0.0011, 0.0011)))
+        assertEquals("전국 {1.25%} (+0.100)", nat(MatchingLine.Counted(12.0, 1.25, 0.1)))
+        assertEquals("전국 {0.250%} (+0.0000)", nat(MatchingLine.Counted(0.04, 0.25, 0.0)))
+    }
+
+    @Test
+    fun 집계되지_않았거나_결과가_없으면_전국_줄은_완료율_한_줄이다() {
+        assertEquals("전국 {0.0123%} 달렸어요", formatNationalCountedLine(MatchingLine.None, 0.0123, nationalCounted, nationalIdle))
+        assertEquals("전국 {12.50%} 달렸어요", formatNationalCountedLine(MatchingLine.NotCounted("x"), 12.5, nationalCounted, nationalIdle))
+        assertNull(formatNationalCountedLine(MatchingLine.None, null, nationalCounted, nationalIdle))
     }
 
     @Test
