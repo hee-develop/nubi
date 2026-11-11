@@ -16,6 +16,8 @@ export const extApp = (options: AppOptions = {}) => {
     retryDelayMs: 5,
     now: () => clock.t,
     ...options,
+    // 프로세스 안 호출(app.request)은 소켓 주소가 없다: 테스트에서만 로컬로 본다(실제 서버는 영향 없음)
+    ext: { inProcessLocal: true, ...options.ext },
     roadsPath: options.roadsPath === undefined ? ROADS_TEST_DB : options.roadsPath,
     regionsPath: options.regionsPath === undefined ? REGIONS_TEST_DB : options.regionsPath,
   });

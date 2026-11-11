@@ -77,14 +77,14 @@ describe('C1 토큰 범위: 쿼리·경로·트립·본문을 모두 모아 하�
     void a;
   });
 
-  it('본문을 못 읽으면(16KB 초과) fail-closed 413, 전역 1MB 초과는 413, 트립 점 업로드는 본문 파싱 없이 경로 소유만 본다', async () => {
+  it('큰 본문으로 파싱을 피할 수 없다(범위 검사는 항상 전체 본문), 라우트 한도 초과는 413, 전역 1MB 초과는 413, 트립 점 업로드는 경로 소유만 본다', async () => {
     const { e, a, b, tripB, ha } = await setup();
     const pad = 'x'.repeat(20_000);
     const big = await call(e, '/share/cards', post('', { vehicleId: a.vehicleId, kind: 'national', pad }, ha));
     expect(big.status).toBe(413);
     expect(big.body).toEqual({ error: 'payload_too_large' });
     // 본문이 B를 가리키는데 크게 부풀려 파싱을 피하려는 시도
-    expect((await call(e, '/vehicles/alias', post('', { fromVehicleId: 'u', toVehicleId: b.vehicleId, pad }, ha))).status).toBe(413);
+    expect((await call(e, '/vehicles/alias', post('', { fromVehicleId: 'u', toVehicleId: b.vehicleId, pad }, ha))).status).toBe(403); // 부풀려도 to=B는 그대로 잡힌다
     const huge = await call(e, '/trips', { method: 'POST', headers: { 'content-type': 'application/json', ...ha }, body: JSON.stringify({ vehicleId: a.vehicleId, pad: 'y'.repeat(1_100_000) }) });
     expect(huge.status).toBe(413);
     // 남의 트립에 점 업로드는 토큰 범위(경로의 트립 소유)로 막힌다
@@ -134,17 +134,22 @@ describe('T1 합류 준비: 체인 어디에 붙여도 인증이 적용된다', 
 
 describe('M7 off 모드의 파괴적 API는 로컬 접속만(또는 차량 토큰)', () => {
   const remote = peer('203.0.113.9');
-  it('원격에서 DELETE data·PUT settings·POST pair/code는 403 local_only, 로컬(127.0.0.1·::1·10.0.2.2)·프로세스 안 호출은 허용, 조회와 트립 API는 그대로', async () => {
+  it('원격에서 DELETE data·PUT settings·POST pair/code·guest/code·guest/end-all은 403 local_only, 로컬(127.0.0.1·::1)과 명시한 프로세스 안 호출은 허용, 10.0.2.x·주소 모름은 로컬이 아니다', async () => {
     const e = extApp();
     for (const [path, init] of [
       ['/vehicles/v1/data', { method: 'DELETE' }],
       ['/vehicles/v1/settings', put({ recordingPaused: true })],
       ['/pair/code', post('', { vehicleId: 'v1', gear: 'P' })],
+      ['/guest/code', post('', { vehicleId: 'v1', gear: 'P' })],
+      ['/guest/end-all', post('', { vehicleId: 'v1' })],
     ] as const) {
       const r = await call(e, path, init, remote);
       expect(r.status).toBe(403);
       expect(r.body).toEqual({ error: 'local_only' });
-      for (const addr of ['127.0.0.1', '::1', '::ffff:127.0.0.1', '10.0.2.2']) expect((await call(e, path, init, peer(addr))).status).toBe(200);
+      for (const addr of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) expect((await call(e, path, init, peer(addr))).status).toBe(200);
+      expect((await call(e, path, init, peer('10.0.2.2'))).status).toBe(403); // 에뮬레이터 트래픽은 호스트에서 127.0.0.1로 보인다
+      // 주소를 모르면 로컬이 아니다(명시 옵션 없이는 fail-closed)
+      expect((await call(extApp({ ext: { inProcessLocal: false } }), path, init)).status).toBe(403);
       expect((await call(e, path, init)).status).toBe(200);
     }
     // 프록시 헤더가 있으면(프록시 뒤) 소켓이 로컬이어도 로컬이 아니다
@@ -154,7 +159,6 @@ describe('M7 off 모드의 파괴적 API는 로컬 접속만(또는 차량 토�
     expect((await call(e, '/vehicles/v1/settings', undefined, remote)).status).toBe(200);
     expect((await call(e, '/trips', post('', { localId: 'l1', vehicleId: 'v1', driverId: 'v1', startedAt: '2026-11-09T00:00:00Z' }), remote)).status).toBe(201);
     expect((await call(e, '/coverage/summary?vehicleId=v1', undefined, remote)).status).toBe(200);
-    expect((await call(e, '/guest/code', post('', { vehicleId: 'v1', gear: 'P' }), remote)).status).toBe(200);
   });
 
   it('optional에서 토큰 없는 원격은 같은 호출이 403, 맞는 차량 토큰이면 원격에서도 허용', async () => {

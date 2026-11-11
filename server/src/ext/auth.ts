@@ -4,6 +4,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import type { Db } from '../db/index.js';
 import { canonicalVehicleId } from '../matching/pipeline.js';
+import { isPlainObject, loadBody } from './body.js';
 import { iso, parseAuthMode, DAY_MS, type ExtDeps } from './util.js';
 
 /** 연결·게스트 코드: 6자리 숫자, 5분. */
@@ -136,25 +137,43 @@ const peerAddress = (c: Context): string | null => {
   }
 };
 
-/** 요청 출처 키. 프록시 헤더는 신뢰하지 않고(`NUBI_TRUST_PROXY=1`일 때만 X-Forwarded-For) 소켓 주소를 쓴다. 알 수 없으면 'local'. */
-export const clientKey = (c: Context): string => {
-  if (process.env.NUBI_TRUST_PROXY === '1') {
-    const f = c.req.header('x-forwarded-for')?.split(',')[0]?.trim();
-    if (f) return ipKey(f);
+/**
+ * 신뢰하는 프록시 홉 수(`NUBI_TRUST_PROXY=<n>`, 숫자가 아니거나 0이면 신뢰 안 함. `1`은 한 홉). 공개 배포에서 서버 앞에 프록시가 n개 있을 때
+ * X-Forwarded-For의 **오른쪽에서 n번째** 값만 클라이언트 주소로 쓴다(맨 왼쪽은 클라이언트가 마음대로 쓸 수 있어 쓰지 않는다). 미설정이면 소켓 주소.
+ */
+export const trustedHops = (): number => {
+  const n = Number(process.env.NUBI_TRUST_PROXY ?? '0');
+  return Number.isInteger(n) && n > 0 ? Math.min(n, 10) : 0;
+};
+
+/** 클라이언트 주소: 신뢰 홉이 설정되어 있고 XFF가 충분히 길면 오른쪽에서 n번째, 아니면 소켓 주소. 모르면 null. */
+export const clientAddress = (c: Context): string | null => {
+  const hops = trustedHops();
+  if (hops > 0) {
+    const xff = (c.req.header('x-forwarded-for') ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+    const v = xff[xff.length - hops];
+    if (v) return v.slice(0, 64);
   }
-  const a = peerAddress(c);
+  return peerAddress(c);
+};
+
+/** 요청 출처 키(시도 제한용). IPv6는 /64. 알 수 없으면 'local'. */
+export const clientKey = (c: Context): string => {
+  const a = clientAddress(c);
   return a ? ipKey(a) : 'local';
 };
 
-const LOCAL = new Set(['127.0.0.1', '::1', '10.0.2.2', '10.0.2.15']);
+const LOOPBACK = new Set(['127.0.0.1', '::1']);
 /**
- * 로컬 접속인가(차량 에뮬레이터는 호스트 루프백/10.0.2.x로 들어온다). 소켓 주소가 없으면(프로세스 안 호출) 로컬로 본다.
- * 프록시 헤더(X-Forwarded-For·Forwarded)가 있으면 프록시 뒤라서 소켓 주소를 믿을 수 없으므로 로컬이 아니다.
+ * 로컬 접속인가(개발용 off 모드 전용 완화). 차량 에뮬레이터 트래픽도 호스트에서는 127.0.0.1로 보인다(10.0.2.x는 로컬로 보지 않는다).
+ * 주소를 모르면 **로컬이 아니다**(fail-closed). 프로세스 안 호출(테스트)은 `inProcessLocal` 옵션으로 명시해야 로컬로 본다.
+ * 신뢰 프록시가 없는데 프록시 헤더가 있으면 소켓 주소를 믿을 수 없으므로 로컬이 아니다.
  */
-export const isLocalRequest = (c: Context): boolean => {
-  if (c.req.header('x-forwarded-for') || c.req.header('forwarded') || c.req.header('x-real-ip')) return false;
-  const a = peerAddress(c);
-  return a === null || LOCAL.has(a.toLowerCase().replace(/^::ffff:/, ''));
+export const isLocalRequest = (c: Context, inProcessLocal = false): boolean => {
+  if (trustedHops() === 0 && (c.req.header('x-forwarded-for') || c.req.header('forwarded') || c.req.header('x-real-ip'))) return false;
+  const a = clientAddress(c);
+  if (a === null) return inProcessLocal;
+  return LOOPBACK.has(a.toLowerCase().replace(/^::ffff:/, ''));
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -252,69 +271,80 @@ const isExempt = (method: string, path: string): boolean =>
   /^\/(g|p|s|c|me|b2b|viewer)(\/|$)/.test(path) ||
   (method === 'GET' && (path.startsWith('/share/cards/') || path === '/courses'));
 
-/** 본문을 [max]바이트까지만 읽는다. 넘으면 null(읽다가 끊는다). 본문이 없으면 ''. */
-const readCapped = async (req: Request, max: number): Promise<string | null> => {
-  const body = req.clone().body;
-  if (!body) return '';
-  const reader = body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > max) {
-      await reader.cancel().catch(() => {});
-      return null;
-    }
-    chunks.push(value);
-  }
-  return Buffer.concat(chunks).toString('utf8');
-};
-
-export type RequestedVehicles = { vehicles: string[]; bodyTooLarge: boolean; body: Record<string, unknown> | null };
+/** 본문이 폼인 웹 페이지 POST(JSON 파싱 대상이 아니다). */
+const isFormPage = (path: string): boolean => /^\/(g|p|me)(\/|$)/.test(path);
 
 /**
- * 요청이 가리키는 **모든** 차량 ID: 쿼리 `vehicleId`, 경로(`/vehicles/:id/…`, `/trips/:id…`의 트립 소유 차량), JSON 본문의
- * `vehicleId`·`fromVehicleId`·`toVehicleId`. 하나라도 토큰 범위 밖이면 거부하려고 전부 모은다. 본문을 못 읽으면 bodyTooLarge.
+ * 라우터가 보는 것과 같은 모양으로 정규화한 경로: URL 파서가 점 구간을 접고(`/./`, `/../`), 연속 슬래시를 하나로, 끝 슬래시를 떼고, 각 구간을 디코드한다.
+ * 디코드할 수 없는 구간이 있으면 null(요청 거부). 차량 경로 판정은 이 경로로 한다(`/vehicles/V/./data` 같은 우회 방지).
  */
-export const requestedVehicles = async (db: Db, c: Context): Promise<RequestedVehicles> => {
-  const out = new Set<string>();
-  const q = c.req.queries('vehicleId');
-  for (const v of q ?? []) if (v) out.add(v);
-  const path = c.req.path;
-  const v = /^\/vehicles\/([^/]+)\/(settings|data)$/.exec(path);
-  if (v) out.add(decodeURIComponent(v[1]!));
-  const t = /^\/trips\/([^/]+)(\/|$)/.exec(path);
-  if (t) {
-    const row = db.prepare('SELECT vehicle_id FROM trips WHERE id = ?').get(decodeURIComponent(t[1]!)) as { vehicle_id: string } | undefined;
-    if (row) out.add(row.vehicle_id);
+export const normalizedPath = (c: Context): string | null => {
+  let p: string;
+  try {
+    p = new URL(c.req.url).pathname;
+  } catch {
+    return null;
   }
-  let bodyTooLarge = false;
-  let parsed: Record<string, unknown> | null = null;
-  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(c.req.method) && !/^\/trips\/[^/]+\/points$/.test(path)) {
-    const text = await readCapped(c.req.raw, SCOPE_BODY_LIMIT);
-    if (text === null) bodyTooLarge = true;
-    else if (text.trim() !== '') {
-      try {
-        const b = JSON.parse(text) as Record<string, unknown>;
-        if (b && typeof b === 'object') parsed = b;
-        // alias의 출발점(from)은 아직 누구의 것도 아닌 임시 ID(UUID)라 토큰 범위로 볼 수 없다. 대신 [aliasSourceIsVehicle]이 '이미 정본인 ID'를 거부한다.
-        for (const k of ['vehicleId', 'toVehicleId']) if (typeof b?.[k] === 'string') out.add(b[k] as string);
-        if (path !== '/vehicles/alias' && typeof b?.fromVehicleId === 'string') out.add(b.fromVehicleId);
-      } catch {
-        // JSON이 아니면 본문에서 차량을 못 뽑는다(라우트가 400을 낸다)
-      }
+  const parts: string[] = [];
+  for (const seg of p.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    let d: string;
+    try {
+      d = decodeURIComponent(seg);
+    } catch {
+      return null;
     }
+    if (d === '..') parts.pop();
+    else parts.push(d);
   }
-  return { vehicles: [...out], bodyTooLarge, body: parsed };
+  return '/' + parts.join('/');
 };
 
-/** alias의 출발점이 이미 '정본'(토큰·차주 연결·다른 alias의 대상·트립 데이터)이면 이어 붙일 수 없다(남의 차량 기록을 끌어오는 우회). */
-const aliasSourceIsVehicle = (db: Db, from: string): boolean => {
+export type RequestedVehicles = { vehicles: string[]; alias: { from?: string } | null };
+
+/**
+ * 요청이 가리키는 **모든** 차량 ID: 쿼리 `vehicleId`(반복 키 포함), 경로(`/vehicles/:id/…` 전체, `/trips/:id…`의 트립 소유 차량),
+ * 미들웨어가 한 번 파싱한 JSON 본문의 `vehicleId`·`toVehicleId`(alias 외의 `fromVehicleId`). 하나라도 토큰 범위 밖이면 거부하려고 전부 모은다.
+ */
+export const requestedVehicles = (db: Db, c: Context, path: string, body: unknown): RequestedVehicles => {
+  const out = new Set<string>();
+  for (const v of c.req.queries('vehicleId') ?? []) if (v) out.add(v);
+  // 이름을 퍼센트 인코딩한 키(vehicle%49d)도 URLSearchParams가 디코드해 같은 키로 본다
+  for (const [k, v] of new URL(c.req.url).searchParams) if (k === 'vehicleId' && v) out.add(v);
+  const v = /^\/vehicles\/([^/]+)\/.+/.exec(path);
+  if (v && v[1] !== 'alias' && v[1] !== 'register') out.add(v[1]!);
+  const t = /^\/trips\/([^/]+)(\/|$)/.exec(path);
+  if (t) {
+    const row = db.prepare('SELECT vehicle_id FROM trips WHERE id = ?').get(t[1]) as { vehicle_id: string } | undefined;
+    if (row) out.add(row.vehicle_id);
+  }
+  let alias: RequestedVehicles['alias'] = null;
+  if (isPlainObject(body)) {
+    // alias의 출발점(from)은 아직 누구의 것도 아닌 임시 ID(UUID)라 토큰 범위로 볼 수 없다. 대신 [aliasSourceIsVehicle]이 '이미 쓰이는 ID'를 거부한다.
+    for (const k of ['vehicleId', 'toVehicleId']) if (typeof body[k] === 'string') out.add(body[k] as string);
+    if (path === '/vehicles/alias') alias = { from: typeof body.fromVehicleId === 'string' ? body.fromVehicleId : undefined };
+    else if (typeof body.fromVehicleId === 'string') out.add(body.fromVehicleId);
+  }
+  return { vehicles: [...out], alias };
+};
+
+/**
+ * alias의 출발점이 이미 쓰이는 ID인가(남의 차량 기록을 끌어오는 우회 방지): 차량 토큰·차주 연결·다른 alias의 대상(정본)이면 거부.
+ * 인증 모드(optional·required)에서는 **트립·인정 도로·시군구 기록이 있는 ID도 거부**한다(그 ID로 쌓인 기록은 이미 누군가의 것이다).
+ * `off`에서는 기존 흐름(차량 앱이 UUID로 올린 트립을 나중에 서버 ID에 잇기)을 위해 데이터 검사를 하지 않는다.
+ */
+const aliasSourceInUse = (db: Db, from: string, strict: boolean): boolean => {
   if (db.prepare("SELECT 1 AS x FROM auth_tokens WHERE kind = 'vehicle' AND subject = ? LIMIT 1").get(from)) return true;
   if (db.prepare("SELECT 1 AS x FROM accounts WHERE kind = 'owner' AND vehicle_id = ? LIMIT 1").get(from)) return true;
   if (db.prepare('SELECT 1 AS x FROM vehicle_alias WHERE vehicle_id = ? LIMIT 1').get(from)) return true;
+  if (!strict) return false;
+  for (const sql of [
+    'SELECT 1 AS x FROM trips WHERE vehicle_id = ? LIMIT 1',
+    'SELECT 1 AS x FROM driven_ways WHERE vehicle_id = ? LIMIT 1',
+    'SELECT 1 AS x FROM visited_regions WHERE vehicle_id = ? LIMIT 1',
+    'SELECT 1 AS x FROM region_events WHERE vehicle_id = ? LIMIT 1',
+  ])
+    if (db.prepare(sql).get(from)) return true;
   return false;
 };
 
@@ -322,39 +352,49 @@ const aliasSourceIsVehicle = (db: Db, from: string): boolean => {
 const isSensitive = (method: string, path: string): boolean =>
   (method === 'DELETE' && /^\/vehicles\/[^/]+\/data$/.test(path)) ||
   (method === 'PUT' && /^\/vehicles\/[^/]+\/settings$/.test(path)) ||
-  (method === 'POST' && path === '/pair/code');
+  (method === 'POST' && (path === '/pair/code' || path === '/guest/code' || path === '/guest/end-all'));
 
 /**
  * 앱 전역 미들웨어. 체인 맨 앞에 `.use('*', …)`로 한 번 등록하면 뒤에 붙는 모든 라우트(T1 `/map`·`/trips/:id/live` 포함)에 적용된다.
  *  1. 본문 크기: 앱 전역 1MB(`content-length`를 먼저 보고, 없으면 스트림을 세다 끊는다).
- *  2. alias 출발점 검사(모든 모드).
- *  3. `off`: 민감 호출(`DELETE /vehicles/:id/data`·`PUT …/settings`·`POST /pair/code`)은 로컬 접속만. 그 밖에는 기존 동작.
- *  4. `optional`/`required`: Bearer 검증, 요청이 가리키는 모든 차량이 토큰 범위 안이어야 한다(아니면 403, 본문을 못 읽으면 413 fail-closed).
+ *  2. 본문을 **한 번만** 파싱한다(Fetch 표준: UTF-8, BOM 제거). 이 값을 이 미들웨어의 범위 검사와 모든 라우트가 함께 쓴다.
+ *     인증 모드에서 본문이 비어 있지 않은데 파싱에 실패하거나 JSON 객체가 아니면 400(fail-closed).
+ *  3. alias 출발점 검사(모든 모드).
+ *  4. `off`: 민감 호출은 로컬 접속만. 그 밖에는 기존 동작. 공개 배포는 `optional` 이상이 필수이고 `off`는 로컬 개발 전용이다.
+ *  5. `optional`/`required`: Bearer 검증, 요청이 가리키는 모든 차량이 토큰 범위 안이어야 한다(아니면 403).
  * `/vehicles/register` 응답에는 `vehicleToken`을 더한다(off에서는 더하지 않아 기존 응답이 그대로다).
  */
 export const authMiddleware = (deps: ExtDeps): MiddlewareHandler => {
   const mode = deps.options.auth ?? parseAuthMode(process.env.NUBI_AUTH);
+  const inProcessLocal = deps.options.inProcessLocal === true;
   const limit = bodyLimit({ maxSize: GLOBAL_BODY_LIMIT, onError: (c) => c.json({ error: 'payload_too_large' }, 413) });
   const core: MiddlewareHandler = async (c, next) => {
     const method = c.req.method;
-    const path = c.req.path;
+    const path = normalizedPath(c);
+    if (path === null) return c.json({ error: 'bad_request' }, 400);
+    const parseJson = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && !isFormPage(path);
+    let body: unknown;
+    if (parseJson) {
+      const p = await loadBody(c);
+      if (p.state === 'too_large') return c.json({ error: 'payload_too_large' }, 413);
+      if (mode !== 'off' && (p.state === 'invalid' || (p.state === 'ok' && !isPlainObject(p.value)))) return c.json({ error: 'invalid_body' }, 400);
+      body = p.state === 'ok' ? p.value : undefined;
+    }
     if (method === 'POST' && path === '/vehicles/alias') {
-      const { bodyTooLarge, body } = await requestedVehicles(deps.db, c);
-      if (bodyTooLarge) return c.json({ error: 'payload_too_large' }, 413);
-      const from = body?.fromVehicleId;
-      if (typeof from === 'string' && aliasSourceIsVehicle(deps.db, from)) return c.json({ error: 'alias_source_is_vehicle' }, 409);
+      const from = isPlainObject(body) ? body.fromVehicleId : undefined;
+      if (typeof from === 'string' && aliasSourceInUse(deps.db, from, mode !== 'off')) return c.json({ error: 'alias_source_is_vehicle' }, 409);
     }
     if (mode === 'off') {
-      if (isSensitive(method, path) && !isLocalRequest(c)) return c.json({ error: 'local_only' }, 403);
+      if (isSensitive(method, path) && !isLocalRequest(c, inProcessLocal)) return c.json({ error: 'local_only' }, 403);
       return next();
     }
     if (method === 'POST' && path === '/vehicles/register') {
       await next();
       if (c.res.status === 200) {
-        const body = (await c.res.clone().json()) as { vehicleId?: string };
-        if (typeof body.vehicleId === 'string') {
-          const vehicleToken = issueToken(deps.db, 'vehicle', body.vehicleId, deps.now());
-          c.res = c.json({ ...body, vehicleToken }, 200);
+        const resBody = (await c.res.clone().json()) as { vehicleId?: string };
+        if (typeof resBody.vehicleId === 'string') {
+          const vehicleToken = issueToken(deps.db, 'vehicle', resBody.vehicleId, deps.now());
+          c.res = c.json({ ...resBody, vehicleToken }, 200);
         }
       }
       return;
@@ -364,15 +404,32 @@ export const authMiddleware = (deps: ExtDeps): MiddlewareHandler => {
     if (!token) {
       if (mode === 'required') return c.json({ error: 'unauthorized' }, 401);
       // optional + 토큰 없음: 기존 동작이지만 민감 호출은 로컬만
-      if (isSensitive(method, path) && !isLocalRequest(c)) return c.json({ error: 'local_only' }, 403);
+      if (isSensitive(method, path) && !isLocalRequest(c, inProcessLocal)) return c.json({ error: 'local_only' }, 403);
       return next();
     }
     const info = lookupToken(deps.db, token, deps.now());
     if (!info) return c.json({ error: 'unauthorized' }, 401);
-    const { vehicles, bodyTooLarge } = await requestedVehicles(deps.db, c);
-    if (bodyTooLarge) return c.json({ error: 'payload_too_large' }, 413);
+    const { vehicles } = requestedVehicles(deps.db, c, path, body);
     for (const v of vehicles) if (!canAccessVehicle(deps.db, info, v)) return c.json({ error: 'forbidden' }, 403);
     return next();
   };
   return (c, next) => limit(c, (() => core(c, next)) as () => Promise<void>) as Promise<Response | void>;
+};
+
+/**
+ * 경로 파라미터에 차량 ID를 받는 라우트를 등록할 때 쓰는 가드(기본 거부). 예: `.use('/foo/:vehicleId/*', vehicleScoped(deps))`.
+ * 인증이 꺼져 있으면(off) 통과시키고, optional·required에서는 토큰이 있고 그 차량이 토큰 범위 안일 때만 통과한다(optional에서도 토큰이 없으면 거부).
+ * 전역 미들웨어가 `/vehicles/:id/…`·`/trips/:id…`·쿼리·본문을 이미 검사하지만, 새 경로 모양을 추가할 때 이 가드를 함께 달아 놓치지 않게 한다.
+ */
+export const vehicleScoped = (deps: ExtDeps, param = 'vehicleId'): MiddlewareHandler => {
+  const mode = deps.options.auth ?? parseAuthMode(process.env.NUBI_AUTH);
+  return async (c, next) => {
+    if (mode === 'off') return next();
+    const token = bearerOf(c);
+    const info = token ? lookupToken(deps.db, token, deps.now()) : null;
+    if (!info) return c.json({ error: 'unauthorized' }, 401);
+    const id = c.req.param(param);
+    if (!id || !canAccessVehicle(deps.db, info, id)) return c.json({ error: 'forbidden' }, 403);
+    return next();
+  };
 };

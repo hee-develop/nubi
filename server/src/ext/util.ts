@@ -1,4 +1,5 @@
 import type { Context } from 'hono';
+import { bodyOf } from './body.js';
 import type { z } from 'zod';
 import type { Db } from '../db/index.js';
 import type { Regions } from '../regions/index.js';
@@ -34,6 +35,8 @@ export type ExtOptions = {
   installUrl?: string;
   /** 공유 카드 PNG 변환에 쓸 글꼴 파일(`NUBI_CARD_FONT`). 생략하면 시스템 글꼴. */
   fontFile?: string;
+  /** 소켓 주소가 없는(프로세스 안) 호출을 로컬로 본다. **테스트 전용**이고 실제 서버(node-server)는 항상 소켓 주소가 있어 영향이 없다. 기본 꺼짐(주소를 모르면 로컬이 아니다). */
+  inProcessLocal?: boolean;
   /** SVG → PNG 변환기를 바꿔 끼운다(테스트·다른 렌더러). 생략하면 `@resvg/resvg-js`. null을 돌려주면 카드 생성은 503. */
   pngRenderer?: (svg: string) => Promise<Buffer | null>;
   /** 요청 횟수 제한 조정(테스트용). */
@@ -42,17 +45,12 @@ export type ExtOptions = {
 
 export const parseAuthMode = (v: string | undefined): AuthMode => (v === 'optional' || v === 'required' ? v : 'off');
 
-export const readJson = async (req: Request): Promise<unknown> => {
-  try {
-    return await req.json();
-  } catch {
-    return undefined;
-  }
-};
+/** 본문(미들웨어가 한 번 파싱한 값). 비었거나 파싱 실패면 undefined. */
+export const readJson = (c: Context): Promise<unknown> => bodyOf(c);
 
 /** 본문을 zod로 검증한다. 실패하면 입력을 되돌려 주지 않고 `{ error: 'invalid_body' }`만 400으로 낸다. */
 export const parseBody = async <T extends z.ZodType>(c: Context, schema: T): Promise<{ ok: true; data: z.infer<T> } | { ok: false; res: Response }> => {
-  const parsed = schema.safeParse(await readJson(c.req.raw));
+  const parsed = schema.safeParse(await bodyOf(c));
   if (!parsed.success) return { ok: false, res: c.json({ error: 'invalid_body' }, 400) };
   return { ok: true, data: parsed.data };
 };

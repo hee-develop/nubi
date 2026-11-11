@@ -3,6 +3,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
 import { canonicalVehicleId } from '../matching/pipeline.js';
 import { VEHICLE_SET_SQL } from '../roads/index.js';
+import { vehicleScoped } from '../ext/auth.js';
 import { isRecordingBlocked, readSettings } from '../ext/settings.js';
 import { iso, parseBody, SQL_SHIFT_DAYS, type ExtDeps } from '../ext/util.js';
 
@@ -41,6 +42,9 @@ export const accountRoutes = (deps: ExtDeps) => {
       if (t && isRecordingBlocked(db, t.vehicle_id)) return c.json({ status: 'idle' as const, upToSeq: -1, ways: [], paused: true as const }, 200);
       return next();
     })
+    // 경로에 차량 ID를 받는 라우트는 가드(기본 거부)를 함께 단다. 전역 미들웨어와 이중 방어.
+    .use('/vehicles/:vehicleId/settings', vehicleScoped(deps))
+    .use('/vehicles/:vehicleId/data', vehicleScoped(deps))
     .get('/vehicles/:id/settings', (c) => c.json(readSettings(db, canonicalVehicleId(db, c.req.param('id'))), 200))
     .put('/vehicles/:id/settings', async (c) => {
       const p = await parseBody(c, settingsBody);

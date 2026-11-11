@@ -5,7 +5,8 @@ import { z } from 'zod';
 import { authenticate, bearerOf, checkCode, clientKey, CODE_RE, codeGuardOf, issueCode, issueToken, publicBase, RateLimiter, revokeTokens, type CodeGuard, type TokenInfo } from '../ext/auth.js';
 import { activeCount, endSession, expireIdle, MAX_GUESTS, onTripStarted } from '../ext/sessions.js';
 import { accountCoverage, accountRegionLevels, regionItems, regionSummary, type AccountView } from '../ext/stats.js';
-import { iso, parseBody, readJson, type ExtDeps } from '../ext/util.js';
+import { bodyOf } from '../ext/body.js';
+import { iso, parseBody, type ExtDeps } from '../ext/util.js';
 import { canonicalVehicleId } from '../matching/pipeline.js';
 import { ATTRIBUTION } from '../roads/index.js';
 import { REGIONS_ATTRIBUTION } from '../regions/index.js';
@@ -146,12 +147,7 @@ export const guestRoutes = (deps: ExtDeps) => {
     // 게스트가 자기 차에서 트립을 시작하면 세션을 끝낸다. 트립 라우트는 건드리지 않고 시작 요청의 성공 응답을 본다.
     .use('/trips', async (c, next) => {
       if (c.req.method !== 'POST') return next();
-      let body: { vehicleId?: unknown; startedAt?: unknown } | undefined;
-      try {
-        body = (await c.req.raw.clone().json()) as typeof body;
-      } catch {
-        body = undefined;
-      }
+      const body = (await bodyOf(c)) as { vehicleId?: unknown; startedAt?: unknown } | undefined;
       await next();
       if (c.res.status !== 200 && c.res.status !== 201) return;
       const startedAt = typeof body?.startedAt === 'string' ? Date.parse(body.startedAt) : NaN;
@@ -172,7 +168,7 @@ export const guestRoutes = (deps: ExtDeps) => {
     .post('/guest/claim', async (c) => {
       const w = who(c);
       if (w === 'invalid') return c.json({ error: 'unauthorized' }, 401);
-      const raw = await readJson(c.req.raw);
+      const raw = await bodyOf(c);
       const parsed = claimBody.safeParse(raw);
       // consent가 false(동의 안 함)면 이유를 따로 알린다. 그 밖의 형식 오류는 invalid_body.
       if (!parsed.success) return c.json({ error: (raw as { consent?: unknown } | undefined)?.consent === false ? 'consent_required' : 'invalid_body' }, 400);
@@ -207,7 +203,7 @@ export const guestRoutes = (deps: ExtDeps) => {
       const w = who(c);
       if (w === 'invalid') return c.json({ error: 'unauthorized' }, 401);
       if (!session) return c.json({ error: 'not_found' }, 404);
-      const raw = (await readJson(c.req.raw)) as { vehicleId?: unknown } | undefined;
+      const raw = (await bodyOf(c)) as { vehicleId?: unknown } | undefined;
       const bodyVehicle = typeof raw?.vehicleId === 'string' ? raw.vehicleId : null;
       const authMode = (deps.options.auth ?? 'off') !== 'off';
       if (!canEnd(db, w ? w.info : null, session, bodyVehicle, authMode)) return c.json({ error: w || bodyVehicle ? 'forbidden' : 'unauthorized' }, w || bodyVehicle ? 403 : 401);
