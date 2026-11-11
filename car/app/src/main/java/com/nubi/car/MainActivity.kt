@@ -32,6 +32,8 @@ import com.nubi.car.screens.CodeState
 import com.nubi.car.screens.ExtrasController
 import com.nubi.car.screens.IntroItem
 import com.nubi.car.screens.IntroTracker
+import com.nubi.car.screens.SummaryCard
+import com.nubi.car.screens.TripSummaryState
 import com.nubi.car.screens.ParkedMenu
 import com.nubi.car.screens.UxState
 import com.nubi.car.screens.formatRemaining
@@ -82,6 +84,8 @@ class MainActivity : Activity() {
     private lateinit var map: MapScreen
     private lateinit var extras: ExtrasController
     private lateinit var introTracker: IntroTracker
+    private lateinit var summary: TripSummaryState
+    private lateinit var summaryCard: SummaryCard
     private lateinit var menu: ParkedMenu
     private lateinit var v: Views
     private val handler = Handler(Looper.getMainLooper())
@@ -136,6 +140,7 @@ class MainActivity : Activity() {
         map = TripEngineProvider.map(this)
         extras = TripEngineProvider.extras(this)
         introTracker = TripEngineProvider.intro(this)
+        summary = TripEngineProvider.summary(this)
         navi = NaviLauncher(this)
         setContentView(R.layout.activity_main)
         v = Views(findViewById(R.id.root))
@@ -150,6 +155,7 @@ class MainActivity : Activity() {
             onVoiceToggle = { on -> TripEngineProvider.setVoicePref(this, on) },
             onChange = { handler.post { render() } },
         )
+        summaryCard = SummaryCard(this, v.root as android.widget.FrameLayout, TripEngineProvider.thumbRepository(this), { engine.nowMillis() }) { summary.dismiss(); render() }
         v.guestAdd.setOnClickListener { if (guestAllowed()) { extras.requestGuestCode(); extras.refreshGuestCount() } }
         v.guestEndAll.setOnClickListener { if (guestAllowed()) extras.endAllGuests() }
         v.restartButton.setOnClickListener { startService() }
@@ -442,6 +448,8 @@ class MainActivity : Activity() {
         if (!(parked && qrAllowed(true, s.gear, s.state, distractionOptimized))) extras.closeCodes()
         extras.expireCodes()
         menu.update(menuOk)
+        // 하차 요약 카드: 정차 P(DO 아님)에서만, 정산 뒤 30초 또는 탭할 때까지
+        summaryCard.update(if (menuAllowed(true, s.gear, s.state, distractionOptimized) && parked) summary.current(android.os.SystemClock.elapsedRealtime()) else null)
         if (parked) renderParked(s, state, health, storage, uploadLine, showNumbers, needsPermission, canAct, mode)
         map.update(mode, s.state == TripState.RECORDING, s.lastLocation, mapInteractive(mode, distractionOptimized))
     }

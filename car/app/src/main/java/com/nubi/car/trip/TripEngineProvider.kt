@@ -13,6 +13,9 @@ import com.nubi.car.FeatureFlags
 import com.nubi.car.screens.ExtrasController
 import com.nubi.car.screens.HttpExtrasApi
 import com.nubi.car.screens.IntroTracker
+import com.nubi.car.screens.TripSummaryState
+import com.nubi.car.screens.copyTrail
+import com.nubi.car.screens.tripBbox
 import com.nubi.car.screens.UxState
 import com.nubi.car.voice.VoiceAdapter
 import com.nubi.car.voice.VoiceDirector
@@ -45,6 +48,12 @@ object TripEngineProvider {
 
     @Volatile
     private var introTracker: IntroTracker? = null
+
+    @Volatile
+    private var summaryState: TripSummaryState? = null
+
+    @Volatile
+    private var thumbRepo: MapRepository? = null
 
     fun get(context: Context): TripEngine =
         instance ?: synchronized(this) { instance ?: create(context.applicationContext).also { instance = it } }
@@ -83,6 +92,17 @@ object TripEngineProvider {
     fun intro(context: Context): IntroTracker {
         get(context)
         return introTracker!!
+    }
+
+    /** 하차 요약 카드 상태와 썸네일 지도용 저장소(주 지도와 따로 둬서 보기를 서로 바꾸지 않는다). */
+    fun summary(context: Context): TripSummaryState {
+        get(context)
+        return summaryState!!
+    }
+
+    fun thumbRepository(context: Context): MapRepository {
+        get(context)
+        return thumbRepo!!
     }
 
     private fun create(context: Context): TripEngine {
@@ -149,10 +169,23 @@ object TripEngineProvider {
         mapScreen = screen
         uploader.onPointsUploaded = { livePoller.kick() }
         engine.onLocationSample = { lat, lon, ts, recording -> screen.onLocationSample(lat, lon, ts, recording) }
+        // 음성 안내(I01 처음 들어선 시군구·I03 하차 브리핑). TTS가 실패·미지원이면 아무 일도 하지 않는다
+        val voice = VoiceDirector(VoiceAdapter(context), { engine.status.gear }, { FeatureFlags.voice }, { SystemClock.elapsedRealtime() })
+        livePoller.onRegion = { r -> if (r.firstTime) voice.onFirstRegion(r.code, r.displayName) }
+        // 하차 요약 카드: 트립이 끝날 때 궤적 범위를 떠 두고(정산되면 원본 궤적이 지워진다), 정산이 끝나면 카드를 준비한다
+        val tripSummary = TripSummaryState()
+        summaryState = tripSummary
+        thumbRepo = MapRepository(mapApi, mapWorkers, { vehicle.vehicleId }, mapSchedule)
+        engine.onTripEnded = {
+            val snap = screen.trail.snapshot()
+            tripSummary.onEnded(tripBbox(snap), if (snap.lons.isEmpty()) null else copyTrail(snap))
+        }
         val coverageStarted = engine.onTripStarted
         engine.onTripStarted = {
             coverageStarted()
             screen.onTripStarted()
+            voice.onTripStarted()
+            tripSummary.onTripStarted()
         }
         // 기록 멈춤은 마지막 값을 저장해 두었다가 서버 설정이 오기 전에도 지킨다. 음성 켜기·끄기는 기기에만 둔다(서버 설정에 없는 항목).
         engine.recordingPaused = store.getString(TripEngine.KEY_PAUSED) == "1"
@@ -186,6 +219,11 @@ object TripEngineProvider {
             extras.refreshSettings()
         }
         coverage.onTripSettled = { settledLocalId ->
+            val counted = coverage.matching as? MatchingLine.Counted
+            // 하차 브리핑: 기어가 P일 때만(숫자는 P에서만 말한다). 새 도로가 없으면 말하지 않는다
+            if (engine.status.gear == Gear.P) voice.onTripSettled(counted?.newKm)
+            tripSummary.onSettled(counted?.newKm, coverage.newRegions, SystemClock.elapsedRealtime())
+            thumbRepo?.invalidate() // 정산으로 달린 길이 달라졌으니 썸네일이 새로 받는다
             place.refresh()
             screen.onTripSettled(settledLocalId, engine.recordingLocalId)
         }

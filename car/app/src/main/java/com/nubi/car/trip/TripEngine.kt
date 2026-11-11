@@ -104,6 +104,10 @@ class TripEngine(
     @Volatile
     var recordingPaused: Boolean = false
 
+    /** 트립이 끝났다(상태기계 Ended). 하차 요약 카드가 그 트립의 궤적 범위를 떠 두는 데 쓴다. 엔진 스레드에서 불린다. */
+    @Volatile
+    var onTripEnded: () -> Unit = {}
+
     /** 기어가 바뀌었다(화면이 QR·메뉴를 바로 닫으려고 쓴다). 엔진 스레드에서 불린다. */
     @Volatile
     var onGearChange: (Gear?) -> Unit = {}
@@ -357,6 +361,11 @@ class TripEngine(
                     val ctx = active ?: continue
                     active = null
                     recordingLocalId = null
+                    try {
+                        onTripEnded()
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "트립 종료 알림 예외: ${t.javaClass.simpleName}")
+                    }
                     if (immediate) {
                         // 서비스가 곧 사라진다. 오도미터를 기다리지 않고 바로 큐에 남긴다.
                         finishTrip(ctx, e.endedAtMillis, null, force = true)
