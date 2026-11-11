@@ -150,7 +150,7 @@ export const createLiveMatcher = (deps: LiveMatcherDeps) => {
       s.timer = null;
       run(tripId);
     }, wait);
-    s.timer.unref?.();
+    (s.timer as { unref?: () => void }).unref?.();
   };
 
   return {

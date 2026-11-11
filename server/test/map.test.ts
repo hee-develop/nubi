@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { openDb } from '../src/db/index.js';
-import { classesForZ, isFaded, maxSpanDeg, RATE_MAX, shapeFor, simplify } from '../src/routes/map.js';
+import { isFaded } from '../src/shared/fade.js';
+import { classesForZ, maxSpanDeg, RATE_MAX, shapeFor, simplify } from '../src/routes/map.js';
 import { initMapSchema } from '../src/db/schema-map.js';
 import { driveTrip, FIXTURE_NORTH, ROADS_TEST_DB, fakeValhalla, getJson, json, makePoints, makeRoadsDb, newApp, REGIONS_TEST_DB } from './helpers.js';
 
@@ -221,8 +222,8 @@ describe('실시간 잠정 매칭과 GET /trips/:id/live', () => {
 describe('지도 API 보강', () => {
   it('바램 판정은 now - lastAt > 365일(T2 isFaded와 같은 규칙)', () => {
     const now = Date.parse('2026-11-11T00:00:00Z');
-    expect(isFaded(now - 365 * 86_400_000, now)).toBe(false);
-    expect(isFaded(now - 365 * 86_400_000 - 1, now)).toBe(true);
+    expect(isFaded(new Date(now - 365 * 86_400_000).toISOString(), now)).toBe(false);
+    expect(isFaded(new Date(now - 365 * 86_400_000 - 1).toISOString(), now)).toBe(true);
     expect(isFaded('2025-01-01T00:00:00Z', now)).toBe(true);
   });
 

@@ -62,7 +62,7 @@ export const createMatchingWorker = (deps: WorkerDeps) => {
         timers.delete(t);
         enqueue(tripId);
       }, retryDelayMs);
-      t.unref?.();
+      (t as { unref?: () => void }).unref?.();
       timers.add(t);
     }
   };
@@ -139,7 +139,7 @@ export const createMatchingWorker = (deps: WorkerDeps) => {
           timers.delete(t);
           processRegionJob(tripId);
         }, retryDelayMs);
-        t.unref?.();
+        (t as { unref?: () => void }).unref?.();
         timers.add(t);
       }
     };
