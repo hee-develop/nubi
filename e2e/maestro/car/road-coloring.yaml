@@ -24,6 +24,8 @@ env:
 - assertNotVisible: '샘플.*'
 - assertNotVisible: '거리.*'
 - assertNotVisible: '전국 .*'
+- assertNotVisible: '새 도로 .*'
+- assertNotVisible: '게스트 QR'
 - takeScreenshot: ${SHOT_DIR}/11-road-recording
 - extendedWaitUntil:
     visible: '샘플 60'
@@ -39,13 +41,13 @@ env:
     visible: '마지막 업로드: (성공.*|종료 전송 완료)'
     timeout: 30000
 
-# 4. 서버 맵매칭 결과(폴링 3초 간격, 시작 시각 기준 최대 60초)가 종료 화면 한 줄로 나온다. 기어 P라 전국 완료율 줄도 보인다
+# 4. 서버 맵매칭 결과(폴링 3초 간격, 시작 시각 기준 최대 60초)가 종료 화면 두 줄로 나온다(새 도로 / 전국 x% (+y)). 기어 P라 보인다
 - extendedWaitUntil:
-    visible: '새 도로 .*km.*'
+    visible: '새 도로 [0-9.]+km'
     timeout: 70000
 - assertNotVisible: '이번 주행은 집계되지 않았어요.*'
 - extendedWaitUntil:
-    visible: '전국 .*% 달렸어요'
+    visible: '전국 [0-9.]+% \(\+[0-9.]+\)'
     timeout: 20000
 - takeScreenshot: ${SHOT_DIR}/13-road-result
 

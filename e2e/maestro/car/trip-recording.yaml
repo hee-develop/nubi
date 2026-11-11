@@ -15,6 +15,10 @@ env:
     visible: '대기'
     timeout: 20000
 - assertNotVisible: '권한 필요'
+# 정차 화면(시안 03): 헤더 칩, 게스트 QR 자리표시(준비 중), 오른쪽 이웃 카드 틀
+- assertVisible: '정차 중.*'
+- assertVisible: '게스트 QR'
+- assertVisible: '준비 중'
 - takeScreenshot: ${SHOT_DIR}/01-idle
 
 # 2. 기어 D → 위치 30점(약 725m)을 1초 간격으로 재생. reset이 실제 위치 스트림을 끈 뒤(앞 단계)에 gpx를 시작하므로 섞이지 않는다.
@@ -28,6 +32,12 @@ env:
 - assertNotVisible: '샘플.*'
 - assertNotVisible: '거리.*'
 - assertNotVisible: '전국 .*'
+# 주행 중 화면(시안 03b): 보조 문구만 있고 카드·QR·버튼은 없다
+- assertVisible: '숫자와 지역 카드는 정차\(P\)하면 보여요'
+- assertNotVisible: '게스트 QR'
+- assertNotVisible: '안 가 본 이웃'
+- assertNotVisible: '길안내'
+- assertNotVisible: '준비 중'
 - takeScreenshot: ${SHOT_DIR}/02-recording
 
 # 3. 재생이 끝나 기어 P가 되면 숫자가 보인다: 샘플 30, 거리 500m 이상

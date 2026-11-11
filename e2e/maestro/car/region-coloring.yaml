@@ -24,6 +24,8 @@ env:
     visible: '기록 중'
     timeout: 30000
 - assertNotVisible: '시군구 .*'
+- assertNotVisible: '인구감소지역 .*'
+- assertNotVisible: '안 가 본 이웃'
 - takeScreenshot: ${SHOT_DIR}/21-region-recording
 - extendedWaitUntil:
     visible: '샘플 12'
@@ -38,11 +40,23 @@ env:
     visible: '마지막 업로드: (성공.*|종료 전송 완료)'
     timeout: 30000
 - extendedWaitUntil:
-    visible: '시군구 [0-9]+/229 · 인구감소지역 [0-9]+/92'
+    visible: '시군구 [0-9]+/229'
     timeout: 70000
+- assertVisible: '인구감소지역 [0-9]+/92'
 - extendedWaitUntil:
     visible: '서울 중구 방문'
     timeout: 70000
+# 현재 시군구(서울 중구)와 실제 단계 배지(방문 ●●○), 안 가 본 이웃 카드(예시 항목 표기 포함)
+- extendedWaitUntil:
+    visible: '서울 중구'
+    timeout: 30000
+- assertVisible: '방문 ●●○'
+- extendedWaitUntil:
+    visible: '안 가 본 이웃'
+    timeout: 30000
+- assertVisible: '예시 항목'
+- assertVisible: '자료: 한국관광공사\(예시\)'
+- assertVisible: '길안내'
 - takeScreenshot: ${SHOT_DIR}/22-region-visit
 
 # 4. 기어 D로 바꾸면 도감 줄·이벤트 줄이 다시 숨는다
@@ -51,6 +65,9 @@ env:
     notVisible: '시군구 .*'
     timeout: 10000
 - assertNotVisible: '서울 중구 방문'
+- assertNotVisible: '인구감소지역 .*'
+- assertNotVisible: '안 가 본 이웃'
+- assertNotVisible: '길안내'
 - takeScreenshot: ${SHOT_DIR}/23-region-gear-d
 
 # 5. 시계를 C 시작(B 종료 + 10시간)으로 옮기고 중구에서 다시 시작 → 숙박
@@ -72,5 +89,14 @@ env:
 - extendedWaitUntil:
     visible: '서울 중구에서 하룻밤'
     timeout: 70000
-- assertVisible: '시군구 [0-9]+/229 · 인구감소지역 [0-9]+/92'
+- assertVisible: '시군구 [0-9]+/229'
+- assertVisible: '인구감소지역 [0-9]+/92'
+- assertVisible: '숙박 ●●●'
 - takeScreenshot: ${SHOT_DIR}/24-region-stay
+
+# 6. 길안내: 이웃 중심점으로 NaviHelper 요청. 결과(보냄/실패)는 팝업 없이 카드 아래 한 줄로만 나온다
+- tapOn: '길안내'
+- extendedWaitUntil:
+    visible: '길안내 (요청을 보냈어요|연결에 실패했어요)'
+    timeout: 10000
+- takeScreenshot: ${SHOT_DIR}/25-region-navi
