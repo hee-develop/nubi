@@ -18,7 +18,8 @@ import ai.pleos.playground.tts.listener.OnInitializeListener as TtsInitializeLis
  * - 오디오 포커스는 `AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK`으로 받고(usage는 `USAGE_ASSISTANCE_NAVIGATION_GUIDANCE`, 근거는 사양 05d), 끝·오류·상한·중단 때 반납한다. 포커스를 못 받으면 말하지 않는다.
  * - 선행 묵음(가이드 voice-guidance-preroll-silence): 포커스를 받은 뒤 [PREROLL_MS](200ms) 있다가 TTS를 시작한다. TTS SDK가 오디오 데이터를 주지 않아 데이터 앞에 무음을 붙일 수 없어 **재생 지연 방식**으로 대신한다.
  * - **재생 직전과 재생 중에 상황을 다시 확인한다**: 호출자가 준 `stillAllowed`(기어·플래그)가 false가 되면 즉시 멈추고 포커스를 반납한다([recheck]는 기어가 바뀔 때 부른다).
- * - 한 번에 한 문장([SpeechTurns]): 말하는 중에 온 새 요청은 버리고, 취소한 발화의 늦은 완료·오류 콜백은 새 발화를 끝내지 못한다. 상한 [CAP_MS] 안에 안 끝나면 멈춘다.
+ * - 한 번에 한 문장([SpeechTurns]): 말하는 중에 온 새 요청은 버리고, 소리가 시작되지 않은 새 발화는 앞 발화의 늦은 완료 콜백으로 끝나지 않는다. 상한 [CAP_MS] 안에 안 끝나면 멈춘다.
+ *   SDK 한계: 콜백에 발화 번호가 없어서, 앞 발화를 취소했는데 그 발화의 `onStart`가 새 발화의 시작 뒤에 늦게 오면 구분하지 못한다(드문 경합).
  * - [release]는 재생을 멈추고 포커스를 반납하고 SDK를 해제하며, [open] 전까지 새 재생과 포커스 요청을 막는다(서비스 onDestroy·onTaskRemoved).
  * - 초기화 실패·미지원·예외는 모두 삼킨다(아무 일도 하지 않는다). 초기화 실패 뒤 [RETRY_INIT_MS] 동안은 다시 시도하지 않는다. 로그에는 종류와 글자 수만 남긴다.
  */
@@ -67,7 +68,15 @@ class VoiceAdapter(context: Context, private val elapsedMs: () -> Long = { andro
 
         override fun onStart() {
             main.post {
-                if (turns.onStarted()) Log.i(TAG, "TTS 시작")
+                if (turns.onStarted()) {
+                    Log.i(TAG, "TTS 시작")
+                    // 빈도 제한은 SDK가 실제로 소리를 내기 시작했다고 알릴 때 기록한다
+                    try {
+                        current?.onStarted?.invoke()
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "시작 알림 예외: ${t.javaClass.simpleName}")
+                    }
+                }
             }
         }
 
@@ -218,7 +227,6 @@ class VoiceAdapter(context: Context, private val elapsedMs: () -> Long = { andro
             }
             try {
                 tts?.speak(r.text)
-                r.onStarted()
             } catch (t: Throwable) {
                 Log.w(TAG, "speak 실패: ${t.javaClass.simpleName}")
                 finish("speak 실패", cancel = true)

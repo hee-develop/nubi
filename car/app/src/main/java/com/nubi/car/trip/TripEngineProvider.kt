@@ -141,6 +141,12 @@ object TripEngineProvider {
             deadLetterFile = File(dir, "dead-letter.jsonl"),
             api = HttpTripApi(BuildConfig.SERVER_URL),
             cipherSetup = { setup.value },
+            epochs = object : PurgeEpochs {
+                override fun purgeEpoch() = store.getString(KEY_PURGE_EPOCH)?.toLongOrNull() ?: 0L
+                override fun filesEpoch() = store.getString(KEY_FILES_EPOCH)?.toLongOrNull() ?: 0L
+                override fun bump(): Long = (purgeEpoch() + 1).also { store.putString(KEY_PURGE_EPOCH, it.toString()) }
+                override fun markFiles(epoch: Long) = store.putString(KEY_FILES_EPOCH, epoch.toString())
+            },
         )
         val resolver = VehicleIdResolver(
             store = VehicleIdStore(File(dir, "vehicle-id.enc"), { setup.value.persistent }) { setup.value.cipher },
@@ -202,7 +208,12 @@ object TripEngineProvider {
             allowed = { !UxState.blocked && qrAllowed(true, engine.status.gear, engine.status.state, false) },
             elapsedMs = { SystemClock.elapsedRealtime() },
             applySettings = { s ->
-                engine.recordingPaused = s.recordingBlocked
+                // 서버가 멈춤을 알리면 진행 중 트립은 End로 끝내고 멈춘다("이후 기록만 멈춘다")
+                if (s.recordingBlocked) {
+                    if (!engine.recordingPaused) engine.pauseRecording()
+                } else {
+                    engine.recordingPaused = false
+                }
                 store.putString(TripEngine.KEY_PAUSED, if (s.recordingBlocked) "1" else "0")
                 FeatureFlags.applyServerDrivingMap(s.drivingMap)
             },
@@ -213,11 +224,15 @@ object TripEngineProvider {
                 purgeLocalViews(screen, coverage, place)
             },
             applyLocalPause = { on ->
-                engine.recordingPaused = on
+                if (on) engine.pauseRecording() else engine.recordingPaused = false
                 store.putString(TripEngine.KEY_PAUSED, if (on) "1" else "0")
             },
             gear = { engine.status.gear },
+            loadPausePending = { store.getString(KEY_PAUSE_PENDING) == "1" },
+            savePausePending = { store.putString(KEY_PAUSE_PENDING, if (it) "1" else "0") },
         )
+        // 서버가 기록 멈춤·동의 철회로 트립을 받지 않았다: 설정을 다시 읽어 로컬 멈춤을 맞춘다
+        uploader.onPausedByServer = { extras.refreshSettings() }
         extrasController = extras
         // 기어·QR: 기어가 바뀌면 말하는 중인 음성을 다시 확인하고 QR 요청 세대를 올린다
         engine.addGearListener { _ ->
@@ -271,7 +286,11 @@ object TripEngineProvider {
     fun setVoicePref(context: Context, on: Boolean) {
         context.applicationContext.getSharedPreferences("nubi", Context.MODE_PRIVATE).edit().putString(KEY_VOICE_PREF, if (on) "1" else "0").apply()
         FeatureFlags.applyVoicePref(on)
+        voiceAdapterRef?.recheck() // 끄면 말하는 중이어도 바로 멈춘다(stillAllowed가 플래그를 읽는다)
     }
 
     private const val KEY_VOICE_PREF = "voicePref"
+    private const val KEY_PAUSE_PENDING = "pausePending"
+    private const val KEY_PURGE_EPOCH = "purgeEpoch"
+    private const val KEY_FILES_EPOCH = "filesEpoch"
 }

@@ -87,6 +87,58 @@ class TripEngineTest {
     }
 
     @Test
+    fun 기록_멈춤을_켜면_진행_중_트립을_End로_먼저_끝내고_이후_샘플은_버린다() {
+        vehicle.vehicleId = "hash"
+        val e = engine()
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.drive(8)
+        assertEquals(TripState.RECORDING, e.status.state)
+        e.pauseRecording()
+        scheduler.runPosted()
+        scheduler.advance(5_000)
+        assertTrue(e.recordingPaused)
+        assertEquals("멈춤 켜기 순간 진행 중 트립이 End로 끝난다", 1, server.ended.size)
+        assertTrue(server.events.any { it.startsWith("end ") })
+        assertTrue(e.status.state != TripState.RECORDING)
+        // 이후 샘플은 버려져 새 트립이 시작되지 않는다
+        val creates = server.createCalls
+        e.drive(6, firstIndex = 30)
+        assertEquals(creates, server.createCalls)
+        assertTrue(e.status.state != TripState.RECORDING)
+    }
+
+    @Test
+    fun 데이터_삭제_뒤_지연_콜백이_옛_트립으로_큐를_다시_채우지_않는다() {
+        vehicle.vehicleId = null // 차량 ID를 아직 몰라 Start가 재시도 대기 중
+        val e = engine()
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.drive(4)
+        e.purgeAfterDataDeletion()
+        scheduler.runPosted()
+        scheduler.advance(30_000) // VIN 대기가 지나 UUID로 대체되는 시각
+        assertEquals(0, server.createCalls)
+        assertEquals(0, e.status.pendingPoints)
+    }
+
+    @Test
+    fun 오도미터_응답이_삭제_뒤에_늦게_와도_큐가_비어_있다() {
+        vehicle.vehicleId = "hash"
+        vehicle.deferOdometer = true
+        val e = engine()
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.drive(4)
+        e.purgeAfterDataDeletion()
+        scheduler.runPosted()
+        vehicle.releaseOdometer()
+        scheduler.runPosted()
+        scheduler.advance(5_000)
+        assertEquals(0, server.createCalls)
+    }
+
+    @Test
     fun 기어가_바뀌면_알린다() {
         val e = engine()
         val seen = ArrayList<Gear?>()

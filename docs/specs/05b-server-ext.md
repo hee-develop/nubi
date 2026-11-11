@@ -109,6 +109,13 @@
 ## 테이블 (`schema-ext.ts`)
 `way_revived`(`cov` 열: 되살린 길이 = 유효 길이 x 커버리지, 같은 차량(alias 포함)의 이전 마지막 시각 기준 UPDATE·INSERT 트리거, 중복 방지 유니크), `coverage_snapshots`, `accounts`, `auth_tokens`(`scope`·`expires_at`·`revoked_at`), `link_codes`(`attempts`), `guest_sessions`, `guest_trip_ways`·`guest_trip_cache`, `vehicle_settings`, `share_cards`(`png`), `intro_cache`(`fetched_at`)·`intro_calls`, `courses`, `certificates`. 테이블·열 이름에 `vin` 부분 문자열이 들어가면 기존 'VIN 미저장' 테스트가 실패하므로 피한다(그래서 `drive_map`).
 
+## 기록 멈춤의 정의(2026-11-12 확정)
+**기록 멈춤 = 이후 기록만 멈춘다**(plan 11-2 '일시 중지 요구권'). 진행 중이던 트립은 멈춤 전에 올라온 점만으로 정산하고, 이미 쌓인 기록은 그대로다. 지우는 일은 '데이터 지우기'(동의 철회)가 맡는다.
+- `POST /trips/:id/points`: 멈춤·철회 모두 저장하지 않고 200 `{ accepted:0, duplicated:0, paused:true }`.
+- `POST /trips`(새 트립 생성): 멈춤·철회 모두 행을 만들지 않고 200 `{ paused:true }`. 단 **같은 `(vehicleId, localId)` 행이 이미 있으면 차단보다 멱등 응답(기존 tripId)을 먼저** 준다(멈춤 직전에 만든 트립의 재전송). alias(UUID) 차량 ID도 정본 차량의 설정에 막힌다.
+- `POST /trips/:id/end`: **동의 철회일 때만** 막는다(200 `{ paused:true }`, 종료 시각도 기록하지 않음). 단순 멈춤이면 End를 받아 정산(매칭 큐)한다.
+- 구현은 `routes/account.ts`의 사전 미들웨어이고(`/trips`보다 앞) 차량 업로더는 `paused` 응답을 받으면 그 트립만 재시도 없이 버린다.
+
 ## 한계
 - 기록 멈춤은 서버에서 **점 업로드를 저장하지 않는 것**까지만 한다(트립 시작·종료는 받는다). 차량이 설정을 읽어 멈추는 쪽은 T4.
 - 게스트 도로는 '차량이 인정한 way ∩ 겹친 점 30m 이내'라서 차량이 그 way를 인정하지 않았으면(매칭 실패 등) 게스트도 못 받는다. 점 간격이 200m를 넘는 구간은 이어 보지 않는다.

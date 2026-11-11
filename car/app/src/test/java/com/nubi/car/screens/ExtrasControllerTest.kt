@@ -217,6 +217,9 @@ class ExtrasControllerTest {
         assertEquals(true, localPaused)
         failing.fail = false
         c.syncPendingPause()
+        assertTrue("백오프 중에는 바로 다시 보내지 않는다", c.pausePending)
+        clock = 120_000
+        c.syncPendingPause()
         assertFalse(c.pausePending)
         assertTrue(applied!!.recordingPaused)
     }
@@ -331,5 +334,100 @@ class ExtrasControllerTest {
         val c = ExtrasController(api, directExecutor, { null }, { parked }, { clock }, applySettings = { }, gear = { gear })
         c.requestGuestCode()
         assertEquals(CodeKind.GUEST to CodeError.NO_VEHICLE, c.codeError)
+    }
+
+    private class PendingStore { var pending = false }
+
+    private fun controllerWith(store: PendingStore, a: ExtrasApi = api) = ExtrasController(
+        a, directExecutor, { "vid" }, { parked }, { clock }, applySettings = { applied = it },
+        applyLocalPause = { localPaused = it }, gear = { gear },
+        loadPausePending = { store.pending }, savePausePending = { store.pending = it },
+    )
+
+    @Test
+    fun 멈춤_대기는_저장돼_재시작_뒤에도_서버_값_대신_켜기를_다시_보낸다() {
+        val offline = object : ExtrasApi by api {
+            override fun putSettings(vehicleId: String, patch: JSONObject): ServerSettings = throw java.io.IOException("offline")
+        }
+        val store = PendingStore()
+        val first = controllerWith(store, offline)
+        first.refreshSettings()
+        first.setPaused(true)
+        assertTrue("대기가 저장된다", store.pending)
+        // 재시작: 새 컨트롤러가 저장된 대기를 복원하고, 서버 값(false)을 쓰지 않고 켜기를 다시 보낸다
+        applied = null
+        val second = controllerWith(store)
+        assertTrue(second.pausePending)
+        second.refreshSettings()
+        assertEquals("서버 값이 false여도 켜기를 다시 보낸 결과가 반영된다", true, applied!!.recordingPaused)
+        assertTrue(api.puts.last().getBoolean("recordingPaused"))
+        assertFalse(second.pausePending)
+        assertFalse("확인되면 저장도 푼다", store.pending)
+    }
+
+    @Test
+    fun 끄기를_누르면_대기를_풀고_늦게_온_켜기_응답은_무시한다() {
+        var release: (() -> Unit)? = null
+        val slowOn = object : ExtrasApi by api {
+            override fun putSettings(vehicleId: String, patch: JSONObject): ServerSettings {
+                if (patch.optBoolean("recordingPaused", false)) {
+                    // 켜기 응답이 늦는 동안 끄기가 지나간다
+                    release?.invoke()
+                }
+                return api.putSettings(vehicleId, patch)
+            }
+        }
+        val store = PendingStore()
+        val c = controllerWith(store, slowOn)
+        c.refreshSettings()
+        release = { c.setPaused(false) } // 켜기 PUT 도중에 끄기를 누른다
+        c.setPaused(true)
+        assertFalse("끄기가 대기를 풀었다", c.pausePending)
+        assertFalse(store.pending)
+        assertEquals("마지막 의도(끄기)가 서버 확인으로 적용된다", false, applied!!.recordingPaused)
+        assertEquals(false, c.settings!!.recordingPaused)
+    }
+
+    @Test
+    fun 멈춤_대기_중에는_다른_설정_응답이_와도_recordingPaused는_로컬_값이다() {
+        val offlinePause = object : ExtrasApi by api {
+            override fun putSettings(vehicleId: String, patch: JSONObject): ServerSettings {
+                if (patch.has("recordingPaused")) throw java.io.IOException("offline")
+                return api.putSettings(vehicleId, patch) // 서버 값은 recordingPaused=false
+            }
+        }
+        val store = PendingStore()
+        val c = controllerWith(store, offlinePause)
+        c.refreshSettings()
+        c.setPaused(true)
+        c.setDrivingMap(false)
+        assertEquals(true, c.settings!!.recordingPaused)
+        assertEquals(true, applied!!.recordingPaused)
+        c.refreshSettings() // 대기 중 refresh도 서버 값(false)을 쓰지 않는다
+        assertEquals(true, c.settings!!.recordingPaused)
+        assertTrue(c.pausePending)
+    }
+
+    @Test
+    fun 영구_실패는_재시도를_멈추고_그_밖의_실패는_백오프로_늘린다() {
+        var calls = 0
+        val denied = object : ExtrasApi by api {
+            override fun putSettings(vehicleId: String, patch: JSONObject): ServerSettings {
+                calls++
+                throw HttpFailure(403, "HTTP 403", "forbidden")
+            }
+        }
+        val store = PendingStore()
+        val c = controllerWith(store, denied)
+        c.refreshSettings()
+        c.setPaused(true)
+        val after = calls
+        clock = 24L * 3600_000
+        repeat(5) { c.syncPendingPause() }
+        assertEquals("권한 문제는 다시 보내지 않는다", after, calls)
+        assertTrue("로컬은 계속 멈춤", c.pausePending)
+        // 사용자가 다시 켜기를 누르면 한 번 더 시도한다
+        c.setPaused(true)
+        assertEquals(after + 1, calls)
     }
 }

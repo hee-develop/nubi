@@ -47,6 +47,9 @@
 - 에뮬레이터 로그 예(E2E, 소리 자체는 확인하지 못함):
   `TTS 준비됨` → `TTS 요청 I01 글자=14` → `오디오 포커스 GRANTED(MAY_DUCK)` → `TTS 시작`(요청 후 약 0.2초) → `오디오 포커스 반납(TTS 완료)`. 같은 종류가 10분 안에 또 오면 `I01 건너뜀: 빈도 제한`.
 
+## 기록 멈춤의 뜻(확정): 이후 기록만 멈춘다
+plan 11-2 '일시 중지 요구권'에 따라 멈춤은 **이후 기록만** 멈춘다. 멈춤을 켜는 순간 진행 중인 트립이 있으면 엔진이 마지막 채택 샘플 시각으로 **End를 먼저 큐에 넣어** 끝낸 뒤 멈추고(`TripEngine.pauseRecording`), 서버는 멈춤 전에 올라온 점만으로 정산한다(`/end`는 동의 철회일 때만 막는다, 사양 05b '기록 멈춤의 정의'). 이미 쌓인 기록·큐는 지우지 않는다. 지우는 일은 `데이터 지우기`(동의 철회)가 맡는다.
+
 ## 기록 멈춤·서버 설정 (`ExtrasController`, `TripEngine.recordingPaused`)
 
 - `GET /vehicles/:id/settings`를 앱이 화면에 들어올 때·정차 진입 때·설정 탭을 열 때 읽는다. `recordingPaused` 또는 `consentWithdrawnAt`이면 엔진이 새 위치 샘플을 상태기계에 넣지 않고 버린다(새 트립도 시작하지 않는다, 기어는 계속 읽는다). 마지막 값은 `SharedPreferences`에 저장해 재시작 직후 서버 응답 전에도 지킨다.
@@ -75,7 +78,7 @@
 
 **인증 오류 분류**: 재등록은 401 또는 응답 `{error:'unauthorized'}`일 때만 한다(진행 중 플래그를 원자적으로 잡아 한 번만, `Auth.beginReregister`). `forbidden`·`local_only`·`not_parked`는 인증 실패가 아니라 오류 문구(`CodeError.FORBIDDEN`·`LOCAL_ONLY`·`NOT_PARKED`)로 따로 보인다. 토큰이 없는 모드에서도 2xx면 `Auth.failed`를 푼다. 업로더의 Alias 단계는 401·403이면 격리(dead-letter)하지 않고 보류한다. 차량 ID가 없을 때(`NO_VEHICLE`)·429(`RATE_LIMITED`)도 문구가 따로 있다.
 
-**기록 멈춤(오프라인)**: 멈춤 **켜기**는 로컬(엔진)에 즉시 적용·저장한 뒤 서버에 보내고, 못 보내면 `pausePending`으로 남겨 정차 진입·화면 복귀·30초 주기(`syncPendingPause`)에 다시 보낸다(대기 중에는 서버 값으로 덮지 않는다). **끄기**는 서버가 확인한 뒤에만 로컬에 적용한다. 멈춤 중에는 `place.refresh()`(`/regions/at`)와 지역 소개 호출을 하지 않는다(위치 좌표를 서버로 보내지 않는다). 지도 칸 요청은 화면에 보이는 영역의 bbox라 막지 않았다(기록이 아니라 열람이다).
+**기록 멈춤(오프라인)**: 멈춤 **켜기**는 로컬(엔진)에 즉시 적용·저장한 뒤 서버에 보내고, 못 보내면 `pausePending`(**저장되어 재시작 뒤에도 복원**)으로 남겨 정차 진입·화면 복귀·30초 주기(`syncPendingPause`)에 다시 보낸다. 대기 중에는 서버 값(`GET`·다른 설정의 `PUT` 응답)으로 `recordingPaused`를 덮지 않고, 서버 값이 false여도 켜기를 다시 보낸다(폰에서 끈 것을 되돌리지 않도록 대기가 없을 때는 서버 값이 이긴다). 영구 실패(403 `forbidden`·`local_only`)면 재시도를 멈추고 그 밖의 실패는 30초부터 두 배씩(최대 10분) 백오프하며 8회까지 시도한다. 켜기·끄기는 **마지막 의도 하나만** 유효하다(늦게 온 옛 의도의 응답은 무시). **끄기**는 대기를 풀고 서버가 확인한 뒤에만 로컬에 적용한다. 멈춤 중에는 `place.refresh()`(`/regions/at`)와 지역 소개 호출을 하지 않는다(위치 좌표를 서버로 보내지 않는다). 지도 칸 요청은 화면에 보이는 영역의 bbox라 막지 않았다(기록이 아니라 열람이다).
 
 **음성**: 말하기 직전(포커스 요청 전과 선행 묵음 지연 뒤 실제 `speak` 직전)에 호출자의 `stillAllowed`(기어·플래그, I01은 주행 중·I03은 P)를 다시 확인하고, 기어가 바뀌면(`engine.addGearListener` → `VoiceAdapter.recheck`) 말하는 중이어도 즉시 멈추고 포커스를 반납한다. `onDone`·`onError` 콜백은 발화 상태(`SpeechTurns`)가 소리가 **시작된** 지금 발화의 것일 때만 받아들인다(취소한 발화의 늦은 콜백이 새 발화를 끝내지 못한다). 10분 빈도 제한은 **실제로 말하기 시작할 때만** 기록한다(초기화 실패·포커스 거절은 횟수를 쓰지 않고 다음 응답에서 다시 시도한다). 규칙으로 건너뛴 시군구는 지나간 일로 보고 10분 뒤에도 말하지 않는다. 서비스 `onDestroy`·`onTaskRemoved`에서 `VoiceAdapter.release()`(재생 중단 → 포커스 반납 → TTS 해제)를 부르고 `open()` 전까지 새 재생·포커스 요청을 막는다(서비스 시작 때 `open`).
 - 오디오 usage 근거: 가이드 오디오 컨텍스트 표(`audio-focus-development-guide`)에서 `USAGE_ASSISTANT`는 VOICE_COMMAND, `USAGE_ASSISTANCE_NAVIGATION_GUIDANCE`는 NAVIGATION이다. 누비의 문장은 음성 비서 응답이 아니라 주행 위치 기반 짧은 안내라 NAVIGATION 컨텍스트가 맞다고 보고 바꿨다. `ANNOUNCEMENT` 컨텍스트는 공개 SDK(compileSdk 36 `AudioAttributes`)에 usage 상수가 없어 쓸 수 없었다. 순정 내비 안내와 겹치면 시스템 포커스 정책(NAVIGATION 간 충돌)이 정하며 실차 확인이 필요하다.
@@ -84,6 +87,8 @@
 **주행 규제**: `CarUxRestrictions.activeRestrictions`의 `UX_RESTRICTIONS_NO_SETUP` 비트를 따로 보관(`setupBlocked`, 모르면 true)하고 DO와 함께 메뉴·QR·설정·삭제·하차 카드·게스트 카드 판정에 넣는다(`UxState.blocked`). QR은 **실제 기어가 P일 때만**(기어를 모르면 거부) 받고 서버에도 실제 기어를 보낸다. QR 요청마다 세대 번호를 두고 기어가 바뀌면 올려서 늦게 온 응답을 버린다. 탭·버튼·내 지역 칸의 클릭마다 `allowedNow`로 한 번 더 확인한다.
 
 **조작성**: 정차 메뉴 탭과 버튼은 최소 높이 80dp·글자 32sp(내 지역 칸은 28sp), Back은 하위 상태(내 지역 목록·데이터 지우기 확인·QR·다른 탭)에서 한 단계만 되돌리고 최상위(지도 탭)에서만 `moveTaskToBack`. 정차 패널의 오른쪽 열은 이웃 카드(이름·인구감소 태그·길안내 1개, 한 줄)와 `지금 여기: {시군구}` 소개 카드(관광지·축제·길안내)로 나눴다(공간이 모자라면 소개 카드가 우선). 게스트 카드는 문구를 두 줄로 나누고 코드와 남은 시간을 따로 줄에 둔다.
+
+**삭제 세대(리뷰 3차)**: 삭제 때 평문 prefs의 삭제 세대값(`purgeEpoch`)을 올리고, 큐·server-ids·dead-letter 파일을 지운 것이 확인되면 파일 세대(`filesEpoch`)를 맞춘다. 로드 전에 삭제했거나 임시 키(memoryOnly)여서 파일을 못 지웠다면 세대가 뒤처져 다음 로드가 그 파일을 읽지 않고 폐기한다. `clearAll`은 dead-letter가 아직 열리지 않았어도 파일을 지운다. 트립 컨텍스트는 큐를 비울 때마다 올라가는 세대값을 들고 있어 오도미터 대기·재시도 같은 지연 콜백이 옛 트립으로 큐를 다시 채우지 못한다. End 응답 사이에 큐가 비워졌으면(삭제) `onTripEnded`를 부르지 않는다. `PausedByServer`로 버린 localId는 tombstone(최대 200개)에 두어 뒤늦게 들어오는 같은 트립의 점·End를 dead-letter 없이 버리고, 서버 설정을 다시 읽어 로컬 멈춤을 맞춘다. 재등록이 끝난 뒤 **옛 토큰으로 보낸 요청의 401**이 늦게 와도 `failed`로 만들지 않는다(보낸 토큰과 지금 토큰 비교). 음성 빈도 기록은 TTS `onStart` 콜백 때 한다(발화 번호가 없는 SDK라, 취소한 발화의 늦은 `onStart`가 새 발화 뒤에 오면 구분하지 못하는 드문 경합이 남는다). 음성 토글을 끄면 `recheck`를 즉시 불러 말하는 중이어도 멈춘다. 지역 소개 카드의 제목 `지금 여기: …`은 시군구를 모르면 숨긴다.
 
 **기타**: `zxing:core`를 3.5.4(Maven Central 최신 안정, 3.3.3에서 올림)로 올렸다. `SummaryCard`는 `onDestroy`에서 썸네일 저장소 리스너를 끊는다.
 

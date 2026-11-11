@@ -665,7 +665,6 @@
                 android:layout_height="wrap_content"
                 android:textStyle="bold"
                 android:layout_marginTop="0dp"
-                android:text="@string/poi_label"
                 android:textColor="@color/muted"
                 android:textSize="@dimen/text_sub" />
 

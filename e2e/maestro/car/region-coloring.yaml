@@ -62,7 +62,7 @@ env:
     visible: '예시 항목'
     timeout: 30000
 - assertVisible: '자료: 한국관광공사\(예시\)'
-- assertVisible: '지금 여기: .*'
+- assertVisible: '지금 여기: .+'
 - assertVisible: '길안내'
 - takeScreenshot: ${SHOT_DIR}/22-region-visit
 

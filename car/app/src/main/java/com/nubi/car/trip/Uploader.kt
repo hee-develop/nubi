@@ -7,6 +7,17 @@ import java.util.concurrent.atomic.AtomicInteger
 
 enum class DrainKind { OK, RETRY, HELD }
 
+/**
+ * 데이터 삭제 세대값(평문 저장소). 삭제 때 [bump]로 올리고 큐 파일을 비운 것이 확인되면 [markFiles]로 파일 세대를 맞춘다.
+ * 로드 전에 삭제했거나 임시 키(memoryOnly)여서 파일을 못 지웠다면 파일 세대가 뒤처져, 다음 로드가 그 파일(큐·server-ids·dead-letter)을 폐기한다.
+ */
+interface PurgeEpochs {
+    fun purgeEpoch(): Long
+    fun filesEpoch(): Long
+    fun bump(): Long
+    fun markFiles(epoch: Long)
+}
+
 /** [HELD]는 서버가 요청 자체를 거절해(Start 4xx 등) 항목을 버리지 않고 보류한 트립이 남은 경우다. */
 data class DrainResult(val kind: DrainKind, val uploadedPoints: Int, val message: String, val endedTrips: Int = 0) {
     val ok: Boolean get() = kind == DrainKind.OK
@@ -41,6 +52,7 @@ class Uploader(
     private val compactEvery: Int = 1_000,
     private val deadLetterMax: Int = 5_000,
     private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 },
+    private val epochs: PurgeEpochs? = null,
 ) {
     /** 서버에 만든 트립의 서버 id와, 404일 때 다시 만들 Start, 마지막으로 올린 점의 시각. */
     private data class Registration(val serverId: String, val start: QueueEntry.Start, val lastPointTs: Long?)
@@ -93,6 +105,19 @@ class Uploader(
     var lastPointsUploadedAtMs = 0L
         private set
 
+    /** 서버가 기록 멈춤·동의 철회로 트립을 받지 않았다(PausedByServer). 화면 쪽이 서버 설정을 다시 읽어 로컬 멈춤을 맞춘다. 워커 스레드에서 불린다. */
+    @Volatile
+    var onPausedByServer: () -> Unit = {}
+
+    /** paused로 버린 트립의 localId(상한 [TOMBSTONE_MAX], 오래된 것부터 잊는다). 이후 같은 localId 항목은 dead-letter 없이 조용히 버린다. */
+    private val tombstones = object : LinkedHashSet<String>() {
+        override fun add(element: String): Boolean {
+            val r = super.add(element)
+            while (size > TOMBSTONE_MAX) remove(first())
+            return r
+        }
+    }
+
     /** 점 업로드가 성공할 때마다(주행 지도가 그 직후 잠정 색칠을 한 번 묻는다). 예외는 업로드에 영향을 주지 않는다. 워커 스레드에서 불린다. */
     @Volatile
     var onPointsUploaded: () -> Unit = {}
@@ -143,6 +168,14 @@ class Uploader(
             }
             memoryOnly = !setup.persistent
             discardedLines = setup.discardedLines
+            // 삭제 세대보다 오래된 파일(삭제 때 못 지운 큐·server-ids·dead-letter)은 읽지 않고 폐기한다
+            epochs?.let { ep ->
+                if (ep.filesEpoch() < ep.purgeEpoch()) {
+                    for (f in listOf(queueFile, idsFile, deadLetterFile)) runCatching { f.delete() }
+                    ep.markFiles(ep.purgeEpoch())
+                    Log.i(TAG, "삭제 전 큐 파일 폐기")
+                }
+            }
             queue = TripQueue(queueFile, setup.cipher)
             ids = EncryptedLines(idsFile, setup.cipher)
             deadLetters = EncryptedLines(deadLetterFile, setup.cipher)
@@ -211,6 +244,12 @@ class Uploader(
      */
     fun enqueue(vararg added: QueueEntry): Boolean {
         if (added.isEmpty()) return true
+        // paused로 버린 트립의 뒤늦은 항목(점·End)은 dead-letter에 넣지 않고 버린다
+        val kept = synchronized(lock) { added.filter { it.localId !in tombstones } }
+        if (kept.size != added.size) {
+            if (kept.isEmpty()) return true
+            return enqueue(*kept.toTypedArray())
+        }
         var ok = true
         val canEncrypt = loaded && !memoryOnly
         val prepared = ArrayList<Pair<QueueEntry, String?>>(added.size)
@@ -312,23 +351,47 @@ class Uploader(
             total.set(entries.size)
             registrations.remove(localId)
             held.remove(localId)
+            tombstones.add(localId)
             structVersion++
             dirty = true
         }
         saveRegistrations()
+        try {
+            onPausedByServer()
+        } catch (t: Throwable) {
+            Log.w(TAG, "paused 알림 예외: ${t.javaClass.simpleName}")
+        }
         return n
     }
 
-    /** 사용자가 데이터를 지웠다(동의 철회): 큐·등록·dead-letter를 모두 지운다. 파일은 암호화된 빈 내용으로 다시 쓴다. */
+    /**
+     * 사용자가 데이터를 지웠다(동의 철회): 큐·등록·dead-letter를 모두 지운다(tombstone도 비운다). 삭제 세대값을 먼저 올리고(평문), 파일을 비운 것이 확인되면 파일 세대를 맞춘다.
+     * 로드 전이거나 임시 키(memoryOnly)여서 파일을 못 지웠으면 세대가 뒤처져 다음 로드가 그 파일을 폐기한다. dead-letter가 아직 열리지 않았어도 파일을 직접 지운다.
+     */
     fun clearAll() {
+        val epoch = epochs?.bump()
+        synchronized(lock) { tombstones.clear() }
         clear()
+        var filesCleared = loaded && !memoryOnly
         synchronized(deadLock) {
             try {
-                if (::deadLetters.isInitialized && !memoryOnly) deadLetters.rewrite(emptyList())
+                if (::deadLetters.isInitialized && !memoryOnly) {
+                    deadLetters.rewrite(emptyList())
+                } else if (!deadLetterFile.delete() && deadLetterFile.exists()) {
+                    filesCleared = false
+                }
             } catch (t: Exception) {
+                filesCleared = false
                 Log.w(TAG, "dead-letter 비우기 실패: ${t.javaClass.simpleName}")
             }
         }
+        if (!loaded || memoryOnly) {
+            // 아직 못 읽은(또는 못 읽는) 파일은 지울 수 있으면 지운다. 못 지우면 세대가 뒤처져 다음 로드가 폐기한다
+            for (f in listOf(queueFile, idsFile, deadLetterFile)) runCatching { f.delete() }
+            filesCleared = !queueFile.exists() && !idsFile.exists() && !deadLetterFile.exists()
+        }
+        if (epoch != null && filesCleared) epochs?.markFiles(epoch)
+        Log.i(TAG, "큐 비움 pending=${pendingEntries}")
     }
 
     fun clear() {
@@ -542,12 +605,15 @@ class Uploader(
                                 }
                             }
                             if (save) saveRegistrations()
-                            ended++
                             if (liveTripId == step.serverId) liveTripId = null
-                            try {
-                                onTripEnded(step.serverId, step.end.localId)
-                            } catch (t: Throwable) {
-                                Log.w(TAG, "종료 알림 예외: ${t.javaClass.simpleName}")
+                            // 그 사이 큐가 비워졌다면(데이터 삭제) 삭제된 트립을 폴링하지 않게 종료 알림을 부르지 않는다
+                            if (save) {
+                                ended++
+                                try {
+                                    onTripEnded(step.serverId, step.end.localId)
+                                } catch (t: Throwable) {
+                                    Log.w(TAG, "종료 알림 예외: ${t.javaClass.simpleName}")
+                                }
                             }
                         }
                         is Step.Orphan -> {
@@ -851,5 +917,6 @@ class Uploader(
 
     private companion object {
         const val TAG = "NubiUpload"
+        const val TOMBSTONE_MAX = 200
     }
 }

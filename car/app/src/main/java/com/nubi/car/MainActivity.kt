@@ -727,7 +727,7 @@ class MainActivity : Activity() {
         val showPoi = intro != null && (sight != null || festival != null)
         v.introCard.visibility = if (showPoi) View.VISIBLE else View.GONE
         v.poiRow.visibility = if (showPoi) View.VISIBLE else View.GONE
-        v.poiLabel.visibility = if (showPoi) View.VISIBLE else View.GONE
+        v.poiLabel.visibility = if (showPoi && hereName != null) View.VISIBLE else View.GONE
         v.poiLabel.text = getString(R.string.poi_label, hereName?.let { limitText(it, distractionOptimized, maxStringLength, statusLine = false) } ?: "")
         v.poiSource.visibility = if (showPoi) View.VISIBLE else View.GONE
         if (showPoi && intro != null) {

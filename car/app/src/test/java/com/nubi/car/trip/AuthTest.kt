@@ -253,4 +253,25 @@ class AuthTest {
         assertFalse(Auth.failed)
         assertTrue("성공 응답 뒤에는 다시 시도할 수 있다", Auth.beginReregister())
     }
+
+    @Test
+    fun 재등록_뒤_옛_토큰으로_보낸_요청의_401은_늦게_와도_실패로_만들지_않는다() {
+        var called = 0
+        Auth.onUnauthorized = { called++ }
+        // 재등록으로 토큰이 new-token이 된 뒤, 옛 토큰으로 보낸 요청의 401이 늦게 도착한다
+        Auth.token = "new-token"
+        try {
+            finishResponse(401, "", "/x", "old-token")
+        } catch (e: HttpFailure) {
+            assertEquals(401, e.status)
+        }
+        assertEquals("보낸 토큰이 지금 토큰이 아니면 재등록을 부르지 않는다", 0, called)
+        assertFalse(Auth.failed)
+        // 지금 토큰으로 보낸 401은 정상적으로 재등록을 부른다
+        try {
+            finishResponse(401, "", "/x", "new-token")
+        } catch (e: HttpFailure) {
+        }
+        assertEquals(1, called)
+    }
 }

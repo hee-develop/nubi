@@ -243,6 +243,9 @@ const items = Array.isArray(t) ? t : (t.items ?? t.trips ?? []);
 if (items.length !== 0) { console.error("실패: 삭제 뒤 기다리는 사이 트립이 " + items.length + "개 다시 생겼습니다"); process.exit(1); }
 console.log("삭제 8초 뒤에도 트립 0개");
 ' "$RUN_DIR/trips-after-delete-wait.json" | tee -a "$RUN_DIR/delete-verify.txt"
+# 차량 로컬 업로드 큐도 비었는지(데이터 삭제 때 Uploader.clearAll이 남기는 로그)
+grep -q "NubiUpload.*큐 비움 pending=0" "$RUN_DIR/app-logcat-parked-menu-attempt1.txt" || { echo "실패: 삭제 뒤 차량 로컬 큐 비움(pending=0) 로그가 없습니다" >&2; exit 1; }
+echo "삭제 뒤 차량 로컬 큐 pending=0 확인" | tee -a "$RUN_DIR/delete-verify.txt"
 verify_voice | tee -a "$RUN_DIR/delete-verify.txt"
 write_summary
 echo "== 통과. 산출물: $RUN_DIR"

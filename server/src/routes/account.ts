@@ -37,15 +37,20 @@ export const accountRoutes = (deps: ExtDeps) => {
       if (t && isRecordingBlocked(db, t.vehicle_id)) return c.json({ accepted: 0, duplicated: 0, paused: true as const }, 200);
       return next();
     })
-    // 트립 생성·종료도 같은 차단(기록 멈춤·동의 철회, 이중 방어): 차단 중이면 행을 만들지 않고 200 `{ paused: true }`. 차량 업로더는 이 응답을 받으면 그 트립을 재시도 없이 버린다.
+    // 기록 멈춤의 뜻은 "이후 기록만 멈춘다"(plan 11-2 일시 중지 요구권). 진행 중이던 트립은 멈춤 전에 올라온 점만으로 정산해야 하므로 End는 받는다.
+    // 지우는 쪽은 '데이터 지우기'(동의 철회)가 맡는다. 그래서 새 트립 생성은 멈춤·철회 모두 막고(행을 만들지 않고 200 `{ paused: true }`), End는 철회일 때만 막는다.
+    // 같은 (vehicleId, localId) 트립이 이미 있으면 생성은 차단보다 멱등 응답(기존 tripId)이 먼저다(멈춤 직전에 만든 트립의 재전송).
     .post('/trips', async (c, next) => {
-      const b = (await bodyOf(c)) as { vehicleId?: unknown } | undefined;
-      if (typeof b?.vehicleId === 'string' && b.vehicleId.length > 0 && b.vehicleId.length <= 128 && isRecordingBlocked(db, b.vehicleId)) return c.json({ paused: true as const }, 200);
+      const b = (await bodyOf(c)) as { vehicleId?: unknown; localId?: unknown } | undefined;
+      if (typeof b?.vehicleId === 'string' && b.vehicleId.length > 0 && b.vehicleId.length <= 128 && isRecordingBlocked(db, b.vehicleId)) {
+        const existing = typeof b.localId === 'string' ? db.prepare('SELECT 1 AS x FROM trips WHERE vehicle_id = ? AND local_id = ?').get(b.vehicleId, b.localId) : undefined;
+        if (!existing) return c.json({ paused: true as const }, 200);
+      }
       return next();
     })
     .post('/trips/:tripId/end', async (c, next) => {
       const t = db.prepare('SELECT vehicle_id FROM trips WHERE id = ?').get(c.req.param('tripId')) as { vehicle_id: string } | undefined;
-      if (t && isRecordingBlocked(db, t.vehicle_id)) return c.json({ paused: true as const }, 200);
+      if (t && readSettings(db, canonicalVehicleId(db, t.vehicle_id)).consentWithdrawnAt !== null) return c.json({ paused: true as const }, 200);
       return next();
     })
     // T1 실시간 색칠(`GET /trips/:id/live`)에도 같은 차단을 건다: 멈춘 차량은 잠정 결과를 만들지도 내보내지도 않는다. T1 라우트는 이 라우트보다 뒤에 붙는다.

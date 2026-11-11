@@ -55,6 +55,9 @@ class TripEngine(
     private var clockOffsetMillis = 0L
     private var active: TripCtx? = null
 
+    /** 큐를 비울 때마다(데이터 삭제·reset) 올라간다. 지연 콜백(오도미터 대기·재시도)이 옛 트립 컨텍스트로 큐를 다시 채우지 않게 컨텍스트가 만들어질 때의 값과 비교한다. */
+    private var ctxEpoch = 0
+
     /** 지금 기록 중인 트립의 로컬 id(없으면 null). 지도가 '이 정산이 지금 트립의 것인가'를 가릴 때 쓴다. */
     @Volatile
     var recordingLocalId: String? = null
@@ -134,7 +137,7 @@ class TripEngine(
         private set
 
     /** 한 트립이 서버 큐에 올라가기까지의 임시 상태. Start는 오도미터·차량 ID가 준비돼야 큐에 들어간다. */
-    private class TripCtx(val localId: String, val startedAtMillis: Long) {
+    private class TripCtx(val localId: String, val startedAtMillis: Long, val epoch: Int) {
         val held = ArrayList<TripPoint>()
         var startPending = true
         var odoReady = false
@@ -326,6 +329,18 @@ class TripEngine(
     }
 
     /**
+     * 기록 멈춤을 켠다("이후 기록만 멈춘다", plan 11-2): 이후 위치 샘플은 즉시 버리고, 진행 중인 트립이 있으면 마지막 채택 샘플 시각으로 End를 **먼저 큐에 넣어** 끝낸 뒤 멈춘다
+     * (서버가 멈춤 전에 올라온 점만으로 정산한다). 큐를 지우는 일은 [purgeAfterDataDeletion](데이터 지우기)이 맡는다.
+     */
+    fun pauseRecording() {
+        recordingPaused = true
+        scheduler.post {
+            handle(machine.onStop(), immediate = true)
+            publish()
+        }
+    }
+
+    /**
      * 사용자가 서버 데이터를 지웠다(위치정보 동의 철회): 로컬에서도 **먼저** 기록 멈춤을 켜고 저장한 뒤, 진행 중 트립·상태기계·업로드 큐(dead-letter·서버 등록 포함)를 모두 버린다.
      * release 빌드에서도 동작한다. 서버 설정 조회가 실패해도 멈춤은 유지된다(풀리는 것은 서버가 확인한 뒤에만).
      */
@@ -341,6 +356,7 @@ class TripEngine(
 
     /** 상태기계·진행 중 트립·큐를 비운다(엔진 스레드). [reset]과 [purgeAfterDataDeletion]이 함께 쓴다. */
     private fun discardState(clearDeadLetters: Boolean = false) {
+        ctxEpoch++
         machine.reset()
         parkedAwaitingLocation = false
         active = null
@@ -375,7 +391,7 @@ class TripEngine(
                     } catch (t: Throwable) {
                         Log.w(TAG, "트립 시작 알림 예외: ${t.javaClass.simpleName}")
                     }
-                    val ctx = TripCtx(UUID.randomUUID().toString(), e.startedAtMillis)
+                    val ctx = TripCtx(UUID.randomUUID().toString(), e.startedAtMillis, ctxEpoch)
                     liveTrips.add(ctx.localId)
                     ctx.held.addAll(e.points)
                     active = ctx
@@ -415,6 +431,7 @@ class TripEngine(
      * 트립이 이미 끝났으면(Ended가 먼저 온 경우) 보관해 둔 종료 시각으로 End까지 이어서 올린다.
      */
     private fun tryBegin(ctx: TripCtx, force: Boolean) {
+        if (ctx.epoch != ctxEpoch) return // 그 사이 큐를 비웠다(데이터 삭제 등): 옛 트립을 다시 올리지 않는다
         if (!ctx.startPending) return
         if (!ctx.odoReady && !force) return
         val vehicleId = resolveVehicleId(force)
@@ -434,6 +451,7 @@ class TripEngine(
     }
 
     private fun finishTrip(ctx: TripCtx, endedAtMillis: Long, odoEnd: Double?, force: Boolean) {
+        if (ctx.epoch != ctxEpoch) return
         ctx.ended = true
         ctx.endedAtMillis = endedAtMillis
         ctx.odoEnd = odoEnd
@@ -449,7 +467,7 @@ class TripEngine(
     }
 
     private fun enqueuePoints(ctx: TripCtx, points: List<TripPoint>) {
-        if (points.isEmpty()) return
+        if (points.isEmpty() || ctx.epoch != ctxEpoch) return
         uploader.enqueue(*points.map { QueueEntry.Point(ctx.localId, it) }.toTypedArray())
         if (uploader.pendingPoints >= UPLOAD_BATCH_POINTS) requestUpload(force = false)
     }

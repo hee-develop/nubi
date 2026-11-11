@@ -19,6 +19,7 @@ fun newUploader(
     deadLetterMax: Int = 5_000,
     nowMs: () -> Long = { System.nanoTime() / 1_000_000 },
     load: Boolean = true,
+    epochs: PurgeEpochs? = null,
 ) = Uploader(
     queueFile = File(dir, "queue.jsonl"),
     idsFile = File(dir, "server-ids.jsonl"),
@@ -30,6 +31,7 @@ fun newUploader(
     compactEvery = compactEvery,
     deadLetterMax = deadLetterMax,
     nowMs = nowMs,
+    epochs = epochs,
 ).also { if (load) it.load() }
 
 /** Keystore 대신 소프트웨어 AES 키로 DEK를 감싸는 테스트용 래퍼. */
@@ -200,7 +202,19 @@ class FakeVehicle : VehicleSource {
         stopped++
     }
 
-    override fun readOdometerKm(callback: (Double?) -> Unit) = callback(odometer)
+    /** true면 오도미터 응답을 붙들어 둔다([releaseOdometer]로 늦게 준다). */
+    var deferOdometer = false
+    val deferred = ArrayList<(Double?) -> Unit>()
+
+    override fun readOdometerKm(callback: (Double?) -> Unit) {
+        if (deferOdometer) deferred.add(callback) else callback(odometer)
+    }
+
+    fun releaseOdometer() {
+        val l = ArrayList(deferred)
+        deferred.clear()
+        l.forEach { it(odometer) }
+    }
 }
 
 class MapStore : KeyValueStore {
@@ -267,5 +281,17 @@ class TinyHttpServer(private val handler: (String, String) -> Pair<Int, String>)
 
     override fun close() {
         socket.close()
+    }
+}
+
+/** 메모리 기반 삭제 세대 저장소(테스트용). */
+class MemEpochs : PurgeEpochs {
+    var purge = 0L
+    var files = 0L
+    override fun purgeEpoch() = purge
+    override fun filesEpoch() = files
+    override fun bump(): Long = ++purge
+    override fun markFiles(epoch: Long) {
+        files = epoch
     }
 }

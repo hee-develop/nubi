@@ -91,7 +91,7 @@ internal fun getText(baseUrl: String, path: String, bearerToken: String? = null)
         conn.readTimeout = 10_000
         val code = conn.responseCode
         val text = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() } ?: ""
-        return finishResponse(code, text, path, token != null)
+        return finishResponse(code, text, path, token)
     } finally {
         conn.disconnect()
     }

@@ -39,14 +39,39 @@ class ExtrasController(
     private val applyLocalPause: (Boolean) -> Unit = {},
     /** 지금 기어(서버에 실제 값을 보낸다). */
     private val gear: () -> Gear? = { Gear.P },
+    /** 로컬 멈춤이 서버에 안 닿은 상태를 저장·복원한다(재시작해도 켜기를 다시 보낸다). */
+    private val loadPausePending: () -> Boolean = { false },
+    private val savePausePending: (Boolean) -> Unit = {},
 ) {
     /** 요청마다 올리는 세대 번호. 기어가 바뀌거나 코드를 닫을 때 올라가서 늦게 온 응답이 QR을 되살리지 못한다. */
     private val generation = AtomicInteger()
 
-    /** 로컬에서 멈췄지만(켜기) 서버에는 아직 닿지 않았다. 서버 동기화를 재시도한다([syncPendingPause]). */
+    /** 로컬에서 멈췄지만(켜기) 서버에는 아직 닿지 않았다. 저장해 두었다가 재시작 뒤에도 서버 동기화를 재시도한다([syncPendingPause]). */
     @Volatile
-    var pausePending = false
+    var pausePending = try {
+        loadPausePending()
+    } catch (t: Throwable) {
+        false
+    }
         private set
+
+    /** 멈춤 켜기·끄기를 누를 때마다 올라간다('마지막 의도'만 유효). 늦게 온 옛 의도의 응답은 무시한다. */
+    @Volatile
+    private var intent = 0
+    private var pauseFailures = 0
+    private var pauseNextTryAt = 0L
+
+    private fun setPending(v: Boolean) {
+        pausePending = v
+        try {
+            savePausePending(v)
+        } catch (t: Throwable) {
+            Log.w(TAG, "멈춤 대기 저장 실패: ${t.javaClass.simpleName}")
+        }
+    }
+
+    /** 대기 중인 멈춤이 있으면 화면에 보이는 설정의 recordingPaused는 항상 로컬 값(켜짐)이다. */
+    private fun reconcile(s: ServerSettings): ServerSettings = if (pausePending) s.copy(recordingPaused = true) else s
 
     @Volatile
     var settings: ServerSettings? = null
@@ -89,10 +114,13 @@ class ExtrasController(
 
     // 설정 -----------------------------------------------------------------
 
-    /** 시작할 때와 정차 진입 때 부른다. 실패하면 마지막 값을 유지한다. 로컬 멈춤이 서버에 아직 안 닿았으면 서버 값으로 덮지 않고 동기화를 다시 시도한다. */
+    /**
+     * 시작할 때와 정차 진입 때 부른다. 실패하면 마지막 값을 유지한다.
+     * 로컬 멈춤이 서버에 안 닿았다면(저장돼 재시작 뒤에도 남는다) 서버 값을 쓰지 않고 켜기를 다시 보낸다.
+     */
     fun refreshSettings() {
         if (pausePending) {
-            syncPause()
+            syncPendingPause()
             return
         }
         work {
@@ -110,13 +138,13 @@ class ExtrasController(
         }
     }
 
-    /** 설정 한 항목을 바꾼다(부분 갱신). 서버 응답이 새 값이다(서버가 확인한 뒤에 적용). 화면을 열어도 되는 상태일 때만. */
+    /** 설정 한 항목을 바꾼다(부분 갱신). 서버 응답이 새 값이다. 멈춤이 대기 중이면 응답이 와도 recordingPaused는 로컬 값을 유지한다. 화면을 열어도 되는 상태일 때만. */
     fun update(patch: JSONObject) {
         if (!allowed()) return
         work {
             val id = vehicleId() ?: return@work
             try {
-                val s = api.putSettings(id, patch)
+                val s = reconcile(api.putSettings(id, patch))
                 settings = s
                 settingsError = false
                 applySettings(s)
@@ -128,37 +156,52 @@ class ExtrasController(
     }
 
     /**
-     * 기록 멈춤. **켜기**는 로컬에 즉시 적용·저장한 뒤 서버에 보내고(실패하면 정차할 때와 주기적으로 다시 보낸다), **끄기**는 서버가 확인한 뒤에만 적용한다.
+     * 기록 멈춤("이후 기록만 멈춘다"). **켜기**는 로컬(엔진)에 즉시 적용·저장하고(진행 중 트립은 엔진이 End로 끝낸다) 서버에 보낸다. 못 보내면 대기로 남겨 다시 보낸다.
+     * **끄기**는 대기를 풀고 서버가 확인한 뒤에만 적용한다. 켜기·끄기는 마지막 의도 하나만 유효하다.
      */
     fun setPaused(paused: Boolean) {
         if (!allowed()) return
+        intent++
+        pauseFailures = 0
+        pauseNextTryAt = 0L
         if (!paused) {
+            setPending(false)
             update(JSONObject().put("recordingPaused", false))
             return
         }
         applyLocalPause(true)
-        pausePending = true
+        setPending(true)
         settings = settings?.copy(recordingPaused = true)
         settingsError = false
-        syncPause()
+        pushPause()
     }
 
-    /** 로컬 멈춤이 서버에 안 닿았을 때 다시 보낸다(정차 진입·화면 복귀·주기). 닿았으면 아무 일도 하지 않는다. */
+    /** 로컬 멈춤이 서버에 안 닿았을 때 다시 보낸다(정차 진입·화면 복귀·주기). 영구 실패(권한 등)면 멈추고, 그 밖에는 백오프를 둔다. */
     fun syncPendingPause() {
-        if (pausePending) syncPause()
+        if (!pausePending) return
+        if (pauseFailures >= MAX_PAUSE_FAILURES || elapsedMs() < pauseNextTryAt) return
+        pushPause()
     }
 
-    private fun syncPause() = work {
-        val id = vehicleId() ?: return@work
-        try {
-            val s = api.putSettings(id, JSONObject().put("recordingPaused", true))
-            pausePending = false
-            settings = s
-            settingsError = false
-            applySettings(s)
-        } catch (e: Exception) {
-            settingsError = true // 로컬 멈춤은 그대로 두고 나중에 다시 보낸다
-            Log.w(TAG, "기록 멈춤 서버 동기화 실패(로컬은 멈춤): ${e.javaClass.simpleName}")
+    private fun pushPause() {
+        val seq = intent
+        work {
+            val id = vehicleId() ?: return@work
+            try {
+                val s = api.putSettings(id, JSONObject().put("recordingPaused", true))
+                if (seq != intent) return@work // 그 사이 끄기를 눌렀다: 옛 켜기 응답은 무시
+                setPending(false)
+                pauseFailures = 0
+                settings = s
+                settingsError = false
+                applySettings(s)
+            } catch (e: Exception) {
+                if (seq != intent) return@work
+                settingsError = true // 로컬 멈춤은 그대로 두고 나중에 다시 보낸다
+                pauseFailures = if (e is HttpFailure && (e.status == 403 && (e.code == "forbidden" || e.code == "local_only"))) MAX_PAUSE_FAILURES else pauseFailures + 1
+                pauseNextTryAt = elapsedMs() + minOf(30_000L shl minOf(pauseFailures, 5), 10 * 60_000L)
+                Log.w(TAG, "기록 멈춤 서버 동기화 실패(로컬은 멈춤, ${pauseFailures}회): ${e.javaClass.simpleName}")
+            }
         }
     }
 
@@ -218,6 +261,7 @@ class ExtrasController(
             } catch (t: Throwable) {
                 Log.w(TAG, "삭제 뒤 로컬 정리 예외: ${t.javaClass.simpleName}")
             }
+            setPending(false) // 서버도 멈춤 상태가 됐다(대기할 것이 없다)
             dex.clear()
             almostRoads.clear()
             allRoads.clear()
@@ -392,6 +436,7 @@ class ExtrasController(
     }
 
     private companion object {
+        const val MAX_PAUSE_FAILURES = 8
         const val TAG = "NubiExtras"
     }
 }

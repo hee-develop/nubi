@@ -71,29 +71,65 @@ describe('설정', () => {
     expect(b.up.body.accepted).toBe(80);
   });
 
-  it('기록 멈춤·동의 철회면 트립 생성·종료도 행을 만들지 않고 200 paused로 응답한다(이중 방어)', async () => {
+  it('기록 멈춤은 이후 기록만 멈춘다: 새 트립은 막고, 멈춤 전에 만든 트립의 재전송(멱등)과 End는 받아 정산한다', async () => {
     const e = await setup();
-    const pts = eastPoints(10, T0);
-    const open = await call(e, '/trips', post('', { localId: 'open-1', vehicleId: V, driverId: V, startedAt: pts[0]!.ts }));
+    const pts = eastPoints(80, T0);
+    const body = { localId: 'open-1', vehicleId: V, driverId: V, startedAt: pts[0]!.ts };
+    const open = await call(e, '/trips', post('', body));
     const openId = open.body.tripId as string;
+    await call(e, `/trips/${openId}/points`, post('', { points: pts }));
     await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: true }));
     const before = (e.db.prepare('SELECT COUNT(*) AS n FROM trips').get() as any).n;
+    // 새 트립은 막는다(행 없음)
     const create = await call(e, '/trips', post('', { localId: 'new-1', vehicleId: V, driverId: V, startedAt: pts[0]!.ts }));
     expect(create.status).toBe(200);
     expect(create.body).toEqual({ paused: true });
     expect((e.db.prepare('SELECT COUNT(*) AS n FROM trips').get() as any).n).toBe(before);
+    // 이미 있는 트립의 재전송은 멱등 응답(기존 tripId)
+    const again = await call(e, '/trips', post('', body));
+    expect(again.body.tripId).toBe(openId);
+    // End는 받고 멈춤 전에 올라온 점만으로 정산(매칭 큐)한다
     const end = await call(e, `/trips/${openId}/end`, post('', { endedAt: pts.at(-1)!.ts }));
-    expect(end.body).toEqual({ paused: true });
-    expect((e.db.prepare('SELECT ended_at FROM trips WHERE id = ?').get(openId) as any).ended_at).toBeNull();
-    // 동의 철회(데이터 삭제) 뒤에도 같다
-    await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: false }));
-    await call(e, `/vehicles/${V}/data`, { method: 'DELETE' });
-    const after = await call(e, '/trips', post('', { localId: 'new-2', vehicleId: V, driverId: V, startedAt: pts[0]!.ts }));
-    expect(after.body).toEqual({ paused: true });
-    expect((e.db.prepare('SELECT COUNT(*) AS n FROM trips').get() as any).n).toBe(0);
+    expect(end.status).toBe(200);
+    expect(end.body.matching).toBe('queued');
+    expect((e.db.prepare('SELECT ended_at FROM trips WHERE id = ?').get(openId) as any).ended_at).not.toBeNull();
+    await e.app.matching.idle();
+    expect((e.db.prepare("SELECT status FROM trip_matching WHERE trip_id = ?").get(openId) as any)?.status).toBeDefined();
+    // 멈춤 중 점 업로드는 저장하지 않는다
+    const up = await call(e, `/trips/${openId}/points`, post('', { points: eastPoints(5, T0 + 3600_000) }));
+    expect(up.body).toEqual({ accepted: 0, duplicated: 0, paused: true });
     // 다른 차량은 영향이 없다
     const other = await call(e, '/trips', post('', { localId: 'o-1', vehicleId: 'other-vehicle', driverId: 'x', startedAt: pts[0]!.ts }));
     expect(typeof other.body.tripId).toBe('string');
+  });
+
+  it('동의 철회(데이터 삭제) 뒤에는 End도 막고 새 트립도 만들지 않는다', async () => {
+    const e = await setup();
+    const pts = eastPoints(10, T0);
+    const open = await call(e, '/trips', post('', { localId: 'open-2', vehicleId: V, driverId: V, startedAt: pts[0]!.ts }));
+    const openId = open.body.tripId as string;
+    // 철회 표시만 남기고(데이터 삭제는 트립 행도 지우므로) 열린 트립에 End를 보내 본다
+    e.db.prepare("INSERT INTO vehicle_settings (vehicle_id, recording_paused, consent_withdrawn_at, updated_at) VALUES (?, 1, 'x', 'x') ON CONFLICT (vehicle_id) DO UPDATE SET consent_withdrawn_at = 'x', recording_paused = 1").run(V);
+    const end = await call(e, `/trips/${openId}/end`, post('', { endedAt: pts.at(-1)!.ts }));
+    expect(end.body).toEqual({ paused: true });
+    expect((e.db.prepare('SELECT ended_at FROM trips WHERE id = ?').get(openId) as any).ended_at).toBeNull();
+    // 철회 상태에서는 멱등 재전송도 이미 있는 행이면 기존 tripId, 새 localId는 막는다
+    const fresh = await call(e, '/trips', post('', { localId: 'new-2', vehicleId: V, driverId: V, startedAt: pts[0]!.ts }));
+    expect(fresh.body).toEqual({ paused: true });
+    // 실제 데이터 삭제 뒤에도 새 트립은 만들지 않는다
+    await call(e, `/vehicles/${V}/data`, { method: 'DELETE' });
+    const after = await call(e, '/trips', post('', { localId: 'new-3', vehicleId: V, driverId: V, startedAt: pts[0]!.ts }));
+    expect(after.body).toEqual({ paused: true });
+    expect((e.db.prepare('SELECT COUNT(*) AS n FROM trips').get() as any).n).toBe(0);
+  });
+
+  it('alias(UUID) 차량 ID로 보낸 트립 생성도 정본 차량의 멈춤에 막힌다', async () => {
+    const e = await setup();
+    await call(e, '/vehicles/alias', post('', { fromVehicleId: 'uuid-block', toVehicleId: V }));
+    await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: true }));
+    const r = await call(e, '/trips', post('', { localId: 'a-1', vehicleId: 'uuid-block', driverId: 'x', startedAt: '2026-11-09T00:00:00Z' }));
+    expect(r.body).toEqual({ paused: true });
+    expect((e.db.prepare('SELECT COUNT(*) AS n FROM trips').get() as any).n).toBe(0);
   });
 
   it('토큰 인증 required: 설정은 그 차량 토큰만(401·403)', async () => {

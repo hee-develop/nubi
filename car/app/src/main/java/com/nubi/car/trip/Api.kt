@@ -131,21 +131,23 @@ private fun sendJson(baseUrl: String, method: String, path: String, body: JSONOb
         }
         val code = conn.responseCode
         val text = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() } ?: ""
-        return finishResponse(code, text, path, token != null)
+        return finishResponse(code, text, path, token)
     } finally {
         conn.disconnect()
     }
 }
 
 /** 응답 공통 처리: 2xx면 본문, 아니면 [HttpFailure]. 401·403은 재등록 훅을 부른다. 쿼리스트링(좌표·차량 ID)은 메시지에 남기지 않는다. */
-internal fun finishResponse(code: Int, text: String, path: String, hadToken: Boolean): String {
+internal fun finishResponse(code: Int, text: String, path: String, sentToken: String?): String {
     if (code in 200..299) {
         Auth.onAuthorized() // 토큰이 없는 모드에서도 성공 응답이면 인증 실패 표시를 푼다
         return text
     }
     val errorCode = Regex("\"error\"\\s*:\\s*\"([A-Za-z_]+)\"").find(text)?.groupValues?.get(1)
     // 재등록은 401 또는 `unauthorized`일 때만. forbidden(다른 차량)·local_only·not_parked 같은 403은 인증 실패가 아니다
-    if (code == 401 || errorCode == "unauthorized") {
+    // 재등록이 끝난 뒤 옛 토큰으로 보낸 요청의 401이 늦게 와도 새 토큰을 탓하지 않는다(보낸 토큰이 지금 토큰과 다르면 무시)
+    val stale = sentToken != null && sentToken != Auth.token
+    if ((code == 401 || errorCode == "unauthorized") && !stale) {
         try {
             Auth.onUnauthorized()
         } catch (t: Throwable) {
