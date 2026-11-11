@@ -4,8 +4,9 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { openDb } from '../src/db/index.js';
-import { classesForZ, maxSpanDeg, shapeFor, simplify } from '../src/routes/map.js';
-import { driveTrip, FIXTURE_NORTH, fakeValhalla, getJson, json, makePoints, makeRoadsDb, newApp, REGIONS_TEST_DB } from './helpers.js';
+import { classesForZ, isFaded, maxSpanDeg, RATE_MAX, shapeFor, simplify } from '../src/routes/map.js';
+import { initMapSchema } from '../src/db/schema-map.js';
+import { driveTrip, FIXTURE_NORTH, ROADS_TEST_DB, fakeValhalla, getJson, json, makePoints, makeRoadsDb, newApp, REGIONS_TEST_DB } from './helpers.js';
 
 const fixture = JSON.parse(readFileSync(FIXTURE_NORTH, 'utf8'));
 const tmp = () => mkdtempSync(join(tmpdir(), 'nubi-map-'));
@@ -27,7 +28,7 @@ describe('단순화·z별 등급 순수 함수', () => {
     expect(classesForZ(10)).toEqual(['mw', 'pr']);
     expect(classesForZ(12)).toEqual(['mw', 'pr', 'sc']);
     expect(classesForZ(13)).toEqual(['mw', 'pr', 'sc', 'mn']);
-    expect([8, 10, 12, 13].map(maxSpanDeg)).toEqual([6, 2, 0.5, 0.15]);
+    expect([8, 10, 12, 13].map(maxSpanDeg)).toEqual([3, 2, 0.5, 0.15]);
   });
 });
 
@@ -67,7 +68,8 @@ describe('GET /map/base', () => {
     expect(await at(10)).toEqual([1, 2]);
     expect(await at(12)).toEqual([1, 2, 3]);
     expect((await getJson(app, '/map/base?bbox=126,37,127.5,37.5&z=14')).body.error).toBe('invalid_bbox'); // 1.5° > 0.15°
-    expect((await getJson(app, '/map/base?bbox=120,30,125,34&z=8')).status).toBe(200); // 5° <= 6°
+    expect((await getJson(app, '/map/base?bbox=120,30,123,33&z=8')).status).toBe(200); // 3° <= 3°
+    expect((await getJson(app, '/map/base?bbox=120,30,125,34&z=8')).body.error).toBe('invalid_bbox'); // 5° > 3°
     expect((await getJson(app, `/map/base?bbox=${BOX}&z=abc`)).body.error).toBe('invalid_z');
     expect((await getJson(app, '/map/base?bbox=1,2,3&z=10')).body.error).toBe('invalid_bbox');
     expect((await getJson(app, '/map/base?bbox=127,37,126,38&z=10')).body.error).toBe('invalid_bbox');
@@ -161,7 +163,9 @@ describe('실시간 잠정 매칭과 GET /trips/:id/live', () => {
     await post(app, tripId, pts.slice(30));
     await app.live.idle();
     expect(fetchFn.calls).toHaveLength(1); // 60초 안이라 두 번째 호출은 예약만
-    expect(app.live.isBusy(tripId)).toBe(true);
+    // 뒤 가장자리 타이머만 걸린 대기는 '진행 중'이 아니다(status ready, e2e flaky 방지)
+    expect(app.live.isBusy(tripId)).toBe(false);
+    expect((await getJson(app, `/trips/${tripId}/live`)).body.status).toBe('ready');
     await app.live.flush(tripId);
     expect(fetchFn.calls).toHaveLength(2);
     expect(fetchFn.calls[1]!.body.shape).toHaveLength(10 + 30); // 겹침 10점 + 새 30점(seq 29 이후 20..29 + 30..59)
@@ -211,5 +215,181 @@ describe('실시간 잠정 매칭과 GET /trips/:id/live', () => {
     expect((await post(down, t3, makePoints(30))).status).toBe(200);
     await down.live.idle();
     expect((await getJson(down, `/trips/${t3}/live`)).body).toMatchObject({ status: 'idle', ways: [] });
+  });
+});
+
+describe('지도 API 보강', () => {
+  it('바램 판정은 now - lastAt > 365일(T2 isFaded와 같은 규칙)', () => {
+    const now = Date.parse('2026-11-11T00:00:00Z');
+    expect(isFaded(now - 365 * 86_400_000, now)).toBe(false);
+    expect(isFaded(now - 365 * 86_400_000 - 1, now)).toBe(true);
+    expect(isFaded('2025-01-01T00:00:00Z', now)).toBe(true);
+  });
+
+  it('트립을 지우면 잠정 행도 함께 지워진다(ON DELETE CASCADE)', async () => {
+    const app = newApp({ liveMatching: true, valhalla: { fetchFn: fakeValhalla(() => fixture) } });
+    const r = await app.request('/trips', json({ localId: 'x', vehicleId: 'v1', driverId: 'v1', startedAt: '2026-11-09T00:00:00Z' }));
+    const { tripId } = (await r.json()) as { tripId: string };
+    await app.request(`/trips/${tripId}/points`, json({ points: makePoints(30) }));
+    await app.live.idle();
+    const db = (app as unknown as { db?: unknown }).db;
+    expect(db).toBeUndefined(); // 앱은 DB를 노출하지 않으므로 별도 DB로 아래에서 확인한다
+    const raw = openDb(':memory:');
+    raw.prepare("INSERT INTO trips (id, vehicle_id, driver_id, started_at, created_at) VALUES ('t','v','v','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')").run();
+    raw.prepare("INSERT INTO trip_live VALUES ('t', 3, 'x')").run();
+    raw.prepare("INSERT INTO trip_live_ways VALUES ('t', 1, 1)").run();
+    raw.prepare("DELETE FROM trips WHERE id = 't'").run(); // FK가 걸려 있어도 실패하지 않는다
+    expect(raw.prepare('SELECT COUNT(*) AS n FROM trip_live').get()).toEqual({ n: 0 });
+    expect(raw.prepare('SELECT COUNT(*) AS n FROM trip_live_ways').get()).toEqual({ n: 0 });
+  });
+
+  it('CASCADE 없이 만들어진 옛 테이블은 행을 보존한 채 다시 만든다', () => {
+    const raw = openDb(':memory:');
+    raw.exec('DROP TABLE trip_live; DROP TABLE trip_live_ways;');
+    raw.exec('CREATE TABLE trip_live (trip_id TEXT PRIMARY KEY REFERENCES trips (id), up_to_seq INTEGER NOT NULL, updated_at TEXT NOT NULL)');
+    raw.exec('CREATE TABLE trip_live_ways (trip_id TEXT NOT NULL REFERENCES trips (id), way_id INTEGER NOT NULL, is_new INTEGER NOT NULL, PRIMARY KEY (trip_id, way_id))');
+    raw.prepare("INSERT INTO trips (id, vehicle_id, driver_id, started_at, created_at) VALUES ('t','v','v','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')").run();
+    raw.prepare("INSERT INTO trip_live VALUES ('t', 3, 'x')").run();
+    raw.prepare("INSERT INTO trip_live_ways VALUES ('t', 1, 1)").run();
+    expect(() => raw.prepare("DELETE FROM trips WHERE id = 't'").run()).toThrow(); // 옛 테이블은 삭제가 막힌다
+    initMapSchema(raw);
+    initMapSchema(raw); // 다시 불러도 안전
+    expect(raw.prepare('SELECT COUNT(*) AS n FROM trip_live_ways').get()).toEqual({ n: 1 });
+    raw.prepare("DELETE FROM trips WHERE id = 't'").run();
+    expect(raw.prepare('SELECT COUNT(*) AS n FROM trip_live').get()).toEqual({ n: 0 });
+    expect(raw.prepare('SELECT COUNT(*) AS n FROM trip_live_ways').get()).toEqual({ n: 0 });
+  });
+
+  it('/map/regions: 인구감소지역 표시는 지역 DB와 같고 z·bbox 상한이 있다', async () => {
+    const db = openDb(':memory:');
+    const app = createApp(db, { vehicleHmacKey: 'k', roadsPath: null, regionsPath: REGIONS_TEST_DB });
+    const { DatabaseSync } = await import('node:sqlite');
+    const rg = new DatabaseSync(REGIONS_TEST_DB, { readOnly: true });
+    const expected = new Map((rg.prepare('SELECT code, depop_92 FROM regions').all() as { code: string; depop_92: number }[]).map((r) => [r.code, r.depop_92 === 1]));
+    const body = (await getJson(app, '/map/regions?bbox=124,33,132,39&z=6&vehicleId=v1')).body;
+    for (const r of body.regions) expect(r.depop).toBe(expected.get(r.code));
+    expect((await getJson(app, '/map/regions?bbox=124,33,132,39&z=16&vehicleId=v1')).body.z).toBe(13); // z는 13으로 맞춘다
+    expect((await getJson(app, '/map/regions?bbox=100,20,140,50&z=6')).body.error).toBe('invalid_bbox');
+  });
+
+  const setupRoads = async () => {
+    const roadsPath = await makeRoadsDb(join(tmp(), 'roads.sqlite'), [
+      { id: 1, roadKey: 'mw:1', highway: 'motorway', lengthM: 2000, at: [127.0, 37.5], name: '경부고속도로' },
+      { id: 2, roadKey: 'nr:6', highway: 'primary_link', lengthM: 400, at: [127.0, 37.501], name: '램프' },
+    ]);
+    const db = openDb(':memory:');
+    return { db, roadsPath, app: createApp(db, { vehicleHmacKey: 'k', roadsPath, regionsPath: REGIONS_TEST_DB }) };
+  };
+
+  it('연결로(_link)는 z13 이상에서 나오고 낮은 z에서는 빠진다', async () => {
+    const { app } = await setupRoads();
+    const ids = async (z: number) => (await getJson(app, `/map/base?bbox=126.99,37.49,127.03,37.52&z=${z}`)).body.ways.map((w: { id: number }) => w.id);
+    expect(await ids(14)).toEqual([1, 2]);
+    expect(await ids(12)).toEqual([1]);
+  });
+
+  it('도형은 서버에서 캐시하되 차량별 d는 매번 합친다', async () => {
+    const { app, db } = await setupRoads();
+    const q = (v: string) => getJson(app, `/map/base?bbox=126.99,37.49,127.03,37.52&z=14&vehicleId=${v}`);
+    const a = await q('v1');
+    db.prepare("INSERT INTO driven_ways VALUES ('v1',1,1,'2026-01-01T00:00:00.000Z','2026-02-01T00:00:00.000Z','t','209901')").run();
+    const b = await q('v1'); // 캐시된 도형 위에 새로 달린 길 정보가 반영된다
+    const other = await q('v2');
+    expect(a.body.ways[0].d).toBeUndefined();
+    expect(b.body.ways[0].d).toEqual({ at: '2026-02-01T00:00:00.000Z', cov: 1 });
+    expect(other.body.ways[0].d).toBeUndefined();
+    expect(b.body.ways[0].c).toEqual(a.body.ways[0].c);
+  });
+
+  it('요청 제한: 같은 차량이 창 안에 한도를 넘으면 429', async () => {
+    const { app } = await setupRoads();
+    let last = 200;
+    for (let i = 0; i <= RATE_MAX; i++) last = (await app.request('/map/base?bbox=126.99,37.49,127.03,37.52&z=14&vehicleId=spam')).status;
+    expect(last).toBe(429);
+    expect((await app.request('/map/base?bbox=126.99,37.49,127.03,37.52&z=14&vehicleId=other')).status).toBe(200);
+  });
+
+  it('접근 확인 지점이 false면 403(인증 붙일 때 이 함수만 바꾼다)', async () => {
+    const { mapRoutes } = await import('../src/routes/map.js');
+    const { Hono } = await import('hono');
+    const raw = openDb(':memory:');
+    const hono = new Hono().route('/', mapRoutes(raw, () => null, () => null, undefined, Date.now, () => false));
+    raw.prepare("INSERT INTO trips (id, vehicle_id, driver_id, started_at, created_at) VALUES ('t','v','v','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')").run();
+    expect((await hono.request('/trips/t/live')).status).toBe(403);
+    expect((await hono.request('/map/regions?bbox=1,2,3,4&z=6&vehicleId=v')).status).toBe(503); // 지역 DB 없음이 먼저
+  });
+
+  it('/live?since=: 새 잠정 way만 주고 cursor로 이어 받으며, 잘못된 since는 400', async () => {
+    const fetchFn = fakeValhalla(() => fixture);
+    const app = newApp({ liveMatching: true, valhalla: { fetchFn }, liveIntervalMs: 60_000 });
+    const r = await app.request('/trips', json({ localId: 'y', vehicleId: 'v1', driverId: 'v1', startedAt: '2026-11-09T00:00:00Z' }));
+    const { tripId } = (await r.json()) as { tripId: string };
+    await app.request(`/trips/${tripId}/points`, json({ points: makePoints(30) }));
+    await app.live.idle();
+    const first = (await getJson(app, `/trips/${tripId}/live`)).body;
+    expect(first.ways.length).toBe(5);
+    expect(first.cursor).toBeGreaterThan(0);
+    const again = (await getJson(app, `/trips/${tripId}/live?since=${first.cursor}`)).body;
+    expect(again.ways).toEqual([]);
+    expect(again.cursor).toBe(first.cursor);
+    const partial = (await getJson(app, `/trips/${tripId}/live?since=${first.cursor - 2}`)).body;
+    expect(partial.ways).toHaveLength(2);
+    expect((await getJson(app, `/trips/${tripId}/live?since=abc`)).status).toBe(400);
+    app.live.stop();
+  });
+
+  it('직전 트립의 확정 매칭이 안 끝났어도 그 트립의 잠정 way는 이미 달린 길이다', async () => {
+    const db = openDb(':memory:');
+    const app = createApp(db, { vehicleHmacKey: 'k', roadsPath: ROADS_TEST_DB, regionsPath: REGIONS_TEST_DB, liveMatching: true, valhalla: { fetchFn: fakeValhalla(() => fixture) } });
+    // 직전 트립: 끝났고 확정 매칭은 아직 queued. 잠정으로 73541403(청계천로)를 칠했다.
+    db.prepare("INSERT INTO trips (id, vehicle_id, driver_id, started_at, ended_at, created_at) VALUES ('prev','v1','v1','2026-11-08T00:00:00Z','2026-11-08T00:10:00Z','x')").run();
+    db.prepare("INSERT INTO trip_live_ways VALUES ('prev', 73541403, 1)").run();
+    db.prepare("INSERT INTO trip_matching (trip_id, status, queued_at) VALUES ('prev','queued','x')").run();
+    const r = await app.request('/trips', json({ localId: 'z', vehicleId: 'v1', driverId: 'v1', startedAt: '2026-11-10T00:00:00Z' }));
+    const sid = ((await r.json()) as { tripId: string }).tripId;
+    await app.request(`/trips/${sid}/points`, json({ points: makePoints(30, 25, 37.5665, 126.978, 10) }));
+    await app.live.idle();
+    const isNew = Object.fromEntries((await getJson(app, `/trips/${sid}/live`)).body.ways.map((w: { id: number; isNew: boolean }) => [w.id, w.isNew]));
+    expect(isNew[73541403]).toBe(false); // 직전 트립이 잠정으로 칠한 길
+    expect(isNew[474532059]).toBe(true);
+    // 확정이 끝나면(done) 확정 기록(driven_ways)이 기준이 된다
+    db.prepare("UPDATE trip_matching SET status = 'done' WHERE trip_id = 'prev'").run();
+    db.prepare("DELETE FROM trip_live_ways WHERE trip_id = ?").run(sid);
+    db.prepare("DELETE FROM trip_live WHERE trip_id = ?").run(sid);
+    await app.live.flush(sid);
+    const after = Object.fromEntries((await getJson(app, `/trips/${sid}/live`)).body.ways.map((w: { id: number; isNew: boolean }) => [w.id, w.isNew]));
+    expect(after[73541403]).toBe(true);
+    app.live.stop();
+  });
+
+  it('잠정 매칭을 켜도 확정 매칭 결과는 같다(잠정은 완료율·도감을 건드리지 않는다)', async () => {
+    const run = async (liveMatching: boolean) => {
+      const app = newApp({ liveMatching, valhalla: { fetchFn: fakeValhalla(() => fixture) } });
+      const { tripId } = await driveTrip(app, { points: makePoints(30) });
+      await app.matching.idle();
+      await app.live.idle();
+      const m = (await getJson(app, `/trips/${tripId}/matching`)).body;
+      const regions = (await getJson(app, '/regions/summary?vehicleId=v1')).body;
+      const cov = (await getJson(app, '/coverage/summary?vehicleId=v1')).body;
+      const strip = (o: unknown): unknown => JSON.parse(JSON.stringify(o, (k, v) => (k === 'ms' ? undefined : v)));
+      return { result: strip(m.result), colored: regions.colored, pct: cov.nationalPercent, started: cov.roadsStarted };
+    };
+    const a = await run(true);
+    const b = await run(false);
+    expect(a).toEqual(b);
+  });
+
+  it('끝난 지 오래된 트립의 잠정 행은 정리하고 방금 끝난 트립은 남긴다', async () => {
+    let t = Date.parse('2026-11-11T00:00:00Z');
+    const app = newApp({ liveMatching: true, now: () => t, valhalla: { fetchFn: fakeValhalla(() => fixture) } });
+    const r = await app.request('/trips', json({ localId: 'p', vehicleId: 'v1', driverId: 'v1', startedAt: '2026-11-10T00:00:00Z' }));
+    const { tripId } = (await r.json()) as { tripId: string };
+    await app.request(`/trips/${tripId}/points`, json({ points: makePoints(30) }));
+    await app.live.idle();
+    await app.request(`/trips/${tripId}/end`, json({ endedAt: '2026-11-10T00:10:00Z' }));
+    expect(app.live.purge()).toBe(0); // 방금 끝난 트립은 남긴다
+    t += 25 * 3_600_000;
+    expect(app.live.purge()).toBe(1); // 종료가 24시간 넘게 지남
+    expect((await getJson(app, `/trips/${tripId}/live`)).body.ways).toEqual([]);
   });
 });

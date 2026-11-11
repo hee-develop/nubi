@@ -65,6 +65,11 @@ export const createApp = (db: Db = openDb(), options: AppOptions = {}) => {
     intervalMs: options.liveIntervalMs ?? (Number.isFinite(liveEnv) && liveEnv > 0 ? liveEnv : undefined),
     now,
   });
+  try {
+    live.purge();
+  } catch (e) {
+    console.warn(`잠정 매칭 정리 실패: ${e instanceof Error ? e.message : String(e)}`);
+  }
   /** 새 트립 Start·점 업로드 때 지난 트립의 방문·숙박을 판정한다. 판정 오류가 트립 업로드를 막지 않게 삼킨다. */
   const tick = (vehicleId: string, onlyIfPending: boolean) => {
     if (!regions) return;
@@ -93,6 +98,11 @@ export const createApp = (db: Db = openDb(), options: AppOptions = {}) => {
     }
     setInterval(
       () => {
+        try {
+          live.purge();
+        } catch {
+          // 정리는 다음 주기에 다시 한다
+        }
         try {
           regionsBatch();
         } catch (e) {
