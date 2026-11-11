@@ -3,7 +3,7 @@ import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
 import { nationalCard, roadCard, tripCard, type CardMeta } from '../ext/cards.js';
-import { publicBase, RateLimiter } from '../ext/auth.js';
+import { bearerOf, clientKey, hashToken, publicBase, RateLimiter } from '../ext/auth.js';
 import { svgToPng } from '../ext/render.js';
 import { iso, parseBody, type ExtDeps } from '../ext/util.js';
 import { canonicalVehicleId } from '../matching/pipeline.js';
@@ -29,8 +29,10 @@ export const shareRoutes = (deps: ExtDeps) => {
       const p = await parseBody(c, body);
       if (!p.ok) return p.res;
       const vehicleId = canonicalVehicleId(db, p.data.vehicleId);
-      if (limiter.blocked(vehicleId)) return c.json({ error: 'too_many_requests' }, 429);
-      limiter.record(vehicleId);
+      // 생성 제한 키는 토큰(있으면)·출처 기준이다(차량 ID는 호출자가 바꿔 쓸 수 있다). 차량당 보관 상한은 별도(MAX_CARDS_PER_VEHICLE).
+      const limitKey = bearerOf(c) ? `t:${hashToken(bearerOf(c)!)}` : `ip:${clientKey(c)}`;
+      if (limiter.blocked(limitKey)) return c.json({ error: 'too_many_requests' }, 429);
+      limiter.record(limitKey);
       const r = p.data.kind === 'national' ? nationalCard(deps, vehicleId) : p.data.kind === 'trip' ? tripCard(deps, vehicleId, p.data.tripIds) : roadCard(deps, vehicleId, p.data.roadKey);
       if (!r.ok) return c.json({ error: r.error }, r.status);
       // PNG는 만들 때 한 번만 렌더해 저장한다(GET은 저장본). 변환기가 없으면 SVG로 내보내지 않고 503이다(공개 경로는 PNG만).

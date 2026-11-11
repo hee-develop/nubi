@@ -20,13 +20,13 @@ const distanceM = (a: { lat: number; lon: number }, b: { lat: number; lon: numbe
 
 /**
  * 지역 소개 카드(plan 10-2): TourAPI 결과를 관광지·축제·음식점으로 낸다. 키가 없으면 시군구별 고정 예시(sample: true).
- * 개인정보: 차량 위치(`lat`·`lon`)는 시군구 bbox 안이어야 하고, 외부 호출에는 0.01도(약 1km)로 **반올림한 좌표**만 보낸다.
- * 캐시는 (시군구·반올림 좌표·종류) 단위 24시간이고, 거리는 캐시와 무관하게 요청마다 정확한 위치에서 다시 계산한다.
+ * 개인정보: 차량 위치(`lat`·`lon`)는 시군구 bbox 안이어야 하고 외부로 나가지 않는다(외부 호출은 시군구 중심의 0.01도 반올림 좌표).
+ * 캐시는 (시군구·종류) 단위 24시간이고, 거리는 캐시와 무관하게 요청마다 정확한 위치에서 다시 계산한다.
  */
 export const introRoutes = (deps: ExtDeps) => {
   const { db, now } = deps;
   const key = () => deps.options.tourApiKey ?? process.env.NUBI_TOURAPI_KEY;
-  const limiter = new RateLimiter(deps.options.rateLimit?.max ? deps.options.rateLimit.max * 6 : 60, deps.options.rateLimit?.windowMs ?? 5 * 60_000, now);
+  const limiter = new RateLimiter(deps.options.rateLimit?.max ? deps.options.rateLimit.max * 2 : 20, deps.options.rateLimit?.windowMs ?? 5 * 60_000, now);
   return new Hono().get('/regions/:code/intro', async (c) => {
     const regions = deps.getRegions();
     if (!regions) return c.json({ error: 'regions_db_unavailable' }, 503);
@@ -54,12 +54,13 @@ export const introRoutes = (deps: ExtDeps) => {
     const k = key();
     if (!k) return c.json({ ...base, sample: true as const, items: sampleItems(code, row.display_name, center, from) }, 200);
 
-    const ref = { lat: round2(from.lat), lon: round2(from.lon) };
+    // 외부 호출·캐시는 **시군구 단위**(좌표와 무관): 시군구 중심을 반올림한 좌표로 부른다. 요청 좌표를 바꿔도 캐시를 피하지 못하고 외부로 나가지 않는다.
+    const ref = { lat: round2(center.lat), lon: round2(center.lon) };
     const day = new Date(now() + KST_MS).toISOString().slice(0, 10);
     const items: IntroItem[] = [];
     try {
       for (const kind of KINDS) {
-        const cacheKey = `${code}|${ref.lat},${ref.lon}|${kind}`;
+        const cacheKey = `${code}|${kind}`;
         const cached = db.prepare('SELECT fetched_at, body_json FROM intro_cache WHERE cache_key = ?').get(cacheKey) as { fetched_at: number; body_json: string } | undefined;
         let got: IntroItem[];
         if (cached && now() - cached.fetched_at < INTRO_TTL_MS) got = JSON.parse(cached.body_json) as IntroItem[];

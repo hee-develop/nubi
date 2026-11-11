@@ -142,6 +142,17 @@ export const guestWaysForPoints = (db: Db, vehicleId: string, pts: Pt[]): { wayI
   return out;
 };
 
+/** 그 차량(alias 포함)의 인정 way 갱신 버전: 행 수와 가장 늦은 마지막 시각·커버리지 합. */
+const drivenVersion = (db: Db, vehicleId: string): string => {
+  const r = db
+    .prepare(
+      `SELECT COUNT(*) AS n, COALESCE(MAX(last_driven_at), '') AS last, COALESCE(SUM(coverage), 0) AS cov FROM driven_ways
+       WHERE vehicle_id IN (SELECT ? UNION SELECT alias_id FROM vehicle_alias WHERE vehicle_id = ?)`,
+    )
+    .get(vehicleId, vehicleId) as { n: number; last: string; cov: number };
+  return `${r.n}|${r.last}|${r.cov.toFixed(3)}`;
+};
+
 /**
  * 게스트 계정의 세션별 도로 기록을 최신으로 맞춘다(읽기 전에 부른다). 세션 창·점 수가 바뀐 (세션, 트립)만 다시 계산한다.
  * 열린 세션은 먼저 12시간 규칙을 적용한다. 도로 DB가 없으면 건너뛴다.
@@ -157,10 +168,12 @@ export const refreshGuestWays = (deps: ExtDeps, accountId: string): void => {
       const outcome = outcomeOf(t.result_json);
       if (outcome !== 'counted') continue; // 확정 매칭이 끝나 인정된 트립만(미완료·불인정·의심은 인정하지 않는다)
       const pts = windowPoints(db, t.id, s);
-      const cache = db.prepare('SELECT win_from, win_to, points FROM guest_trip_cache WHERE session_id = ? AND trip_id = ?').get(s.id, t.id) as
-        | { win_from: string; win_to: string | null; points: number }
+      const cache = db.prepare('SELECT win_from, win_to, points, dw_ver FROM guest_trip_cache WHERE session_id = ? AND trip_id = ?').get(s.id, t.id) as
+        | { win_from: string; win_to: string | null; points: number; dw_ver: string | null }
         | undefined;
-      if (cache && cache.win_from === s.started_at && cache.win_to === s.ended_at && cache.points === pts.length) continue;
+      // 계산 기준: 세션 창·겹친 점 수·차량 인정 way의 갱신 버전(driven_ways가 바뀌면 다시 계산)
+      const ver = drivenVersion(db, s.vehicle_id);
+      if (cache && cache.win_from === s.started_at && cache.win_to === s.ended_at && cache.points === pts.length && cache.dw_ver === ver) continue;
       const lastAt = pts.at(-1)?.ts ?? s.started_at;
       const ways = guestWaysForPoints(db, s.vehicle_id, pts);
       db.exec('BEGIN');
@@ -168,7 +181,7 @@ export const refreshGuestWays = (deps: ExtDeps, accountId: string): void => {
         db.prepare('DELETE FROM guest_trip_ways WHERE session_id = ? AND trip_id = ?').run(s.id, t.id);
         const ins = db.prepare('INSERT INTO guest_trip_ways (session_id, trip_id, way_id, coverage, last_at) VALUES (?, ?, ?, ?, ?)');
         for (const w of ways) ins.run(s.id, t.id, w.wayId, w.coverage, lastAt);
-        db.prepare('INSERT OR REPLACE INTO guest_trip_cache (session_id, trip_id, win_from, win_to, points) VALUES (?, ?, ?, ?, ?)').run(s.id, t.id, s.started_at, s.ended_at, pts.length);
+        db.prepare('INSERT OR REPLACE INTO guest_trip_cache (session_id, trip_id, win_from, win_to, points, dw_ver) VALUES (?, ?, ?, ?, ?, ?)').run(s.id, t.id, s.started_at, s.ended_at, pts.length, ver);
         db.exec('COMMIT');
       } catch (e) {
         db.exec('ROLLBACK');
@@ -179,11 +192,30 @@ export const refreshGuestWays = (deps: ExtDeps, accountId: string): void => {
 };
 
 /** 게스트 계정의 시군구 단계(겹친 점 기준). 지역 DB가 없으면 빈 지도. */
+const levelsCache = new Map<string, { sig: string; levels: RegionLevels }>();
+
+/** 시군구 계산 입력의 서명(세션 목록·겹치는 트립의 점 수·방문·숙박 이벤트 수). 같으면 계산을 건너뛴다. */
+const levelsSignature = (db: Db, accountId: string): string => {
+  const parts: string[] = [];
+  for (const s of sessionsOf(db, accountId)) {
+    const ids = overlappingTrips(db, s).map((t) => t.id);
+    const pts = ids.length
+      ? (db.prepare(`SELECT COUNT(*) AS n, COALESCE(MAX(ts), '') AS last FROM trip_points WHERE trip_id IN (${ids.map(() => '?').join(',')}) AND ts >= ? AND (? IS NULL OR ts <= ?)`).get(...ids, s.started_at, s.ended_at, s.ended_at) as { n: number; last: string })
+      : { n: 0, last: '' };
+    const ev = ids.length ? (db.prepare(`SELECT COUNT(*) AS n FROM region_events WHERE trip_id IN (${ids.map(() => '?').join(',')})`).get(...ids) as { n: number }).n : 0;
+    parts.push(`${s.id}:${s.ended_at ?? ''}:${ids.length}:${pts.n}:${pts.last}:${ev}`);
+  }
+  return parts.join('|');
+};
+
 export const guestRegionLevels = (deps: ExtDeps, accountId: string): RegionLevels => {
   const { db } = deps;
   const regions = deps.getRegions();
   const out: RegionLevels = new Map();
   if (!regions) return out;
+  const sig = levelsSignature(db, accountId);
+  const hit = levelsCache.get(accountId);
+  if (hit && hit.sig === sig) return hit.levels;
   const bump = (code: string, level: number, at: string) => {
     const c = regions.canonical(code);
     const cur = out.get(c);
@@ -207,5 +239,8 @@ export const guestRegionLevels = (deps: ExtDeps, accountId: string): RegionLevel
       }
     }
   }
+  levelsCache.delete(accountId);
+  levelsCache.set(accountId, { sig, levels: out });
+  while (levelsCache.size > 200) levelsCache.delete(levelsCache.keys().next().value!);
   return out;
 };

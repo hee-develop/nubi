@@ -133,6 +133,7 @@ CREATE TABLE IF NOT EXISTS guest_trip_cache (
   win_from TEXT NOT NULL,
   win_to TEXT,
   points INTEGER NOT NULL,
+  dw_ver TEXT,
   PRIMARY KEY (session_id, trip_id)
 );
 `;
@@ -214,7 +215,10 @@ export const ensureExtSchema = (db: Db) => {
   addColumn(db, 'auth_tokens', 'expires_at', 'TEXT');
   addColumn(db, 'auth_tokens', 'revoked_at', 'TEXT');
   addColumn(db, 'link_codes', 'attempts', 'INTEGER NOT NULL DEFAULT 0');
+  // 앞 버전의 계정 토큰(만료 없음)에 만료를 채운다: 생성 후 180일(API scope)
+  db.exec("UPDATE auth_tokens SET expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', julianday(created_at) + 180) WHERE kind = 'account' AND expires_at IS NULL");
   db.exec(SCHEMA_GUEST);
+  addColumn(db, 'guest_trip_cache', 'dw_ver', 'TEXT');
   db.exec(SCHEMA_SETTINGS);
   db.exec(SCHEMA_SHARE);
   addColumn(db, 'share_cards', 'png', 'BLOB');

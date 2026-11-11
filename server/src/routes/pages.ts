@@ -1,7 +1,7 @@
 import { Hono, type Context } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { bodyLimit } from 'hono/body-limit';
-import { clientKey, checkCode, codeGuardOf, CODE_RE, issueToken, lookupToken, publicBase, type TokenInfo } from '../ext/auth.js';
+import { clientKey, checkCode, codeGuardOf, CODE_RE, issueToken, lookupToken, publicBase, trustedHops, type TokenInfo } from '../ext/auth.js';
 import { esc, htmlResponse, page } from '../ext/html.js';
 import { monthLabel, nationalMapInner } from '../ext/cards.js';
 import { miniMapSvg } from '../ext/render.js';
@@ -31,17 +31,40 @@ const levelLine = (s: ReturnType<typeof regionSummary>) => `통과 ${s.byLevel['
 export const pagesRoutes = (deps: ExtDeps) => {
   const { db, now } = deps;
   const guard = codeGuardOf(deps);
+  /** https로 서비스되는가: 공개 주소(설정)가 https이거나, 신뢰 프록시 뒤에서 `X-Forwarded-Proto: https`이거나, 요청 주소가 https. */
+  const isSecure = (c: Context) =>
+    publicBase(deps, c).startsWith('https:') || new URL(c.req.url).protocol === 'https:' || (trustedHops() > 0 && c.req.header('x-forwarded-proto') === 'https');
+  /** https에서는 `__Host-` 접두사(Secure·Path=/·Domain 없음 강제)를 쓴다. http(개발)에서는 접두사 없이. */
   const COOKIE = 'nubi_me';
-  /** 웹 세션 쿠키(HttpOnly·SameSite=Lax, https면 Secure). 토큰은 URL에 싣지 않는다. */
+  const HOST_COOKIE = `__Host-${COOKIE}`;
+  /** 웹 세션 쿠키(HttpOnly·SameSite=Lax, https면 Secure + `__Host-`). 토큰은 URL에 싣지 않는다. */
   const putCookie = (c: Context, token: string, scope: 'web' | 'view') =>
-    setCookie(c, COOKIE, token, { httpOnly: true, sameSite: 'Lax', secure: publicBase(deps, c).startsWith('https:'), path: '/', maxAge: scope === 'web' ? 7 * 86_400 : 86_400 });
+    setCookie(c, isSecure(c) ? HOST_COOKIE : COOKIE, token, { httpOnly: true, sameSite: 'Lax', secure: isSecure(c), path: '/', maxAge: scope === 'web' ? 7 * 86_400 : 86_400 });
+  const readCookie = (c: Context) => getCookie(c, HOST_COOKIE) ?? getCookie(c, COOKIE) ?? '';
   type AccountInfo = Extract<TokenInfo, { kind: 'account' }>;
   /** 쿠키의 웹 세션. [scopes]에 든 것만(읽기 전용 view는 내리기·삭제에 쓸 수 없다). */
   const sessionOf = (c: Context, scopes: ('web' | 'view')[]): { info: AccountInfo; token: string } | null => {
-    const t = getCookie(c, COOKIE) ?? '';
+    const t = readCookie(c);
     const info = /^[A-Za-z0-9_-]{16,256}$/.test(t) ? lookupToken(db, t, now(), scopes) : null;
     return info && info.kind === 'account' ? { info, token: t } : null;
   };
+  /**
+   * POST 페이지의 교차 출처 요청 차단(쿠키는 SameSite=Lax라 이미 막지만 한 겹 더): Origin(없으면 Referer)이 있으면 이 서비스 주소와 호스트가 같아야 한다.
+   * 둘 다 없으면(폼 직접 전송 도구) 통과.
+   */
+  const sameOrigin = (c: Context): boolean => {
+    const seen = c.req.header('origin') ?? c.req.header('referer');
+    if (!seen) return true;
+    try {
+      const own = new URL(publicBase(deps, c)).host;
+      const reqHost = new URL(c.req.url).host;
+      const h = new URL(seen).host;
+      return h === own || h === reqHost;
+    } catch {
+      return false;
+    }
+  };
+  const crossSite = (c: Context) => htmlResponse(c, notice('요청을 처리할 수 없어요', '다른 사이트에서 보낸 요청은 받지 않아요. 누비 화면에서 다시 시도해 주세요.'), 403);
 
   /** 코드 페이지 공통: 코드 상태를 보고 오류면 안내 페이지를 돌려준다. 실패는 시도 제한에 센다. */
   const checkPageCode = (c: Context, kind: 'pair' | 'guest', code: string): { html: string; status: 404 | 410 | 429 } | { vehicleId: string } => {
@@ -95,12 +118,13 @@ ${nickname ? '<label class="muted" for="nick">별명(선택)</label><input id="n
       );
     })
     .post('/g/:code/join', async (c) => {
+      if (!sameOrigin(c)) return crossSite(c);
       const code = c.req.param('code');
       if (!CODE_RE.test(code)) return htmlResponse(c, codeErrorPage('code_not_found').html, 404);
       const f = await form(c);
       // 같은 브라우저로 다시 오면 같은 게스트 계정을 쓴다(쿠키)
-      const prev = sessionOf(c, ['web']);
-      const existing = prev && prev.info.role === 'guest' ? prev : null;
+      // 차주 쿠키도 그대로 쓴다(새 익명 계정을 만들거나 쿠키를 덮지 않는다)
+      const existing = sessionOf(c, ['web']);
       const r = joinGuest(deps, guard, clientKey(c), { code, consent: f.consent, ...(f.nickname ? { nickname: f.nickname } : {}) }, existing, { apiToken: false });
       if (r.ok) {
         if (!r.reused) putCookie(c, issueToken(db, 'account', r.accountId, now(), 'web'), 'web');
@@ -131,6 +155,7 @@ ${nickname ? '<label class="muted" for="nick">별명(선택)</label><input id="n
       );
     })
     .post('/p/:code/join', async (c) => {
+      if (!sameOrigin(c)) return crossSite(c);
       const code = c.req.param('code');
       if (!CODE_RE.test(code)) return htmlResponse(c, codeErrorPage('code_not_found').html, 404);
       const f = await form(c);
@@ -157,14 +182,16 @@ ${nickname ? '<label class="muted" for="nick">별명(선택)</label><input id="n
       if (v !== undefined) {
         const info = /^[A-Za-z0-9_-]{16,256}$/.test(v) ? lookupToken(db, v, now(), ['view']) : null;
         if (!info) return htmlResponse(c, notice('링크가 만료됐어요', '내 기록 링크는 24시간 동안만 쓸 수 있어요. 새 링크를 받아 주세요.'), 401);
-        putCookie(c, v, 'view');
+        // 이미 웹 세션(내리기·삭제 가능)이 있으면 읽기 전용 쿠키로 덮어쓰지 않는다
+        if (!sessionOf(c, ['web'])) putCookie(c, v, 'view');
         return c.redirect('/me', 303);
       }
       const sess = sessionOf(c, ['web', 'view']);
       if (!sess) return htmlResponse(c, notice('내 기록을 열 수 없어요', 'QR을 다시 스캔하거나 새 링크를 받아 주세요.'), 401);
-      return htmlResponse(c, mePage(sess.info, getCookie(c, COOKIE) !== undefined && lookupToken(db, sess.token, now(), ['web']) !== null));
+      return htmlResponse(c, mePage(sess.info, lookupToken(db, sess.token, now(), ['web']) !== null));
     })
     .post('/me/leave', async (c) => {
+      if (!sameOrigin(c)) return crossSite(c);
       const sess = sessionOf(c, ['web']);
       if (!sess) return htmlResponse(c, notice('다시 열어 주세요', '이 작업은 QR로 연 화면에서만 할 수 있어요.'), 401);
       if (sess.info.role === 'guest') {
@@ -173,6 +200,7 @@ ${nickname ? '<label class="muted" for="nick">별명(선택)</label><input id="n
       return c.redirect('/me', 303);
     })
     .post('/me/delete-session', async (c) => {
+      if (!sameOrigin(c)) return crossSite(c);
       const sess = sessionOf(c, ['web']);
       if (!sess) return htmlResponse(c, notice('다시 열어 주세요', '이 작업은 QR로 연 화면에서만 할 수 있어요.'), 401);
       if (sess.info.role === 'guest') {
@@ -188,10 +216,12 @@ ${nickname ? '<label class="muted" for="nick">별명(선택)</label><input id="n
       return c.redirect('/me', 303);
     })
     .post('/me/withdraw', async (c) => {
+      if (!sameOrigin(c)) return crossSite(c);
       const sess = sessionOf(c, ['web']);
       if (!sess || sess.info.role !== 'guest') return htmlResponse(c, notice('다시 열어 주세요', '이 작업은 QR로 연 화면에서만 할 수 있어요.'), 401);
       withdrawGuest(deps, sess.info.accountId);
       deleteCookie(c, COOKIE, { path: '/' });
+      deleteCookie(c, HOST_COOKIE, { path: '/', secure: true });
       return htmlResponse(c, notice('탈퇴했어요', '같이 탄 기록과 별명을 모두 지웠어요.'), 200);
     })
     // ---- 공유 카드 ----
