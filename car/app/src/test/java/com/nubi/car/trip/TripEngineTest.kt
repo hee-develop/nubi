@@ -42,6 +42,38 @@ class TripEngineTest {
     }
 
     @Test
+    fun 기록_멈춤이면_샘플을_버리고_새_트립을_시작하지_않는다() {
+        vehicle.vehicleId = "hash"
+        val e = engine()
+        e.recordingPaused = true
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.drive(6)
+        assertEquals(TripState.IDLE, e.status.state)
+        assertEquals(0, e.status.sampleCount)
+        assertNull(e.status.lastLocation)
+        assertEquals("기어는 계속 읽는다", Gear.D, e.status.gear)
+        scheduler.advance(120_000)
+        assertTrue(server.events.isEmpty())
+        // 풀리면 다시 기록한다
+        e.recordingPaused = false
+        e.drive(4, firstIndex = 10)
+        assertEquals(TripState.RECORDING, e.status.state)
+    }
+
+    @Test
+    fun 기어가_바뀌면_알린다() {
+        val e = engine()
+        val seen = ArrayList<Gear?>()
+        e.onGearChange = { seen.add(it) }
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.onGear(Gear.P)
+        scheduler.runPosted()
+        assertEquals(listOf<Gear?>(Gear.D, Gear.P), seen)
+    }
+
+    @Test
     fun 놀_때는_타이머가_하나도_돌지_않는다() {
         val e = engine()
         e.onServiceStart()

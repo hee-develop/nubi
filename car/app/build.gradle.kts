@@ -97,6 +97,8 @@ dependencies {
     implementation("ai.pleos.playground:FusedLocation:1.1.3")
     implementation("ai.pleos.playground:TextToSpeech:3.3.1")
     implementation("ai.pleos.playground:SpeechToText:3.3.1")
+    // 게스트·차주 연결·공유 QR 인코딩(순수 Java, 네트워크·권한 없음)
+    implementation("com.google.zxing:core:3.3.3")
 
     testImplementation("junit:junit:4.13.2")
     // JVM 단위 테스트는 android.jar의 org.json 스텁 대신 이 구현을 쓴다

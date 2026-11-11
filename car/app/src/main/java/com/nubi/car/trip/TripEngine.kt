@@ -97,6 +97,17 @@ class TripEngine(
     @Volatile
     var onParked: () -> Unit = {}
 
+    /**
+     * 기록 멈춤(서버 설정 `recordingPaused` 또는 위치정보 동의 철회). true인 동안 새 위치 샘플은 상태기계에 넣지 않고 버린다(새 트립도 시작하지 않는다).
+     * 기어는 계속 읽는다. 값은 설정 조회가 정한다([com.nubi.car.screens.ExtrasController]).
+     */
+    @Volatile
+    var recordingPaused: Boolean = false
+
+    /** 기어가 바뀌었다(화면이 QR·메뉴를 바로 닫으려고 쓴다). 엔진 스레드에서 불린다. */
+    @Volatile
+    var onGearChange: (Gear?) -> Unit = {}
+
     /** P가 됐을 때 위치를 아직 몰라 조회를 미룬 상태. 첫 위치가 오면 [onParked]를 한 번 부른다. */
     private var parkedAwaitingLocation = false
 
@@ -219,6 +230,7 @@ class TripEngine(
         val heading = headingDeg?.takeIf { it.isFinite() }
         val conf = confidence?.takeIf { it.isFinite() }
         scheduler.post {
+            if (recordingPaused) return@post // 기록 멈춤: 샘플을 버린다
             val ts = tsMillis?.takeIf { kotlin.math.abs(it - wall()) < 24 * 3_600_000L } ?: wall()
             handle(machine.onLocation(Sample(ts, lat, lon, heading, conf), elapsed()))
             publish()
@@ -251,6 +263,11 @@ class TripEngine(
                 if (machine.lastRaw == null) parkedAwaitingLocation = true else notifyParked()
             } else if (gear != Gear.P) {
                 parkedAwaitingLocation = false
+            }
+            try {
+                onGearChange(gear)
+            } catch (t: Throwable) {
+                Log.w(TAG, "기어 알림 예외: ${t.javaClass.simpleName}")
             }
         }
     }
@@ -550,5 +567,8 @@ class TripEngine(
         const val RETRY_MILLIS = 1_000L
         const val KEY_VEHICLE_ID = "vehicleId"
         const val KEY_HEALTH = "recorderHealth"
+
+        /** 기록 멈춤 마지막 값(서버 설정을 받기 전에도 재시작 직후 기록하지 않게). */
+        const val KEY_PAUSED = "recordingPaused"
     }
 }
