@@ -133,10 +133,24 @@ CREATE TABLE IF NOT EXISTS vehicle_settings (
 );
 `;
 
+/** 공유 카드(plan 10-1). 만들 때 비식별 SVG를 렌더해 저장하고(좌표·way id 없음) PNG는 요청 때 변환한다. meta_json은 `/s/:id` 페이지가 보일 줄 글(비식별). */
+export const SCHEMA_SHARE = `
+CREATE TABLE IF NOT EXISTS share_cards (
+  id TEXT PRIMARY KEY,
+  vehicle_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  svg TEXT NOT NULL,
+  meta_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_share_cards_vehicle ON share_cards (vehicle_id, created_at);
+`;
+
 /** 확장 스키마를 만든다. 여러 번 불러도 같다. */
 export const ensureExtSchema = (db: Db) => {
   db.exec(SCHEMA_FADE);
   db.exec(SCHEMA_AUTH);
   db.exec(SCHEMA_GUEST);
   db.exec(SCHEMA_SETTINGS);
+  db.exec(SCHEMA_SHARE);
 };

@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { canonicalVehicleId } from '../matching/pipeline.js';
 import { VEHICLE_SET_SQL } from '../roads/index.js';
+import { readSettings } from '../ext/settings.js';
 import { iso, parseBody, SQL_SHIFT_DAYS, type ExtDeps } from '../ext/util.js';
 
 const id = z.string().min(1).max(128);
@@ -14,28 +15,6 @@ const settingsBody = z.object({
   drivingMap: z.boolean().optional(),
   hideHomeInCards: z.boolean().optional(),
 });
-
-type SettingsRow = {
-  recording_paused: number;
-  home_region: string | null;
-  stats_opt_in: number;
-  drive_map: number;
-  hide_home_in_cards: number;
-  consent_withdrawn_at: string | null;
-};
-
-/** 차량 설정(없으면 기본값). */
-export const readSettings = (db: ExtDeps['db'], vehicleId: string) => {
-  const r = db.prepare('SELECT * FROM vehicle_settings WHERE vehicle_id = ?').get(vehicleId) as SettingsRow | undefined;
-  return {
-    recordingPaused: (r?.recording_paused ?? 0) === 1,
-    homeRegion: r?.home_region ?? null,
-    statsOptIn: (r?.stats_opt_in ?? 1) === 1,
-    drivingMap: (r?.drive_map ?? 1) === 1,
-    hideHomeInCards: (r?.hide_home_in_cards ?? 1) === 1,
-    consentWithdrawnAt: r?.consent_withdrawn_at ?? null,
-  };
-};
 
 /** 차량 ID와 그 alias(UUID)로 올린 트립 소속 ID 전부. */
 const vehicleIds = (db: ExtDeps['db'], vehicleId: string): string[] => [
@@ -106,6 +85,7 @@ export const accountRoutes = (deps: ExtDeps) => {
         counts.ways = Number(db.prepare(`DELETE FROM driven_ways WHERE vehicle_id IN ${inList}`).run(...ids).changes);
         db.prepare(`DELETE FROM way_revived WHERE vehicle_id IN ${inList}`).run(...ids);
         db.prepare(`DELETE FROM coverage_snapshots WHERE vehicle_id IN ${inList}`).run(...ids);
+        db.prepare('DELETE FROM share_cards WHERE vehicle_id = ?').run(vehicleId);
         counts.trips = Number(db.prepare(`DELETE FROM trips WHERE vehicle_id IN ${inList}`).run(...ids).changes);
         // 이 차에서 앉은 게스트 기록도 이 차의 위치정보에서 나온 것이라 함께 지운다.
         db.prepare(`DELETE FROM guest_ways WHERE session_id IN (SELECT id FROM guest_sessions WHERE vehicle_id = ?)`).run(vehicleId);
