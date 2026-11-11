@@ -36,7 +36,41 @@ CREATE TABLE IF NOT EXISTS coverage_snapshots (
 );
 `;
 
+/** 계정·토큰·연결 코드(차주 연결 pair, 게스트). 토큰과 코드는 평문을 저장하지 않는다(토큰 = SHA-256 해시, 코드는 5분 뒤 의미 없음). */
+export const SCHEMA_AUTH = `
+-- kind: owner(차주, 차 1대에 1명) | guest(게스트). owner의 vehicle_id는 서버 발급 정본 차량 ID.
+CREATE TABLE IF NOT EXISTS accounts (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  vehicle_id TEXT,
+  nickname TEXT,
+  created_at TEXT NOT NULL,
+  consent_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_accounts_owner_vehicle ON accounts (vehicle_id) WHERE kind = 'owner';
+
+-- kind: vehicle(차량 앱이 register로 받은 토큰, subject = 차량 ID) | account(subject = 계정 ID). 해시만 저장한다.
+CREATE TABLE IF NOT EXISTS auth_tokens (
+  token_hash TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_auth_tokens_subject ON auth_tokens (kind, subject);
+
+-- 6자리 숫자 코드(5분). kind: pair | guest. 만료·사용된 코드도 1시간 남겨 두고 410(만료)과 404(없음)를 구분한다.
+CREATE TABLE IF NOT EXISTS link_codes (
+  code TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  vehicle_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at TEXT
+);
+`;
+
 /** 확장 스키마를 만든다. 여러 번 불러도 같다. */
 export const ensureExtSchema = (db: Db) => {
   db.exec(SCHEMA_FADE);
+  db.exec(SCHEMA_AUTH);
 };
