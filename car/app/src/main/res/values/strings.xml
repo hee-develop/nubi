@@ -65,4 +65,11 @@
     <string name="navigate">길안내</string>
     <string name="navigate_sent">길안내 요청을 보냈어요</string>
     <string name="navigate_failed">길안내 연결에 실패했어요</string>
+    <!-- 지도(05a) -->
+    <string name="map_roads">도로</string>
+    <string name="map_regions">시군구</string>
+    <string name="map_zoom_in">+</string>
+    <string name="map_zoom_out">−</string>
+    <string name="map_me">내 위치</string>
+    <string name="map_national">전국</string>
 </resources>

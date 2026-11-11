@@ -88,6 +88,13 @@ class TripEngine(
     /** P가 됐을 때 위치를 아직 몰라 조회를 미룬 상태. 첫 위치가 오면 [onParked]를 한 번 부른다. */
     private var parkedAwaitingLocation = false
 
+    /**
+     * 미전송분이 있을 때 업로드를 시도하는 간격(ms). 기본 60초, 주행 중 지도를 켠 경우 20초(계약서 05 3장, 점 100개 기준은 그대로).
+     * 값을 바꾸면 다음에 타이머를 걸 때부터 적용된다.
+     */
+    @Volatile
+    var uploadIntervalMillis: Long = UPLOAD_INTERVAL_MILLIS
+
     @Volatile
     var status: TripStatus = TripStatus()
         private set
@@ -488,7 +495,7 @@ class TripEngine(
         updateTimers()
     }
 
-    /** 5초 tick은 기록 중일 때만, 60초 업로드 타이머는 큐에 미전송분이 있을 때만 돈다(놀 때는 아무것도 깨우지 않는다). */
+    /** 5초 tick은 기록 중일 때만, 업로드 타이머(기본 60초, 지도를 켜면 20초)는 큐에 미전송분이 있을 때만 돈다(놀 때는 아무것도 깨우지 않는다). */
     private fun updateTimers() {
         if (machine.state == TripState.RECORDING) {
             if (tickJob == null) tickJob = scheduler.postDelayed(TICK_MILLIS) { tickJob = null; onTick() }
@@ -498,7 +505,7 @@ class TripEngine(
         }
         if (uploader.pendingEntries > 0) {
             if (uploadJob == null) {
-                uploadJob = scheduler.postDelayed(UPLOAD_INTERVAL_MILLIS) {
+                uploadJob = scheduler.postDelayed(uploadIntervalMillis) {
                     uploadJob = null
                     requestUpload(force = false)
                     publish()
@@ -514,6 +521,9 @@ class TripEngine(
         private const val TAG = "NubiTrip"
         const val TICK_MILLIS = 5_000L
         const val UPLOAD_INTERVAL_MILLIS = 60_000L
+
+        /** 주행 중 지도를 켠 경우의 업로드 간격(서버 잠정 색칠이 지나온 길을 따라오게). */
+        const val MAP_UPLOAD_INTERVAL_MILLIS = 20_000L
         const val UPLOAD_BATCH_POINTS = 100
         const val ODOMETER_TIMEOUT_MILLIS = 2_000L
         const val VIN_WAIT_MILLIS = 10_000L

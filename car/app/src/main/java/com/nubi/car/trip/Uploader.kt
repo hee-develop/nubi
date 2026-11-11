@@ -81,6 +81,18 @@ class Uploader(
     var loaded = false
         private set
 
+    /**
+     * 지금 점을 올리고 있는 트립의 서버 id(주행 중 지도의 잠정 색칠 조회용). 트립 생성·점 전송이 성공하면 그 트립으로 바뀌고, 그 트립의 End가 올라가면 비운다.
+     * 마지막 점 업로드가 성공한 벽시계 시각은 [lastPointsUploadedAtMs](실시간 반영 지연 측정용 로그에 쓴다).
+     */
+    @Volatile
+    var liveTripId: String? = null
+        private set
+
+    @Volatile
+    var lastPointsUploadedAtMs = 0L
+        private set
+
     /** 서버가 End를 받았을 때(서버 트립 id). 도로 색칠 결과 폴링을 시작하는 데 쓴다. 호출 예외는 업로드에 영향을 주지 않는다. */
     @Volatile
     var onTripEnded: (String) -> Unit = {}
@@ -288,6 +300,7 @@ class Uploader(
             held.clear()
             points.set(0)
             total.set(0)
+            liveTripId = null
             structVersion++
             if (loaded) {
                 dirty = false
@@ -441,6 +454,7 @@ class Uploader(
                                 }
                             }
                             if (save) saveRegistrations()
+                            liveTripId = serverId
                         }
                         is Step.Alias -> {
                             api.aliasVehicle(step.alias)
@@ -466,6 +480,9 @@ class Uploader(
                                 }
                             }
                             if (save) saveRegistrations()
+                            liveTripId = step.serverId
+                            lastPointsUploadedAtMs = System.currentTimeMillis()
+                            Log.i(TAG, "점 업로드 성공 ${step.batch.size}개 wall=$lastPointsUploadedAtMs")
                             uploaded += step.batch.size
                             currentBatch = batchSize // 이분할 뒤 성공했으면 원래 크기로 복원
                         }
@@ -482,6 +499,7 @@ class Uploader(
                             }
                             if (save) saveRegistrations()
                             ended++
+                            if (liveTripId == step.serverId) liveTripId = null
                             try {
                                 onTripEnded(step.serverId)
                             } catch (t: Throwable) {

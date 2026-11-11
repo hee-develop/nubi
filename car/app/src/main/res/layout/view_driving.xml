@@ -1,7 +1,66 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 주행 중: 로고 마크, 상태 문구, 보조 문구만. 숫자·카드·버튼·QR·애니메이션 없음 -->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- 주행 중: 지도 화면(FeatureFlags.drivingMap)과 기존 03b 화면(로고·상태·보조 문구) 중 하나만 보인다. 둘 다 숫자·카드·버튼·QR·애니메이션 없음 -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/driving_view"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <!-- 주행 중 지도: 앱 영역 전체 지도 + 상단 한 줄(기록 중 · 지금 시군구). 터치는 받지 않는다 -->
+    <FrameLayout
+        android:id="@+id/driving_map"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone">
+
+        <com.nubi.car.map.NubiMapView
+            android:id="@+id/map_driving"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:importantForAccessibility="yes" />
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_margin="28dp"
+            android:background="@drawable/bg_map_bar"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="36dp"
+            android:paddingTop="14dp"
+            android:paddingEnd="36dp"
+            android:paddingBottom="14dp">
+
+            <TextView
+                android:id="@+id/driving_map_state"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="@color/text"
+                android:textSize="@dimen/text_body"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/driving_map_region"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="16dp"
+                android:maxLines="1"
+                android:ellipsize="end"
+                android:textColor="@color/muted"
+                android:textSize="@dimen/text_body" />
+
+            <TextView
+                android:id="@+id/driving_map_health"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="24dp"
+                android:textColor="@color/accent"
+                android:textSize="@dimen/text_sub"
+                android:textStyle="bold" />
+        </LinearLayout>
+    </FrameLayout>
+
+    <LinearLayout
+        android:id="@+id/driving_legacy"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:gravity="center"
@@ -54,3 +113,4 @@
         android:textColor="@color/muted"
         android:textSize="@dimen/text_small" />
 </LinearLayout>
+</FrameLayout>

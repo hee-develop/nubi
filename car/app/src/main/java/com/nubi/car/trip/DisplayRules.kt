@@ -76,3 +76,17 @@ fun neighborLayout(extrasVisible: Boolean, widthDp: Int, fullMinWidthDp: Int): N
 
 /** 앱 영역이 좁아 세로로 쌓는 배치를 쓸지(이웃 카드가 없어도 왼쪽 열을 화면 너비에 맞춘다). 너비를 모르면 쓰지 않는다. */
 fun narrowAppArea(widthDp: Int, fullMinWidthDp: Int): Boolean = widthDp in 1 until fullMinWidthDp
+
+/**
+ * 정차 지도 화면(오른쪽 패널·좁으면 아래 패널)의 이웃 카드 모습. 부가 요소가 허용되지 않으면 숨기고, 좁은 앱 영역이면 패널을 줄이려고 축약형,
+ * 넓은 영역에서는 패널 너비가 카드 전체형이 들어갈 만큼([fullMinCardWidthDp])이면 전체형이다. 패널 너비를 모르면(0 이하) 전체로 본다.
+ */
+fun neighborLayoutInMap(extrasVisible: Boolean, narrow: Boolean, panelWidthDp: Int, fullMinCardWidthDp: Int): NeighborLayout = when {
+    !extrasVisible -> NeighborLayout.HIDDEN
+    narrow -> NeighborLayout.COMPACT
+    panelWidthDp in 1 until fullMinCardWidthDp -> NeighborLayout.COMPACT
+    else -> NeighborLayout.FULL
+}
+
+/** 정차 지도 화면에서 패널 글자를 줄이는 비율(패널이 앱 영역의 40%라 03 요소를 다 담으려고). */
+const val PANEL_TEXT_SCALE = 0.75f
