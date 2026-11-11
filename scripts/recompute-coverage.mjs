@@ -44,7 +44,11 @@ export const recompute = (db, { month, totalNamedLengthM, apply = false, now = n
   for (const { vehicle_id } of db.prepare('SELECT DISTINCT vehicle_id FROM driven_ways').all()) vehicles.add(canon.get(vehicle_id) ?? vehicle_id);
   const hasPrev = db.prepare("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = 'coverage_snapshots'").get();
   const out = [];
-  if (apply) db.exec(SNAPSHOT_DDL);
+  if (apply) {
+    db.exec(SNAPSHOT_DDL);
+    db.exec('BEGIN'); // 스냅샷 기록과 snapshot_month 갱신은 한 트랜잭션(중간에 실패해도 반쯤 바뀐 채로 남지 않는다)
+  }
+  try {
   for (const v of [...vehicles].sort()) {
     const driven = db.prepare(`WITH ${DRIVEN_CTE}, ${ROAD_DRIVEN_CTE} SELECT COALESCE(SUM(driven), 0) AS driven FROM r`).get(v, v).driven;
     const counts = db
@@ -83,6 +87,11 @@ export const recompute = (db, { month, totalNamedLengthM, apply = false, now = n
     }
   }
   if (apply) db.prepare(`UPDATE driven_ways SET snapshot_month = ? WHERE way_id IN (SELECT way_id FROM ${RD}.ways)`).run(month);
+  if (apply) db.exec('COMMIT');
+  } catch (e) {
+    if (apply) db.exec('ROLLBACK');
+    throw e;
+  }
   return out;
 };
 

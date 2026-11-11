@@ -1,8 +1,9 @@
 import { Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
 import { canonicalVehicleId } from '../matching/pipeline.js';
 import { VEHICLE_SET_SQL } from '../roads/index.js';
-import { readSettings } from '../ext/settings.js';
+import { isRecordingBlocked, readSettings } from '../ext/settings.js';
 import { iso, parseBody, SQL_SHIFT_DAYS, type ExtDeps } from '../ext/util.js';
 
 const id = z.string().min(1).max(128);
@@ -26,10 +27,18 @@ const vehicleIds = (db: ExtDeps['db'], vehicleId: string): string[] => [
 export const accountRoutes = (deps: ExtDeps) => {
   const { db, options, now } = deps;
   const app = new Hono()
+    .use('/vehicles/*', bodyLimit({ maxSize: 4 * 1024, onError: (c) => c.json({ error: 'payload_too_large' }, 413) }))
+    .use('/debug/*', bodyLimit({ maxSize: 1024, onError: (c) => c.json({ error: 'payload_too_large' }, 413) }))
     // 기록 멈춤(일시 중지 요구권, plan 11-2): 멈춘 차량(또는 동의 철회 뒤)의 점 업로드는 저장하지 않고 받은 것으로만 응답한다(차량 큐가 쌓이지 않게 200).
     .post('/trips/:tripId/points', async (c, next) => {
       const t = db.prepare('SELECT vehicle_id FROM trips WHERE id = ?').get(c.req.param('tripId')) as { vehicle_id: string } | undefined;
-      if (t && readSettings(db, canonicalVehicleId(db, t.vehicle_id)).recordingPaused) return c.json({ accepted: 0, duplicated: 0, paused: true as const }, 200);
+      if (t && isRecordingBlocked(db, t.vehicle_id)) return c.json({ accepted: 0, duplicated: 0, paused: true as const }, 200);
+      return next();
+    })
+    // T1 실시간 색칠(`GET /trips/:id/live`)에도 같은 차단을 건다: 멈춘 차량은 잠정 결과를 만들지도 내보내지도 않는다. T1 라우트는 이 라우트보다 뒤에 붙는다.
+    .get('/trips/:tripId/live', async (c, next) => {
+      const t = db.prepare('SELECT vehicle_id FROM trips WHERE id = ?').get(c.req.param('tripId')) as { vehicle_id: string } | undefined;
+      if (t && isRecordingBlocked(db, t.vehicle_id)) return c.json({ status: 'idle' as const, upToSeq: -1, ways: [], paused: true as const }, 200);
       return next();
     })
     .get('/vehicles/:id/settings', (c) => c.json(readSettings(db, canonicalVehicleId(db, c.req.param('id'))), 200))
@@ -88,8 +97,10 @@ export const accountRoutes = (deps: ExtDeps) => {
         db.prepare('DELETE FROM share_cards WHERE vehicle_id = ?').run(vehicleId);
         counts.trips = Number(db.prepare(`DELETE FROM trips WHERE vehicle_id IN ${inList}`).run(...ids).changes);
         // 이 차에서 앉은 게스트 기록도 이 차의 위치정보에서 나온 것이라 함께 지운다.
-        db.prepare(`DELETE FROM guest_ways WHERE session_id IN (SELECT id FROM guest_sessions WHERE vehicle_id = ?)`).run(vehicleId);
-        db.prepare("UPDATE guest_sessions SET ended_at = COALESCE(ended_at, ?), end_reason = COALESCE(end_reason, 'deleted'), deleted_at = ? WHERE vehicle_id = ?").run(iso(now()), iso(now()), vehicleId);
+        db.prepare(`DELETE FROM guest_trip_ways WHERE session_id IN (SELECT id FROM guest_sessions WHERE vehicle_id = ?)`).run(vehicleId);
+        db.prepare(`DELETE FROM guest_trip_cache WHERE session_id IN (SELECT id FROM guest_sessions WHERE vehicle_id = ?)`).run(vehicleId);
+        db.prepare("UPDATE guest_sessions SET ended_at = COALESCE(ended_at, ?), end_reason = COALESCE(end_reason, 'deleted'), deleted_at = ?, nickname = NULL WHERE vehicle_id = ?").run(iso(now()), iso(now()), vehicleId);
+        db.prepare('DELETE FROM certificates WHERE vehicle_id = ?').run(vehicleId);
         db.prepare("DELETE FROM link_codes WHERE vehicle_id = ?").run(vehicleId);
         db.prepare(
           `INSERT INTO vehicle_settings (vehicle_id, recording_paused, consent_withdrawn_at, updated_at) VALUES (?, 1, ?, ?)
@@ -102,8 +113,8 @@ export const accountRoutes = (deps: ExtDeps) => {
       }
       return c.json({ ok: true as const, deleted: counts }, 200);
     });
-  // 시연용: 마지막 인정·판정 시각을 days만큼 당겨 '바램'을 즉시 보인다(plan 8장). production에서는 라우트 자체가 없다.
-  if (options.debug ?? process.env.NODE_ENV !== 'production') {
+  // 시연용: 마지막 인정·판정 시각을 days만큼 당겨 '바램'을 즉시 보인다(plan 8장). `NUBI_DEBUG=1`이고 production이 아닐 때만 라우트가 있다(옵션 `ext.debug`가 덮는다).
+  if (options.debug ?? (process.env.NUBI_DEBUG === '1' && process.env.NODE_ENV !== 'production')) {
     return app.post('/debug/age', async (c) => {
       const p = await parseBody(c, ageBody);
       if (!p.ok) return p.res;

@@ -34,6 +34,8 @@ export type ExtOptions = {
   installUrl?: string;
   /** 공유 카드 PNG 변환에 쓸 글꼴 파일(`NUBI_CARD_FONT`). 생략하면 시스템 글꼴. */
   fontFile?: string;
+  /** SVG → PNG 변환기를 바꿔 끼운다(테스트·다른 렌더러). 생략하면 `@resvg/resvg-js`. null을 돌려주면 카드 생성은 503. */
+  pngRenderer?: (svg: string) => Promise<Buffer | null>;
   /** 요청 횟수 제한 조정(테스트용). */
   rateLimit?: { max: number; windowMs: number };
 };

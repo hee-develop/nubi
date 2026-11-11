@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
-import { authenticate, checkCode, clientKey, CODE_RE, codeGuardOf, issueCode, issueToken, publicBase, RateLimiter } from '../ext/auth.js';
+import { authenticate, checkCode, clientKey, CODE_RE, codeGuardOf, issueCode, issueToken, publicBase, RateLimiter, revokeTokens } from '../ext/auth.js';
 import { iso, parseBody, type ExtDeps } from '../ext/util.js';
 import { canonicalVehicleId } from '../matching/pipeline.js';
 
@@ -12,7 +12,7 @@ const codeBody = z.object({ vehicleId: id, gear });
 const claimBody = z.object({ code: z.string().regex(CODE_RE), consent: z.boolean().optional() });
 
 /** 차주 연결 pair 로직(웹 페이지 `/p/:code`도 같이 쓴다). 성공하면 계정·토큰을 만든다. */
-export const claimPair = (deps: ExtDeps, vehicleId: string, nowMs: number, consentAt: string | null) => {
+export const claimPair = (deps: ExtDeps, vehicleId: string, nowMs: number, consentAt: string | null, opts: { apiToken?: boolean } = {}) => {
   const { db } = deps;
   const accountId = randomUUID();
   db.exec('BEGIN');
@@ -23,7 +23,7 @@ export const claimPair = (deps: ExtDeps, vehicleId: string, nowMs: number, conse
       return null;
     }
     db.prepare("INSERT INTO accounts (id, kind, vehicle_id, created_at, consent_at) VALUES (?, 'owner', ?, ?, ?)").run(accountId, vehicleId, iso(nowMs), consentAt);
-    const token = issueToken(db, 'account', accountId, nowMs);
+    const token = opts.apiToken === false ? null : issueToken(db, 'account', accountId, nowMs);
     db.exec('COMMIT');
     return { accountId, token, vehicleId };
   } catch (e) {
@@ -40,7 +40,7 @@ export const unpair = (deps: ExtDeps, vehicleId: string, nowMs: number): boolean
   db.exec('BEGIN');
   try {
     db.prepare("UPDATE guest_sessions SET ended_at = ?, end_reason = 'unpaired' WHERE account_id = ? AND ended_at IS NULL").run(iso(nowMs), acc.id);
-    db.prepare("DELETE FROM auth_tokens WHERE kind = 'account' AND subject = ?").run(acc.id);
+    revokeTokens(db, 'account', acc.id, nowMs);
     db.prepare('DELETE FROM accounts WHERE id = ?').run(acc.id);
     db.prepare("DELETE FROM link_codes WHERE kind = 'pair' AND vehicle_id = ?").run(vehicleId);
     db.exec('COMMIT');
@@ -75,14 +75,15 @@ export const pairRoutes = (deps: ExtDeps) => {
       if (guard.blocked(key)) return c.json({ error: 'too_many_requests' }, 429);
       const p = await parseBody(c, claimBody);
       if (!p.ok) return p.res;
-      // 위치정보 이용 동의는 폰이 받는다. consent를 보냈다면 true여야 한다(보내지 않으면 폰 앱이 이미 받은 것으로 본다).
-      if (p.data.consent === false) return c.json({ error: 'consent_required' }, 400);
+      // 위치정보 이용 동의는 폰이 받아 consent: true로 보낸다. 없거나 false면 연결하지 않는다(동의 시각을 기록한다).
+      if (p.data.consent !== true) return c.json({ error: 'consent_required' }, 400);
       const state = checkCode(db, 'pair', p.data.code, now());
       if (!state.ok) {
         guard.fail(key);
+        await guard.delayIfNeeded();
         return c.json({ error: state.error }, state.status);
       }
-      const made = claimPair(deps, state.vehicleId, now(), p.data.consent ? iso(now()) : null);
+      const made = claimPair(deps, state.vehicleId, now(), iso(now()));
       if (!made) return c.json({ error: 'already_paired' }, 409);
       db.prepare('UPDATE link_codes SET used_at = ? WHERE code = ?').run(iso(now()), p.data.code);
       return c.json(made, 200);
@@ -95,7 +96,7 @@ export const pairRoutes = (deps: ExtDeps) => {
     })
     .delete('/pair', (c) => {
       // 폰(차주 계정 토큰)과 차(차량 토큰) 모두 해제할 수 있다. 토큰이 없으면 401.
-      const info = authenticate(db, c);
+      const info = authenticate(deps, c);
       if (!info) return c.json({ error: 'unauthorized' }, 401);
       const vehicleId = info.kind === 'vehicle' ? canonicalVehicleId(db, info.vehicleId) : info.role === 'owner' ? info.vehicleId : null;
       if (!vehicleId) return c.json({ error: 'forbidden' }, 403);

@@ -35,7 +35,7 @@ describe('차주 연결 pair', () => {
     const e = extApp();
     const a = await issue(e);
     const b = await issue(e);
-    if (a.code !== b.code) expect((await call(e, '/pair/claim', post('', { code: a.code }))).status).toBe(404); // 새 코드를 내면 이전 코드는 무효
+    if (a.code !== b.code) expect((await call(e, '/pair/claim', post('', { consent: true, code: a.code }))).status).toBe(404); // 새 코드를 내면 이전 코드는 무효
     const claim = await call(e, '/pair/claim', post('', { code: b.code, consent: true }));
     expect(claim.status).toBe(200);
     expect(claim.body).toMatchObject({ vehicleId: V });
@@ -45,7 +45,7 @@ describe('차주 연결 pair', () => {
     const stored = e.db.prepare('SELECT token_hash FROM auth_tokens').all() as { token_hash: string }[];
     expect(stored.map((r) => r.token_hash)).not.toContain(claim.body.token);
     expect(JSON.stringify(e.db.prepare('SELECT * FROM accounts').all())).not.toContain(claim.body.token);
-    const again = await call(e, '/pair/claim', post('', { code: b.code }));
+    const again = await call(e, '/pair/claim', post('', { consent: true, code: b.code }));
     expect(again.status).toBe(410);
     expect(again.body).toEqual({ error: 'code_used' });
     expect((await call(e, '/pair/code', post('', { vehicleId: V, gear: 'P' }))).status).toBe(409); // 차 1대에 차주 1명
@@ -58,12 +58,14 @@ describe('차주 연결 pair', () => {
     const a = await issue(e);
     for (const code of ['12345', 'abcdef', '1234567', 123456, null]) expect((await call(e, '/pair/claim', post('', { code }))).status).toBe(400);
     const wrong = a.code === '000000' ? '000001' : '000000';
-    const nf = await call(e, '/pair/claim', post('', { code: wrong }));
+    const nf = await call(e, '/pair/claim', post('', { consent: true, code: wrong }));
     expect(nf.status).toBe(404);
     expect(nf.body).toEqual({ error: 'code_not_found' });
-    expect((await call(e, '/pair/claim', post('', { code: a.code, consent: false }))).status).toBe(400);
+    expect((await call(e, '/pair/claim', post('', { code: a.code, consent: false }))).body).toEqual({ error: 'consent_required' });
+    expect((await call(e, '/pair/claim', post('', { code: a.code }))).body).toEqual({ error: 'consent_required' }); // 동의 없이는 연결하지 않는다(consent 필수)
+    expect((e.db.prepare('SELECT COUNT(*) AS n FROM accounts').get() as any).n).toBe(0);
     e.clock.t += 5 * MIN + 1;
-    const exp = await call(e, '/pair/claim', post('', { code: a.code }));
+    const exp = await call(e, '/pair/claim', post('', { consent: true, code: a.code }));
     expect(exp.status).toBe(410);
     expect(exp.body).toEqual({ error: 'code_expired' });
   });
@@ -72,16 +74,16 @@ describe('차주 연결 pair', () => {
     const e = extApp({ ext: { rateLimit: { max: 3, windowMs: 5 * MIN } } });
     const a = await issue(e);
     const wrong = a.code === '000000' ? '000001' : '000000';
-    for (let i = 0; i < 3; i++) expect((await call(e, '/pair/claim', post('', { code: wrong }))).status).toBe(404);
-    expect((await call(e, '/pair/claim', post('', { code: a.code }))).status).toBe(429);
+    for (let i = 0; i < 3; i++) expect((await call(e, '/pair/claim', post('', { consent: true, code: wrong }))).status).toBe(404);
+    expect((await call(e, '/pair/claim', post('', { consent: true, code: a.code }))).status).toBe(429);
     e.clock.t += 5 * MIN + 1;
     const b = await issue(e);
-    expect((await call(e, '/pair/claim', post('', { code: b.code }))).status).toBe(200);
+    expect((await call(e, '/pair/claim', post('', { consent: true, code: b.code }))).status).toBe(200);
   });
 
   it('DELETE /pair: 토큰 없으면 401, 차주 토큰으로 해제(200) 후 토큰은 무효, 이미 해제는 401', async () => {
     const e = extApp();
-    const claim = (await call(e, '/pair/claim', post('', { code: (await issue(e)).code }))).body;
+    const claim = (await call(e, '/pair/claim', post('', { consent: true, code: (await issue(e)).code }))).body;
     expect((await call(e, '/pair', { method: 'DELETE' })).status).toBe(401);
     expect((await call(e, '/pair', { method: 'DELETE', headers: bearer('x'.repeat(40)) })).status).toBe(401);
     const del = await call(e, '/pair', { method: 'DELETE', headers: bearer(claim.token) });
@@ -90,7 +92,7 @@ describe('차주 연결 pair', () => {
     expect((await call(e, '/pair', { method: 'DELETE', headers: bearer(claim.token) })).status).toBe(401);
     expect((await call(e, `/pair?vehicleId=${V}`)).body).toEqual({ paired: false });
     // 해제하면 다시 연결할 수 있다
-    expect((await call(e, '/pair/claim', post('', { code: (await issue(e)).code }))).status).toBe(200);
+    expect((await call(e, '/pair/claim', post('', { consent: true, code: (await issue(e)).code }))).status).toBe(200);
   });
 
   it('게스트 계정 토큰으로는 차주 연결을 해제할 수 없다(403)와 차량 토큰은 가능, 연결 없으면 404', async () => {
@@ -98,7 +100,7 @@ describe('차주 연결 pair', () => {
     const reg = (await call(e, '/vehicles/register', post('', { vin: 'KMHABCDEF12345678' }))).body;
     expect((await call(e, '/pair', { method: 'DELETE', headers: bearer(reg.vehicleToken) })).status).toBe(404);
     const { code } = await issue(e, reg.vehicleId);
-    expect((await call(e, '/pair/claim', post('', { code }))).status).toBe(200);
+    expect((await call(e, '/pair/claim', post('', { consent: true, code }))).status).toBe(200);
     // 게스트 계정 하나를 만들어(직접 삽입) 시도
     const t = 'g'.repeat(43);
     const { createHash } = await import('node:crypto');
@@ -141,7 +143,7 @@ describe('토큰 인증(NUBI_AUTH)', () => {
     expect((await call(e, `/trips/${t.body.tripId}`, { headers: bearer(a.vehicleToken!) })).status).toBe(200);
     expect((await call(e, `/trips/${t.body.tripId}/end`, post('', { endedAt: '2026-11-09T00:10:00Z' }, bearer(b.vehicleToken!)))).status).toBe(403);
     // 면제: 연결 claim(코드 오류라 404지만 401은 아니다)
-    expect((await call(e, '/pair/claim', post('', { code: '123456' }))).status).toBe(404);
+    expect((await call(e, '/pair/claim', post('', { consent: true, code: '123456' }))).status).toBe(404);
     // 코드 발급은 차량 토큰 범위
     expect((await call(e, '/pair/code', post('', { vehicleId: a.vehicleId, gear: 'P' }))).status).toBe(401);
     expect((await call(e, '/pair/code', post('', { vehicleId: a.vehicleId, gear: 'P' }, bearer(b.vehicleToken!)))).status).toBe(403);
@@ -169,7 +171,7 @@ describe('토큰 인증(NUBI_AUTH)', () => {
   it('차주 계정 토큰은 자기 차량만 접근한다', async () => {
     const e = extApp({ ext: { auth: 'required' } });
     const a = await register(e);
-    const claim = (await call(e, '/pair/claim', post('', { code: (await call(e, '/pair/code', post('', { vehicleId: a.vehicleId, gear: 'P' }, bearer(a.vehicleToken!)))).body.code }))).body;
+    const claim = (await call(e, '/pair/claim', post('', { consent: true, code: (await call(e, '/pair/code', post('', { vehicleId: a.vehicleId, gear: 'P' }, bearer(a.vehicleToken!)))).body.code }))).body;
     expect((await call(e, `/coverage/summary?vehicleId=${a.vehicleId}`, { headers: bearer(claim.token) })).status).toBe(200);
     expect((await call(e, '/coverage/summary?vehicleId=other', { headers: bearer(claim.token) })).status).toBe(403);
   });

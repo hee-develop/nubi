@@ -7,7 +7,7 @@ import { attachRegions, resolveRegionsPath, type Regions } from './regions/index
 import { inTx, mergeRegionAliases, resolvePending, runBatch } from './regions/judge.js';
 import { canonicalVehicleId } from './matching/pipeline.js';
 import { coverageRoutes } from './routes/coverage.js';
-import { extRoutes, type ExtOptions } from './routes/ext.js';
+import { createExt, type ExtOptions } from './routes/ext.js';
 import { regionsRoutes } from './routes/regions.js';
 import { tripsRoutes } from './routes/trips.js';
 import { resolveVehicleHmacKey, vehiclesRoutes } from './routes/vehicles.js';
@@ -91,9 +91,11 @@ export const createApp = (db: Db = openDb(), options: AppOptions = {}) => {
       60 * 60 * 1000,
     ).unref();
   }
+  const ext = createExt({ db, getRoads: () => roads, getRegions: () => regions, now, options: options.ext ?? {} });
   const app = new Hono()
+    .use('*', ext.middleware) // 체인 맨 앞: 뒤에 붙는 모든 라우트(T1 /map·/trips/:id/live 포함)에 인증·본문 한도 적용
     .get('/health', (c) => c.json({ ok: true as const }))
-    .route('/', extRoutes({ db, getRoads: () => roads, getRegions: () => regions, now, options: options.ext ?? {} }))
+    .route('/', ext.routes)
     .route('/trips', tripsRoutes(db, worker.enqueue, { onStarted: (v) => tick(v, false), onPoints: (v) => tick(v, true) }))
     .route(
       '/regions',
