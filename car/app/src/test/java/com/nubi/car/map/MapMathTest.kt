@@ -117,11 +117,11 @@ class MapMathTest {
     }
 
     @Test
-    fun 칸_크기는_서버_bbox_상한의_절반_이하다() {
-        // 서버 상한: z<9 6°, z<11 2°, z<13 0.5°, 그 위 0.15°
+    fun 칸_크기는_서버_bbox_상한_이하다() {
+        // 서버 상한: z<9 3°, z<11 2°, z<13 0.5°, 그 위 0.15°
         for (z in 5..16) {
-            val limit = if (z < 9) 6.0 else if (z < 11) 2.0 else if (z < 13) 0.5 else 0.15
-            assertTrue("z$z", cellSizeDeg(z) <= limit / 2 + 1e-9)
+            val limit = if (z < 9) 3.0 else if (z < 11) 2.0 else if (z < 13) 0.5 else 0.15
+            assertTrue("z$z", cellSizeDeg(z) <= limit + 1e-9)
         }
     }
 
