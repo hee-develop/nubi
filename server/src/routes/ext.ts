@@ -3,6 +3,7 @@ import { ensureExtSchema } from '../db/schema-ext.js';
 import type { ExtDeps } from '../ext/util.js';
 import { authMiddleware } from '../ext/auth.js';
 import { accountRoutes } from './account.js';
+import { guestRoutes } from './guest.js';
 import { pairRoutes } from './pair.js';
 
 export type { ExtOptions } from '../ext/util.js';
@@ -13,5 +14,5 @@ export type { ExtOptions } from '../ext/util.js';
  */
 export const extRoutes = (deps: ExtDeps) => {
   ensureExtSchema(deps.db);
-  return new Hono().use('*', authMiddleware(deps)).route('/', pairRoutes(deps)).route('/', accountRoutes(deps));
+  return new Hono().use('*', authMiddleware(deps)).route('/', guestRoutes(deps)).route('/', pairRoutes(deps)).route('/', accountRoutes(deps));
 };

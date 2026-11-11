@@ -39,9 +39,7 @@ export const unpair = (deps: ExtDeps, vehicleId: string, nowMs: number): boolean
   if (!acc) return false;
   db.exec('BEGIN');
   try {
-    // 게스트 세션 테이블은 게스트 커밋에서 만든다(여기서는 있을 때만 건드린다).
-    if (db.prepare("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = 'guest_sessions'").get())
-      db.prepare("UPDATE guest_sessions SET ended_at = ?, end_reason = 'unpaired' WHERE account_id = ? AND ended_at IS NULL").run(iso(nowMs), acc.id);
+    db.prepare("UPDATE guest_sessions SET ended_at = ?, end_reason = 'unpaired' WHERE account_id = ? AND ended_at IS NULL").run(iso(nowMs), acc.id);
     db.prepare("DELETE FROM auth_tokens WHERE kind = 'account' AND subject = ?").run(acc.id);
     db.prepare('DELETE FROM accounts WHERE id = ?').run(acc.id);
     db.prepare("DELETE FROM link_codes WHERE kind = 'pair' AND vehicle_id = ?").run(vehicleId);

@@ -69,8 +69,59 @@ CREATE TABLE IF NOT EXISTS link_codes (
 );
 `;
 
+/**
+ * 게스트 세션(plan 9장). 세션이 열린 동안의 그 차량 트립을 게스트에게도 인정한다. 도로(way)는 DB 트리거가 `driven_ways` 변경을 보고 `guest_ways`에 옮겨 담고
+ * (매칭 파이프라인은 건드리지 않는다), 시군구는 세션 시간 창의 트립(`trip_matching.result_json.regions`·`region_events`)에서 조회 때 계산한다.
+ * end_reason: guest(내리기) | owner(모두 내리기) | idle(마지막 트립 종료 후 12시간) | own_trip(게스트가 자기 차에서 트립 시작) | unpaired | deleted.
+ */
+export const SCHEMA_GUEST = `
+CREATE TABLE IF NOT EXISTS guest_sessions (
+  id TEXT PRIMARY KEY,
+  vehicle_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  nickname TEXT,
+  consent_at TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  ended_at TEXT,
+  end_reason TEXT,
+  deleted_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_guest_sessions_vehicle ON guest_sessions (vehicle_id, ended_at);
+CREATE INDEX IF NOT EXISTS idx_guest_sessions_account ON guest_sessions (account_id);
+
+CREATE TABLE IF NOT EXISTS guest_ways (
+  session_id TEXT NOT NULL,
+  way_id INTEGER NOT NULL,
+  coverage REAL NOT NULL,
+  first_at TEXT NOT NULL,
+  last_at TEXT NOT NULL,
+  PRIMARY KEY (session_id, way_id)
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_driven_ways_guest_ins AFTER INSERT ON driven_ways
+BEGIN
+  INSERT INTO guest_ways (session_id, way_id, coverage, first_at, last_at)
+  SELECT s.id, NEW.way_id, NEW.coverage, NEW.first_driven_at, NEW.last_driven_at FROM guest_sessions s
+  WHERE s.deleted_at IS NULL
+    AND s.vehicle_id IN (NEW.vehicle_id, COALESCE((SELECT vehicle_id FROM vehicle_alias WHERE alias_id = NEW.vehicle_id), NEW.vehicle_id))
+    AND NEW.last_driven_at >= s.started_at AND (s.ended_at IS NULL OR NEW.last_driven_at <= s.ended_at)
+  ON CONFLICT (session_id, way_id) DO UPDATE SET coverage = MAX(coverage, excluded.coverage), first_at = MIN(first_at, excluded.first_at), last_at = MAX(last_at, excluded.last_at);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_driven_ways_guest_upd AFTER UPDATE OF last_driven_at, coverage ON driven_ways
+WHEN NEW.last_driven_at > OLD.last_driven_at OR NEW.coverage > OLD.coverage
+BEGIN
+  INSERT INTO guest_ways (session_id, way_id, coverage, first_at, last_at)
+  SELECT s.id, NEW.way_id, NEW.coverage, NEW.last_driven_at, NEW.last_driven_at FROM guest_sessions s
+  WHERE s.deleted_at IS NULL
+    AND s.vehicle_id IN (NEW.vehicle_id, COALESCE((SELECT vehicle_id FROM vehicle_alias WHERE alias_id = NEW.vehicle_id), NEW.vehicle_id))
+    AND NEW.last_driven_at >= s.started_at AND (s.ended_at IS NULL OR NEW.last_driven_at <= s.ended_at)
+  ON CONFLICT (session_id, way_id) DO UPDATE SET coverage = MAX(coverage, excluded.coverage), first_at = MIN(first_at, excluded.first_at), last_at = MAX(last_at, excluded.last_at);
+END;
+`;
+
 /** 확장 스키마를 만든다. 여러 번 불러도 같다. */
 export const ensureExtSchema = (db: Db) => {
   db.exec(SCHEMA_FADE);
   db.exec(SCHEMA_AUTH);
+  db.exec(SCHEMA_GUEST);
 };
