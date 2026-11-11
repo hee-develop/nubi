@@ -123,14 +123,14 @@ export const tripCard = (deps: ExtDeps, rawVehicleId: string, tripIds: string[])
     if (run.length >= 2) runs.push(run);
   }
   if (runs.length === 0) return { ok: false, status: 409, error: 'too_short' };
-  // 확대 범위: 남은 조각의 bbox(너무 좁으면 최소 약 11km로 넓힌다)
+  // 확대 범위: 남은 조각의 bbox(너무 좁으면 최소 0.06도(약 6.7km)로 넓힌다)
   let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
   for (const r of runs) for (const [lo, la] of r) {
     minLon = Math.min(minLon, lo); maxLon = Math.max(maxLon, lo); minLat = Math.min(minLat, la); maxLat = Math.max(maxLat, la);
   }
   const midLat = (minLat + maxLat) / 2;
-  const minSpanLat = 0.1;
-  const minSpanLon = 0.1 / Math.cos((midLat * Math.PI) / 180);
+  const minSpanLat = 0.06;
+  const minSpanLon = 0.06 / Math.cos((midLat * Math.PI) / 180);
   const cx = (minLon + maxLon) / 2;
   const cy = midLat;
   const halfLon = Math.max((maxLon - minLon) / 2, minSpanLon / 2);
@@ -218,7 +218,7 @@ export const roadCard = (deps: ExtDeps, rawVehicleId: string, roadKey: string): 
   if (segs.length === 0) return { ok: false, status: 409, error: 'too_short' };
   const project = fit([minLon, minLat, maxLon, maxLat], 720, 540, 0.08);
   const inner = mapContent({ project, segs, w: 720, h: 540, lineWidth: 5, thin: 1.2 });
-  const lines = [`${road.display_name} 완주`, `${Math.round(road.total_length_m / 100) / 10}km`, ''];
+  const lines = [`${road.display_name} 완주`, road.total_length_m < 1000 ? `${Math.round(road.total_length_m)}m` : `${Math.round(road.total_length_m / 100) / 10}km`, ''];
   const label = lastMs > 0 ? monthLabel(lastMs) : '';
   const text: CardText = { label, lines: lines as CardText['lines'], aria: '완주한 도로 전체' };
   return { ok: true, svg: cardSvg(inner, text), meta: { kind: 'road', label, lines: lines.filter(Boolean), aria: text.aria } };

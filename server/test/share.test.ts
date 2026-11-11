@@ -81,10 +81,10 @@ describe('공유 카드', () => {
     expect(svg).not.toMatch(/\d{2,3}\.\d{4,}/);
     for (const secret of [V, tripId, 'nm:']) expect(svg).not.toContain(secret);
     expect(svg).not.toMatch(/2026-11|T\d\d:\d\d/);
-    // 6.7km 궤적에서 양 끝 1km씩을 지우면 약 4.7km가 남는다(최소 범위 0.1° = 11.1km 기준 약 40.7px/km → 약 191px, 지우지 않으면 약 273px)
+    // 6.7km 궤적에서 양 끝 1km씩을 지우면 약 4.7km가 남는다. 틀은 최소 0.06°(약 6.67km)라 453px(= 540 × 0.84)를 6.67km에 대응시키면 약 319px(지우지 않으면 453px 가득)
     const y = pathYRange(svg, 8)!;
-    expect(y.max - y.min).toBeGreaterThan(165);
-    expect(y.max - y.min).toBeLessThan(215);
+    expect(y.max - y.min).toBeGreaterThan(295);
+    expect(y.max - y.min).toBeLessThan(345);
   });
 
   it('여행 카드: 전부 반경 1km 안이면 그릴 것이 없어 409(too_short), 없는 트립·남의 트립은 404, 형식 오류는 400', async () => {

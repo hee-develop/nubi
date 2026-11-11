@@ -75,7 +75,7 @@ export const mapContent = (opts: { project: (p: LonLat) => [number, number]; pol
   let outline = '';
   for (const poly of opts.polys ?? []) {
     const base = poly.faded ? COLORS.faded : COLORS.driven;
-    const key = poly.level > 0 ? `${base}|${[0, 0.2, 0.38, 0.6][poly.level]}` : poly.depop ? `${COLORS.depop}|1` : '';
+    const key = poly.level > 0 ? `${base}|${[0, 0.38, 0.6, 0.85][poly.level]}` : poly.depop ? `${COLORS.depop}|1` : '';
     let d = '';
     for (const ring of poly.rings) {
       const px = ring.map(project);
@@ -88,11 +88,12 @@ export const mapContent = (opts: { project: (p: LonLat) => [number, number]; pol
     outline += d;
     if (key) fills.set(key, [...(fills.get(key) ?? []), d]);
   }
+  if (outline) out += `<path d="${outline}" fill="none" stroke="${COLORS.line}" stroke-width="0.6" stroke-linejoin="round"/>`;
+  // 칠한 시군구는 면 + 앰버 윤곽(전국 축척에서도 보이게). 안 간 인구감소지역(#1c323a)은 면만.
   for (const [key, ds] of fills) {
     const [color, opacity] = key.split('|');
-    out += `<path d="${ds.join('')}" fill="${color}" fill-opacity="${opacity}" stroke="none"/>`;
+    out += color === COLORS.depop ? `<path d="${ds.join('')}" fill="${color}" fill-opacity="${opacity}" stroke="none"/>` : `<path d="${ds.join('')}" fill="${color}" fill-opacity="${opacity}" stroke="${color}" stroke-width="1" stroke-linejoin="round"/>`;
   }
-  if (outline) out += `<path d="${outline}" fill="none" stroke="${COLORS.line}" stroke-width="0.6" stroke-linejoin="round"/>`;
   // 도로: 안 달린(dim) → 바랜(faded) → 달린(driven) → 이번 여행(trip) 순으로 위에 쌓는다.
   for (const style of ['dim', 'faded', 'driven', 'trip'] as const) {
     const seen = new Set<string>();
