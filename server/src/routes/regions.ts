@@ -1,9 +1,9 @@
-import { Hono } from 'hono';
-import type { Db } from '../db/index.js';
-import { RG, REGIONS_ATTRIBUTION, type Regions } from '../regions/index.js';
-import { nearestRegions, neighborsOf } from '../regions/neighbors.js';
-import { canonicalVehicleId } from '../matching/pipeline.js';
-import { VEHICLE_SET_SQL } from '../roads/index.js';
+import { Hono } from "hono";
+import type { Db } from "../db/index.js";
+import { RG, REGIONS_ATTRIBUTION, type Regions } from "../regions/index.js";
+import { nearestRegions, neighborsOf } from "../regions/neighbors.js";
+import { canonicalVehicleId } from "../matching/pipeline.js";
+import { VEHICLE_SET_SQL } from "../roads/index.js";
 
 export const MAX_REGION_BBOX_SPAN_DEG = 3;
 /** `/regions/geo` 도형 캐시: bbox 문자열 단위, 최대 개수·유효 시간. */
@@ -19,7 +19,10 @@ const VISITED_CTE = `v AS (
 
 /** 사양 03 5장. 모든 응답에 snapshotMonth·attribution(행정동 경계 출처)을 싣는다. 지역 DB가 없으면 503. */
 export const regionsRoutes = (db: Db, getRegions: () => Regions | null) => {
-  const base = (r: Regions | null) => ({ snapshotMonth: r?.month ?? null, attribution: REGIONS_ATTRIBUTION });
+  const base = (r: Regions | null) => ({
+    snapshotMonth: r?.month ?? null,
+    attribution: REGIONS_ATTRIBUTION,
+  });
   const geoCache = new Map<
     string,
     {
@@ -29,16 +32,24 @@ export const regionsRoutes = (db: Db, getRegions: () => Regions | null) => {
         name: string;
         displayName: string;
         depop89: boolean;
-        geometry: { type: 'MultiPolygon'; coordinates: number[][][][] };
+        geometry: { type: "MultiPolygon"; coordinates: number[][][][] };
       }[];
     }
   >();
-  const unavailable = () => ({ error: 'regions_db_unavailable' as const, snapshotMonth: null, attribution: REGIONS_ATTRIBUTION });
+  const unavailable = () => ({
+    error: "regions_db_unavailable" as const,
+    snapshotMonth: null,
+    attribution: REGIONS_ATTRIBUTION,
+  });
 
   return new Hono()
-    .get('/summary', (c) => {
-      const rawId = c.req.query('vehicleId');
-      if (!rawId) return c.json({ error: 'vehicleId_required' as const, ...base(getRegions()) }, 400);
+    .get("/summary", (c) => {
+      const rawId = c.req.query("vehicleId");
+      if (!rawId)
+        return c.json(
+          { error: "vehicleId_required" as const, ...base(getRegions()) },
+          400,
+        );
       const regions = getRegions();
       if (!regions) return c.json(unavailable(), 503);
       const vehicleId = canonicalVehicleId(db, rawId); // alias(UUID)로 조회해도 정본 기록을 합산한다
@@ -60,35 +71,74 @@ export const regionsRoutes = (db: Db, getRegions: () => Regions | null) => {
            ORDER BY e.at DESC, CASE e.kind WHEN 'stay' THEN 1 ELSE 0 END DESC, e.id DESC LIMIT 1`,
         )
         .get(vehicleId, vehicleId) as
-        { kind: string; code: string; at: string; trip_id: string; name: string; sido_name: string } | undefined;
+        | {
+            kind: string;
+            code: string;
+            at: string;
+            trip_id: string;
+            name: string;
+            sido_name: string;
+          }
+        | undefined;
       return c.json(
         {
           ...base(regions),
           total: n.total!,
           colored: n.colored!,
-          byLevel: { '1': n.l1!, '2': n.l2!, '3': n.l3! },
+          byLevel: { "1": n.l1!, "2": n.l2!, "3": n.l3! },
           // 현행 지정 92곳이 기본(total·colored), 89곳(2021 지정)은 통계 인용용 참고 필드
-          depop: { total: n.total92!, colored: n.colored92!, total89: n.total89!, colored89: n.colored89! },
+          depop: {
+            total: n.total92!,
+            colored: n.colored92!,
+            total89: n.total89!,
+            colored89: n.colored89!,
+          },
           lastEvent: ev
-            ? { kind: ev.kind as 'visit' | 'stay', code: ev.code, name: ev.name, sidoName: ev.sido_name, at: ev.at, tripId: ev.trip_id }
+            ? {
+                kind: ev.kind as "visit" | "stay",
+                code: ev.code,
+                name: ev.name,
+                sidoName: ev.sido_name,
+                at: ev.at,
+                tripId: ev.trip_id,
+              }
             : null,
         },
         200,
       );
     })
-    .get('/list', (c) => {
-      const rawId = c.req.query('vehicleId');
-      if (!rawId) return c.json({ error: 'vehicleId_required' as const, ...base(getRegions()) }, 400);
+    .get("/list", (c) => {
+      const rawId = c.req.query("vehicleId");
+      if (!rawId)
+        return c.json(
+          { error: "vehicleId_required" as const, ...base(getRegions()) },
+          400,
+        );
       const regions = getRegions();
       if (!regions) return c.json(unavailable(), 503);
       const vehicleId = canonicalVehicleId(db, rawId);
-      const filter = c.req.query('filter') ?? 'all';
-      const sort = c.req.query('sort') ?? 'name';
-      if (!['all', 'depop', 'uncolored'].includes(filter)) return c.json({ error: 'invalid_filter' as const, ...base(regions) }, 400);
-      if (!['recent', 'name'].includes(sort)) return c.json({ error: 'invalid_sort' as const, ...base(regions) }, 400);
-      const where = { all: '', depop: 'WHERE r.depop_89 = 1 OR r.depop_92 = 1', uncolored: 'WHERE COALESCE(v.level, 0) = 0' }[filter]!;
+      const filter = c.req.query("filter") ?? "all";
+      const sort = c.req.query("sort") ?? "name";
+      if (!["all", "depop", "uncolored"].includes(filter))
+        return c.json(
+          { error: "invalid_filter" as const, ...base(regions) },
+          400,
+        );
+      if (!["recent", "name"].includes(sort))
+        return c.json(
+          { error: "invalid_sort" as const, ...base(regions) },
+          400,
+        );
+      const where = {
+        all: "",
+        depop: "WHERE r.depop_89 = 1 OR r.depop_92 = 1",
+        uncolored: "WHERE COALESCE(v.level, 0) = 0",
+      }[filter]!;
       // recent: 최근 지난 순(미방문은 뒤). name: 시도 코드 → 이름.
-      const order = sort === 'recent' ? 'v.last_at IS NULL, v.last_at DESC, r.code' : 'r.sido_code, r.name, r.code';
+      const order =
+        sort === "recent"
+          ? "v.last_at IS NULL, v.last_at DESC, r.code"
+          : "r.sido_code, r.name, r.code";
       const rows = db
         .prepare(
           `WITH ${VISITED_CTE}
@@ -131,12 +181,19 @@ export const regionsRoutes = (db: Db, getRegions: () => Regions | null) => {
         200,
       );
     })
-    .get('/geo', (c) => {
+    .get("/geo", (c) => {
       const regions = getRegions();
       if (!regions) return c.json(unavailable(), 503);
-      const vehicleId = canonicalVehicleId(db, c.req.query('vehicleId') ?? '');
-      const bbox = (c.req.query('bbox') ?? '').split(',').map((s) => (s.trim() === '' ? NaN : Number(s)));
-      const [minlon, minlat, maxlon, maxlat] = bbox as [number, number, number, number];
+      const vehicleId = canonicalVehicleId(db, c.req.query("vehicleId") ?? "");
+      const bbox = (c.req.query("bbox") ?? "")
+        .split(",")
+        .map((s) => (s.trim() === "" ? NaN : Number(s)));
+      const [minlon, minlat, maxlon, maxlat] = bbox as [
+        number,
+        number,
+        number,
+        number,
+      ];
       const valid =
         bbox.length === 4 &&
         bbox.every(Number.isFinite) &&
@@ -148,9 +205,13 @@ export const regionsRoutes = (db: Db, getRegions: () => Regions | null) => {
         minlat < maxlat &&
         maxlon - minlon <= MAX_REGION_BBOX_SPAN_DEG &&
         maxlat - minlat <= MAX_REGION_BBOX_SPAN_DEG;
-      if (!valid) return c.json({ error: 'invalid_bbox' as const, ...base(regions) }, 400);
+      if (!valid)
+        return c.json(
+          { error: "invalid_bbox" as const, ...base(regions) },
+          400,
+        );
       // 도형(폴리곤 파싱 포함)은 bbox 단위로 캐시하고(최대 50개·5분), 차량별 단계는 가벼운 쿼리로 매번 새로 붙인다.
-      const key = bbox.join(',');
+      const key = bbox.join(",");
       let shapes = geoCache.get(key);
       if (!shapes || shapes.at + GEO_CACHE_TTL_MS <= Date.now()) {
         const rows = db
@@ -173,46 +234,118 @@ export const regionsRoutes = (db: Db, getRegions: () => Regions | null) => {
             name: r.name,
             displayName: r.display_name,
             depop89: r.depop_89 === 1,
-            geometry: JSON.parse(r.geom_json) as { type: 'MultiPolygon'; coordinates: number[][][][] },
+            geometry: JSON.parse(r.geom_json) as {
+              type: "MultiPolygon";
+              coordinates: number[][][][];
+            },
           })),
         };
         geoCache.delete(key);
         geoCache.set(key, shapes);
-        while (geoCache.size > GEO_CACHE_MAX) geoCache.delete(geoCache.keys().next().value!);
+        while (geoCache.size > GEO_CACHE_MAX)
+          geoCache.delete(geoCache.keys().next().value!);
       }
       const levels = new Map(
-        (db.prepare(`WITH ${VISITED_CTE} SELECT code, level FROM v`).all(vehicleId, vehicleId) as { code: string; level: number }[]).map(
-          (r) => [r.code, r.level],
-        ),
+        (
+          db
+            .prepare(`WITH ${VISITED_CTE} SELECT code, level FROM v`)
+            .all(vehicleId, vehicleId) as { code: string; level: number }[]
+        ).map((r) => [r.code, r.level]),
       );
       return c.json(
         {
-          type: 'FeatureCollection' as const,
+          type: "FeatureCollection" as const,
           ...base(regions),
           features: shapes.items.map((r) => ({
-            type: 'Feature' as const,
+            type: "Feature" as const,
             geometry: r.geometry,
-            properties: { code: r.code, name: r.name, displayName: r.displayName, level: levels.get(r.code) ?? 0, depop89: r.depop89 },
+            properties: {
+              code: r.code,
+              name: r.name,
+              displayName: r.displayName,
+              level: levels.get(r.code) ?? 0,
+              depop89: r.depop89,
+            },
           })),
         },
         200,
       );
     })
-    .get('/neighbors', (c) => {
+    .get("/at", (c) => {
       const regions = getRegions();
       if (!regions) return c.json(unavailable(), 503);
-      const code = c.req.query('code') ?? '';
-      if (!/^\d{5}$/.test(code)) return c.json({ error: 'code_required' as const, ...base(regions) }, 400);
+      const lat = Number(c.req.query("lat") ?? "");
+      const lon = Number(c.req.query("lon") ?? "");
+      if (
+        c.req.query("lat") === undefined ||
+        c.req.query("lon") === undefined ||
+        !Number.isFinite(lat) ||
+        !Number.isFinite(lon) ||
+        Math.abs(lat) > 90 ||
+        Math.abs(lon) > 180
+      ) {
+        return c.json(
+          { error: "invalid_point" as const, ...base(regions) },
+          400,
+        );
+      }
+      const found = regions.locate(lon, lat);
+      const info = found
+        ? regions.names().get(regions.canonical(found))
+        : undefined;
+      if (!found || !info)
+        return c.json({ error: "not_found" as const, ...base(regions) }, 404);
+      const code = regions.canonical(found);
+      const vehicleId = canonicalVehicleId(db, c.req.query("vehicleId") ?? "");
+      const row = db
+        .prepare(
+          `WITH ${VISITED_CTE} SELECT COALESCE(v.level, 0) AS level, r.depop_92 FROM ${RG}.regions r LEFT JOIN v ON v.code = r.code WHERE r.code = ?`,
+        )
+        .get(vehicleId, vehicleId, code) as
+        { level: number; depop_92: number } | undefined;
+      return c.json(
+        {
+          ...base(regions),
+          code,
+          name: info.name,
+          displayName: info.displayName,
+          sidoName: info.sidoName,
+          level: row?.level ?? 0,
+          depop92: row?.depop_92 === 1,
+        },
+        200,
+      );
+    })
+    .get("/neighbors", (c) => {
+      const regions = getRegions();
+      if (!regions) return c.json(unavailable(), 503);
+      const code = c.req.query("code") ?? "";
+      if (!/^\d{5}$/.test(code))
+        return c.json(
+          { error: "code_required" as const, ...base(regions) },
+          400,
+        );
       const code2 = regions.canonical(code);
       const found = neighborsOf(db, regions, code2);
-      if (!found) return c.json({ error: 'not_found' as const, ...base(regions) }, 404);
-      const vehicleId = canonicalVehicleId(db, c.req.query('vehicleId') ?? '');
+      if (!found)
+        return c.json({ error: "not_found" as const, ...base(regions) }, 404);
+      const vehicleId = canonicalVehicleId(db, c.req.query("vehicleId") ?? "");
       const names = regions.names();
       const info = db
         .prepare(
-          `WITH ${VISITED_CTE} SELECT r.code, COALESCE(v.level, 0) AS level, r.depop_89, r.depop_92 FROM ${RG}.regions r LEFT JOIN v ON v.code = r.code`,
+          `WITH ${VISITED_CTE} SELECT r.code, COALESCE(v.level, 0) AS level, r.depop_89, r.depop_92, r.minlon, r.minlat, r.maxlon, r.maxlat
+           FROM ${RG}.regions r LEFT JOIN v ON v.code = r.code`,
         )
-        .all(vehicleId, vehicleId) as { code: string; level: number; depop_89: number; depop_92: number }[];
+        .all(vehicleId, vehicleId) as {
+        code: string;
+        level: number;
+        depop_89: number;
+        depop_92: number;
+        minlon: number;
+        minlat: number;
+        maxlon: number;
+        maxlat: number;
+      }[];
       const byCode = new Map(info.map((r) => [r.code, r]));
       const nearest = found.length === 0; // 이웃이 없는 섬 등: 중심점 거리순 가까운 3곳으로 대신한다
       const list = nearest ? nearestRegions(db, code2, 3) : found;
@@ -223,11 +356,16 @@ export const regionsRoutes = (db: Db, getRegions: () => Regions | null) => {
             code: f.code,
             name: names.get(f.code)?.name ?? f.code,
             displayName: names.get(f.code)?.displayName ?? f.code,
-            sidoName: names.get(f.code)?.sidoName ?? '',
+            sidoName: names.get(f.code)?.sidoName ?? "",
             level: r.level,
             depop89: r.depop_89 === 1,
             depop92: r.depop_92 === 1,
             distanceM: f.distanceM,
+            // 길안내 목적지: bbox 중심(nearestRegions의 중심점과 같은 정의)
+            center: {
+              lat: (r.minlat + r.maxlat) / 2,
+              lon: (r.minlon + r.maxlon) / 2,
+            },
             ...(nearest ? { nearest: true as const } : {}),
           };
         })
@@ -238,7 +376,7 @@ export const regionsRoutes = (db: Db, getRegions: () => Regions | null) => {
             : Number(b.level === 0) - Number(a.level === 0) ||
               Number(b.depop89 || b.depop92) - Number(a.depop89 || a.depop92) ||
               a.level - b.level ||
-              a.name.localeCompare(b.name, 'ko'),
+              a.name.localeCompare(b.name, "ko"),
         );
       return c.json(
         {
