@@ -44,6 +44,7 @@ export const newApp = (options: AppOptions = {}) =>
   createApp(openDb(':memory:'), {
     vehicleHmacKey: 'test-key',
     retryDelayMs: 5,
+    liveMatching: false, // 실시간 잠정 매칭은 map.test.ts가 명시적으로 켠다(다른 테스트의 Valhalla 호출 수를 건드리지 않게)
     ...options,
     roadsPath: options.roadsPath === undefined ? ROADS_TEST_DB : options.roadsPath,
     regionsPath: options.regionsPath === undefined ? REGIONS_TEST_DB : options.regionsPath,
