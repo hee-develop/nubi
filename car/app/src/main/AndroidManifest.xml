@@ -18,6 +18,9 @@
          위치 값은 Pleos FusedLocation에서만 받고 이 권한으로 LocationManager를 쓰지 않는다. 정밀 위치(FINE)는 요구하지 않는다 -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
+    <!-- NaviHelper 길안내 요청(requestRoute). 이웃 시군구 중심점까지 경로를 내비에 요청만 하고 앱은 지도를 그리지 않는다 -->
+    <uses-permission android:name="pleos.car.permission.NAVI_ROUTE" />
+
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.INTERNET" />

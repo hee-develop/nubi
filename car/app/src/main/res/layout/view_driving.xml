@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 주행 중: 로고 마크, 상태 문구, 보조 문구만. 숫자·카드·버튼·QR·애니메이션 없음 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/driving_view"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:gravity="center"
+    android:orientation="vertical"
+    android:paddingBottom="120dp">
+
+    <ImageView
+        android:layout_width="@dimen/logo_center"
+        android:layout_height="@dimen/logo_center"
+        android:importantForAccessibility="no"
+        android:src="@drawable/logo_mark" />
+
+    <TextView
+        android:id="@+id/driving_state"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="28dp"
+        android:textColor="@color/text"
+        android:textSize="@dimen/text_rec"
+        android:textStyle="bold" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="28dp"
+        android:text="@string/driving_hint"
+        android:textColor="@color/muted"
+        android:textSize="@dimen/text_sub" />
+
+    <TextView
+        android:id="@+id/driving_health"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:textColor="@color/accent"
+        android:textSize="@dimen/text_sub"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/driving_storage"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:textColor="@color/muted"
+        android:textSize="@dimen/text_small" />
+
+    <TextView
+        android:id="@+id/driving_upload"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:textColor="@color/muted"
+        android:textSize="@dimen/text_small" />
+</LinearLayout>

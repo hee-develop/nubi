@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 시안 값은 Pleos 원본 px(2560x1440). 에뮬레이터 density 160에서 1px = 1dp라 같은 수를 dp·sp로 쓴다(가안) -->
+<resources>
+    <dimen name="text_title">72sp</dimen>
+    <dimen name="text_big">64sp</dimen>
+    <dimen name="text_rec">96sp</dimen>
+    <dimen name="text_body">40sp</dimen>
+    <dimen name="text_sub">32sp</dimen>
+    <dimen name="text_logo">44sp</dimen>
+    <dimen name="text_poi">48sp</dimen>
+    <dimen name="text_small">28sp</dimen>
+    <dimen name="button_height">112dp</dimen>
+    <dimen name="logo_header">72dp</dimen>
+    <dimen name="logo_center">200dp</dimen>
+    <dimen name="qr_size">200dp</dimen>
+    <dimen name="page_pad">44dp</dimen>
+    <dimen name="column_gap">40dp</dimen>
+    <dimen name="left_column_width">660dp</dimen>
+    <dimen name="card_pad_v">36dp</dimen>
+    <dimen name="card_pad_h">40dp</dimen>
+    <dimen name="poi_pad">32dp</dimen>
+    <dimen name="radius_card">36dp</dimen>
+    <!-- 앱 영역 너비가 이보다 좁으면(가로 2-window) 오른쪽 이웃 카드를 숨긴다 -->
+    <integer name="neighbor_card_min_width_dp">1300</integer>
+</resources>

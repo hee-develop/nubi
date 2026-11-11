@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 시안 03(정차 P)·03b(주행 중 D·R·N). 둘 중 하나만 보인다. 숫자 표시 규칙은 MainActivity가 numbersVisible로 정한다 -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg">
+
+    <include layout="@layout/view_driving" />
+
+    <include layout="@layout/view_parked" />
+</FrameLayout>
