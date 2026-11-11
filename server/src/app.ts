@@ -7,6 +7,7 @@ import { attachRegions, resolveRegionsPath, type Regions } from './regions/index
 import { inTx, mergeRegionAliases, resolvePending, runBatch } from './regions/judge.js';
 import { canonicalVehicleId } from './matching/pipeline.js';
 import { coverageRoutes } from './routes/coverage.js';
+import { extRoutes, type ExtOptions } from './routes/ext.js';
 import { regionsRoutes } from './routes/regions.js';
 import { tripsRoutes } from './routes/trips.js';
 import { resolveVehicleHmacKey, vehiclesRoutes } from './routes/vehicles.js';
@@ -28,6 +29,8 @@ export type AppOptions = {
   now?: () => number;
   /** 시작 때 끝나지 않은 매칭 작업을 이어서 처리한다(서버 프로세스에서만 켠다). */
   resumeMatching?: boolean;
+  /** 05 야간 계약서 T2 확장 설정(토큰 인증·공개 주소·B2B 키·TourAPI 키 등). 생략한 값은 환경변수에서 읽는다. */
+  ext?: ExtOptions;
 };
 
 // RPC 타입 추론을 위해 라우트는 반드시 체이닝으로 정의한다.
@@ -90,15 +93,16 @@ export const createApp = (db: Db = openDb(), options: AppOptions = {}) => {
   }
   const app = new Hono()
     .get('/health', (c) => c.json({ ok: true as const }))
+    .route('/', extRoutes({ db, getRoads: () => roads, getRegions: () => regions, now, options: options.ext ?? {} }))
     .route('/trips', tripsRoutes(db, worker.enqueue, { onStarted: (v) => tick(v, false), onPoints: (v) => tick(v, true) }))
     .route(
       '/regions',
-      regionsRoutes(db, () => regions),
+      regionsRoutes(db, () => regions, now),
     )
     .route('/vehicles', vehiclesRoutes(options.vehicleHmacKey ?? resolveVehicleHmacKey(), db))
     .route(
       '/',
-      coverageRoutes(db, () => roads),
+      coverageRoutes(db, () => roads, now),
     );
   if (options.viewer ?? (process.env.NUBI_VIEWER === '1' || process.env.NODE_ENV !== 'production')) app.route('/viewer', viewerRoutes());
   return Object.assign(app, { matching: worker, regionsBatch });
