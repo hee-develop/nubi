@@ -12,7 +12,7 @@
     <dimen name="button_height">112dp</dimen>
     <dimen name="logo_header">72dp</dimen>
     <dimen name="logo_center">200dp</dimen>
-    <dimen name="qr_size">200dp</dimen>
+    <dimen name="qr_size">240dp</dimen>
     <dimen name="page_pad">44dp</dimen>
     <dimen name="column_gap">40dp</dimen>
     <dimen name="left_column_width">660dp</dimen>

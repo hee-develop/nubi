@@ -1,6 +1,7 @@
 package com.nubi.car
 
 import android.view.View
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.nubi.car.map.NubiMapView
@@ -36,7 +37,13 @@ class Views(val root: View) {
     val mapBtnNational: TextView = id(R.id.map_btn_national)
     val panel: LinearLayout = id(R.id.panel)
     val linesBlock: View = id(R.id.lines_block)
-    val guestQrImage: View = id(R.id.guest_qr_image)
+    val guestQrImage: ImageView = id(R.id.guest_qr_image)
+    val guestDesc: TextView = id(R.id.guest_desc)
+    val guestCode: TextView = id(R.id.guest_code)
+    val guestCount: TextView = id(R.id.guest_count)
+    val guestAdd: TextView = id(R.id.guest_add)
+    val guestEndAll: TextView = id(R.id.guest_end_all)
+    val parkedHeader: LinearLayout = parkedView.let { (it as LinearLayout).getChildAt(0) as LinearLayout }
     val leftColumn: LinearLayout = id(R.id.left_column)
     val nowLabel: TextView = id(R.id.now_label)
     val stateText: TextView = id(R.id.state_text)

@@ -448,7 +448,7 @@
                 android:layout_height="0dp"
                 android:layout_weight="1" />
 
-            <!-- 게스트 QR: 자리표시(준비 중). 터치 동작 없음 -->
+            <!-- 게스트 QR: '같이 탄 사람 추가'를 누르면 서버 코드로 QR·6자리 코드·남은 시간을 보인다(기어 P에서만, P를 벗어나거나 DO면 바로 닫힘) -->
             <LinearLayout
                 android:id="@+id/guest_card"
                 android:layout_width="match_parent"
@@ -462,13 +462,13 @@
                     android:id="@+id/guest_qr_image"
                     android:layout_width="@dimen/qr_size"
                     android:layout_height="@dimen/qr_size"
-                    android:contentDescription="@string/guest_qr_desc"
-                    android:src="@drawable/guest_qr" />
+                    android:layout_marginEnd="32dp"
+                    android:contentDescription="@string/guest_qr_title"
+                    android:visibility="gone" />
 
                 <LinearLayout
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
-                    android:layout_marginStart="32dp"
                     android:layout_weight="1"
                     android:orientation="vertical">
 
@@ -481,6 +481,7 @@
                         android:textStyle="bold" />
 
                     <TextView
+                        android:id="@+id/guest_desc"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="6dp"
@@ -489,17 +490,62 @@
                         android:textSize="@dimen/text_sub" />
 
                     <TextView
+                        android:id="@+id/guest_code"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:textColor="@color/accent"
+                        android:textSize="@dimen/text_body"
+                        android:textStyle="bold"
+                        android:visibility="gone" />
+
+                    <TextView
+                        android:id="@+id/guest_count"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:textColor="@color/muted"
+                        android:textSize="@dimen/text_sub"
+                        android:visibility="gone" />
+
+                    <LinearLayout
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="12dp"
-                        android:background="@drawable/bg_chip"
-                        android:paddingStart="24dp"
-                        android:paddingTop="2dp"
-                        android:paddingEnd="24dp"
-                        android:paddingBottom="2dp"
-                        android:text="@string/guest_qr_soon"
-                        android:textColor="@color/muted"
-                        android:textSize="@dimen/text_small" />
+                        android:orientation="horizontal">
+
+                        <TextView
+                            android:id="@+id/guest_add"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:background="@drawable/bg_map_btn_on"
+                            android:clickable="true"
+                            android:focusable="true"
+                            android:paddingStart="24dp"
+                            android:paddingTop="10dp"
+                            android:paddingEnd="24dp"
+                            android:paddingBottom="10dp"
+                            android:text="@string/guest_add"
+                            android:textColor="@color/text"
+                            android:textSize="@dimen/text_sub" />
+
+                        <TextView
+                            android:id="@+id/guest_end_all"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="12dp"
+                            android:background="@drawable/bg_map_btn"
+                            android:clickable="true"
+                            android:focusable="true"
+                            android:paddingStart="24dp"
+                            android:paddingTop="10dp"
+                            android:paddingEnd="24dp"
+                            android:paddingBottom="10dp"
+                            android:text="@string/guest_end_all"
+                            android:textColor="@color/text"
+                            android:textSize="@dimen/text_sub"
+                            android:visibility="gone" />
+                    </LinearLayout>
                 </LinearLayout>
             </LinearLayout>
         </LinearLayout>
