@@ -11,6 +11,8 @@ type Ctx = {
   api: NubiApi;
   ready: boolean;
   pairing: Pairing | null;
+  /** 차주 토큰이 만료·폐기돼(401) 연결이 풀렸다. 연결 화면이 안내한다. */
+  expired: boolean;
   guest: GuestSession | null;
   savePairing(p: Pairing): Promise<void>;
   /** 저장소에서 못 지웠으면 false(메모리 상태는 비운다). */
@@ -26,10 +28,18 @@ const SessionContext = createContext<Ctx | null>(null);
 
 export const SessionProvider = ({ api, children }: { api?: NubiApi; children: ReactNode }) => {
   // 차주 토큰은 호출 때마다 읽어 모든 차량 API 요청에 Bearer로 붙인다(api를 다시 만들지 않는다).
-  const resolvedApi = useMemo(() => api ?? createApi(undefined, getOwnerToken), [api]);
+  const [expired, setExpired] = useState(false);
   const [ready, setReady] = useState(false);
   const [dataVersion, setDataVersion] = useState(0);
   const [pairing, setPairing] = useState<Pairing | null>(null);
+  /** 차주 토큰이 401(만료 180일·폐기)이면 이 폰의 연결을 풀고 연결 화면이 안내한다. */
+  const onUnauthorized = useCallback(() => {
+    void storage.remove(KEYS.pairing);
+    setOwnerToken(null);
+    setPairing(null);
+    setExpired(true);
+  }, []);
+  const resolvedApi = useMemo(() => api ?? createApi(undefined, getOwnerToken, onUnauthorized), [api, onUnauthorized]);
   const [guest, setGuest] = useState<GuestSession | null>(null);
 
   useEffect(() => {
@@ -51,6 +61,7 @@ export const SessionProvider = ({ api, children }: { api?: NubiApi; children: Re
     await storage.set(KEYS.pairing, JSON.stringify(p));
     setOwnerToken(p.token);
     setPairing(p);
+    setExpired(false);
   }, []);
   const clearPairing = useCallback(async () => {
     const ok = await storage.remove(KEYS.pairing);
@@ -70,8 +81,8 @@ export const SessionProvider = ({ api, children }: { api?: NubiApi; children: Re
   const invalidate = useCallback(() => setDataVersion((n) => n + 1), []);
 
   const value = useMemo(
-    () => ({ api: resolvedApi, ready, pairing, guest, savePairing, clearPairing, saveGuest, clearGuest, dataVersion, invalidate }),
-    [resolvedApi, ready, pairing, guest, savePairing, clearPairing, saveGuest, clearGuest, dataVersion, invalidate],
+    () => ({ api: resolvedApi, ready, pairing, expired, guest, savePairing, clearPairing, saveGuest, clearGuest, dataVersion, invalidate }),
+    [resolvedApi, ready, pairing, expired, guest, savePairing, clearPairing, saveGuest, clearGuest, dataVersion, invalidate],
   );
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 };

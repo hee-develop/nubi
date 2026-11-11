@@ -3,8 +3,9 @@ import { useRef, useState } from 'react';
 import { Modal, ScrollView, StyleSheet, Switch, TextInput, View } from 'react-native';
 import { ConfirmModal } from '../../components/ConfirmModal';
 import { Button, Card, Chip, Screen, StateView, Txt } from '../../components/ui';
-import { ApiError, type SettingsPatch, type VehicleSettings } from '../../api';
+import { type SettingsPatch, type VehicleSettings } from '../../api';
 import { useApiData } from '../../hooks/useApiData';
+import { settingsErrorKey } from '../../lib/errors';
 import { t, type TKey } from '../../lib/i18n';
 import { colors, MIN_TOUCH } from '../../lib/theme';
 import { useSession } from '../../state/session';
@@ -81,7 +82,7 @@ export const SettingsScreen = () => {
     } catch (e) {
       if (mine === seq.current) {
         setLocal(prev);
-        setSaveError(e instanceof ApiError && e.kind === 'offline' ? 'settings.err.offline' : 'settings.err.save');
+        setSaveError(settingsErrorKey(e));
       }
     } finally {
       if (mine === seq.current) setSaving(false);

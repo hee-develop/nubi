@@ -19,15 +19,15 @@ export const prepareShareFile = async (c: ShareCard): Promise<string> => {
     await a.downloadAsync();
     return a.localUri ?? a.uri;
   }
-  const ext = c.imageUrl.split('?')[0]!.endsWith('.svg') ? 'svg' : 'png';
-  const f = await File.downloadFileAsync(c.imageUrl, new File(Paths.cache, cardFileName(c, ext)), { idempotent: true });
+  // 서버는 PNG만 공개한다(`.svg`는 404). imageUrl은 항상 `.png`다.
+  const f = await File.downloadFileAsync(c.imageUrl, new File(Paths.cache, cardFileName(c, 'png')), { idempotent: true });
   return f.uri;
 };
 
 export const shareCard = async (c: ShareCard): Promise<'shared' | 'unavailable'> => {
   if (!(await Sharing.isAvailableAsync())) return 'unavailable';
   const uri = await prepareShareFile(c);
-  await Sharing.shareAsync(uri, { mimeType: uri.endsWith('.svg') ? 'image/svg+xml' : 'image/png', dialogTitle: '누비' });
+  await Sharing.shareAsync(uri, { mimeType: 'image/png', dialogTitle: '누비' });
   return 'shared';
 };
 

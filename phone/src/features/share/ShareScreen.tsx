@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { Image, StyleSheet, View } from 'react-native';
-import { ApiError, type ShareCard, type ShareKind } from '../../api';
+import type { ShareCard, ShareKind } from '../../api';
 import { Button, Card, Chip, Screen, StateView, Txt } from '../../components/ui';
 import { useApiData } from '../../hooks/useApiData';
+import { shareErrorKey } from '../../lib/errors';
 import { fmtDateTime, fmtMeters } from '../../lib/format';
 import { t, type TKey } from '../../lib/i18n';
 import { colors } from '../../lib/theme';
@@ -35,7 +36,7 @@ export const ShareScreen = () => {
     try {
       setCard(await api.shareCreate({ vehicleId, kind, ...(kind === 'trip' && tripId ? { tripIds: [tripId] } : {}), ...(kind === 'road' && roadKey ? { roadKey } : {}) }));
     } catch (e) {
-      setErrorKey(e instanceof ApiError && e.kind === 'offline' ? 'share.err.offline' : 'share.err.create');
+      setErrorKey(shareErrorKey(e));
     } finally {
       setBusy(false);
     }

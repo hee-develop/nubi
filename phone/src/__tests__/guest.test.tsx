@@ -194,7 +194,7 @@ describe('게스트 세션 화면', () => {
   });
 
   test('요약 필드가 비어(null) 와도 0으로 표시한다', async () => {
-    const api = makeApi({ meSummary: async () => ({ role: 'guest' as const, activeSessionId: null, regions: null, coverage: null, snapshotMonth: null }) });
+    const api = makeApi({ meSummary: async () => ({ role: 'guest' as const, activeSessionId: null, regions: null, coverage: null, snapshotMonth: null, attribution: '', regionsAttribution: '' }) });
     await renderApp(<GuestSessionScreen />, { api, pairing: null, guest: GUEST });
     expect(screen.getByTestId('guest-regions').props.children).toBe('시군구 0/0');
   });

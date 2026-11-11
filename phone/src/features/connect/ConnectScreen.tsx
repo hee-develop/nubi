@@ -38,7 +38,7 @@ export const CodeEntry = ({ mode, onSubmit, busy, errorKey }: { mode: 'pair' | '
 
 export const ConnectScreen = () => {
   const router = useRouter();
-  const { api, savePairing } = useSession();
+  const { api, savePairing, expired } = useSession();
   const [busy, setBusy] = useState(false);
   const [agreed, setAgreed] = useState(false);
   const [errorKey, setErrorKey] = useState<TKey | null>(null);
@@ -60,6 +60,11 @@ export const ConnectScreen = () => {
 
   return (
     <Screen title={t('connect.title')} subtitle={t('connect.subtitle')}>
+      {expired ? (
+        <Card>
+          <Txt color={colors.danger} testID="connect-expired">{t('connect.expired')}</Txt>
+        </Card>
+      ) : null}
       <Card>
         <Txt bold>{t('connect.consent.title')}</Txt>
         <Txt testID="connect-consent-text">{t('connect.consent.body')}</Txt>

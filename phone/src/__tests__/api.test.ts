@@ -2,6 +2,7 @@ import { ApiError, createApi, createMockApi, resolveApiConfig } from '../api';
 import { createLiveApi } from '../api/live';
 import { MOCK_CODE_ALREADY_PAIRED, MOCK_CODE_EXPIRED, MOCK_CODE_GUEST_LIMIT, MOCK_CODE_IN_SESSION, MOCK_CODE_OWN_VEHICLE, MOCK_CODE_RATE, MOCK_CODE_UNKNOWN, MOCK_CODE_USED } from '../api/mock';
 import { makeApiFetch } from '../api/http';
+import { claimErrorKey, settingsErrorKey, shareErrorKey } from '../lib/errors';
 import { parseQr } from '../features/connect/qr';
 
 const mock = () => createMockApi({ latencyMs: 0 });
@@ -54,7 +55,7 @@ describe('mock API', () => {
     await expect(api.pairClaim('12', true)).rejects.toMatchObject({ status: 400, code: 'invalid_body' });
   });
   test('차주 연결은 동의(consent:false)면 400 consent_required', async () => {
-    await expect(mock().pairClaim('123456', false)).rejects.toMatchObject({ status: 400, code: 'consent_required' });
+    await expect(mock().pairClaim('123456', false as unknown as true)).rejects.toMatchObject({ status: 400, code: 'consent_required' });
   });
   test('게스트: 동의 없으면 400, 참여·인원·내리기(재호출은 alreadyEnded)·요약(T2 형태)', async () => {
     const api = mock();
@@ -84,7 +85,7 @@ describe('mock API', () => {
     await expect(api.shareCreate({ vehicleId: V, kind: 'trip' })).rejects.toMatchObject({ code: 'trip_required' });
     await expect(api.shareCreate({ vehicleId: V, kind: 'road' })).rejects.toMatchObject({ code: 'road_required' });
     const c = await api.shareCreate({ vehicleId: V, kind: 'national' });
-    expect(c).toMatchObject({ id: expect.any(String), url: expect.stringContaining('/s/'), imageUrl: 'mock:share-card' });
+    expect(c).toMatchObject({ id: expect.any(String), url: expect.stringContaining('/s/'), imageUrl: 'mock:share-card.png' });
   });
   test('설정 저장 후 다시 읽으면 반영', async () => {
     const api = mock();
@@ -187,6 +188,46 @@ describe('live API (가짜 fetch)', () => {
     calls.length = 0;
     await api.trips(V);
     expect(calls[0]!.auth).toBeNull();
+  });
+  test('T2 변경 이력: me/link·DELETE /me·인증서·courses 경로, consent는 항상 true로 전송', async () => {
+    const { f, calls } = recorder({});
+    const api = createLiveApi('http://h', 'live', f);
+    await api.meLink('gt');
+    await api.meDelete('gt');
+    await api.courses();
+    await api.courseCertificate('c 1', V);
+    expect(calls.map((c) => `${c.method} ${c.url.replace('http://h', '')}`)).toEqual(['POST /me/link', 'DELETE /me', 'GET /courses', 'POST /courses/c%201/certificate']);
+    expect(calls[0]!.auth).toBe('Bearer gt');
+    expect(JSON.parse(calls[3]!.body!)).toEqual({ vehicleId: V });
+    calls.length = 0;
+    await api.pairClaim('123456', true);
+    expect(JSON.parse(calls[0]!.body!).consent).toBe(true);
+  });
+  test('차주 토큰이 401이면 onUnauthorized(연결 해제 유도), 명시한 게스트 토큰의 401은 아님', async () => {
+    const { f } = recorder({ error: 'unauthorized' }, 401);
+    let n = 0;
+    const api = createLiveApi('http://h', 'live', f, () => 'owner', () => n++);
+    await expect(api.trips(V)).rejects.toMatchObject({ status: 401 });
+    expect(n).toBe(1);
+    await expect(api.meSummary('guest-tok')).rejects.toMatchObject({ status: 401 });
+    expect(n).toBe(1);
+  });
+  test('오류 코드 → 문구 키(T2 변경 이력)', () => {
+    const h = (status: number, code: string) => new ApiError('http', status, code);
+    expect(shareErrorKey(h(503, 'png_unavailable'))).toBe('share.err.png');
+    expect(shareErrorKey(h(409, 'trip_not_eligible'))).toBe('share.err.notEligible');
+    expect(shareErrorKey(h(429, 'too_many_requests'))).toBe('share.err.rate');
+    expect(settingsErrorKey(h(403, 'local_only'))).toBe('settings.err.localOnly');
+    expect(settingsErrorKey(h(401, 'unauthorized'))).toBe('settings.err.auth');
+    expect(claimErrorKey(h(429, 'rate_limited'))).toBe('connect.err.rate');
+    expect(claimErrorKey(h(400, 'invalid_body'))).toBe('connect.err.invalid');
+    expect(claimErrorKey(h(409, 'alias_source_is_vehicle'))).toBe('connect.err.unknown');
+  });
+  test('mock: 공유 카드는 png, 차주 summary 형태·인증서·탈퇴', async () => {
+    const api = mock();
+    expect((await api.shareCreate({ vehicleId: V, kind: 'national' })).imageUrl.endsWith('.png')).toBe(true);
+    await expect(api.courseCertificate('nope', V)).rejects.toMatchObject({ status: 404 });
+    await expect(api.meDelete('mock-token-123456')).rejects.toMatchObject({ status: 403 });
   });
   test('PUT settings는 부분 본문만 보낸다', async () => {
     const { f, calls } = recorder({});

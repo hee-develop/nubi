@@ -70,6 +70,7 @@ export const createMockApi = (opts: MockOptions = {}): NubiApi => {
           totalKm: 1_000_000,
           roadsCompleted: deleted ? 0 : roads.filter((r) => r.percent >= COMPLETE_PERCENT).length,
           roadsStarted: deleted ? 0 : roads.length,
+          revivedKm: deleted ? 0 : 3.2,
         };
       }),
     coverageRoads: (_v, q = {}) =>
@@ -137,7 +138,8 @@ export const createMockApi = (opts: MockOptions = {}): NubiApi => {
 
     pairClaim: (code, consent) =>
       withWait(() => {
-        if (consent === false) throw new ApiError('http', 400, 'consent_required');
+        // 서버는 consent: true를 필수로 요구한다(없거나 false면 400 consent_required).
+        if ((consent as boolean) !== true) throw new ApiError('http', 400, 'consent_required');
         checkCommon(code);
         if (code === MOCK_CODE_ALREADY_PAIRED) throw new ApiError('http', 409, 'already_paired');
         return { accountId: 'mock-account-1', token: `mock-token-${code}`, vehicleId: MOCK_VEHICLE_ID };
@@ -177,10 +179,33 @@ export const createMockApi = (opts: MockOptions = {}): NubiApi => {
         return {
           role: 'guest' as const,
           activeSessionId: g && !g.ended ? id : null,
+          attribution: ATTRIBUTION,
+          regionsAttribution: ATTRIBUTION,
           regions: { total: 229, colored: deleted ? 0 : 3, byLevel: { '1': deleted ? 0 : 2, '2': 0, '3': deleted ? 0 : 1 }, depop: { total: 92, colored: deleted ? 0 : 1 } },
           coverage: { nationalPercent: deleted ? 0 : 0.0004, drivenKm: deleted ? 0 : 14.2, totalKm: 1_000_000, roadsStarted: deleted ? 0 : 4, roadsCompleted: 0 },
           snapshotMonth: SNAPSHOT,
         };
+      }),
+
+    meLink: (token) =>
+      withWait(() => {
+        if (!token) throw new ApiError('http', 401, 'unauthorized');
+        return { url: `${baseUrl || 'https://nubi.example'}/me?v=mock-view-token`, expiresAt: '2026-11-12T09:00:00.000Z' };
+      }),
+    meDelete: (token) =>
+      withWait(() => {
+        if (token.startsWith('mock-token-')) throw new ApiError('http', 403, 'forbidden'); // 차주는 DELETE /pair
+        const g = guests.get(token.replace('mock-guest-token-', ''));
+        if (!g) throw new ApiError('http', 401, 'unauthorized');
+        g.ended = true;
+        g.deleted = true;
+      }),
+    courses: () => withWait(() => ({ items: [{ id: 'mock-course-1', name: '동해안 7번 국도', regionCode: '42150', lengthKm: 82.4 }] })),
+    courseCertificate: (courseId) =>
+      withWait(() => {
+        if (courseId !== 'mock-course-1') throw new ApiError('http', 404, 'not_found');
+        if (roads.every((r) => r.percent < COMPLETE_PERCENT)) throw new ApiError('http', 409, 'not_completed');
+        return { id: 'mock-certificate-1', number: 'NB-MOCK-0001', url: `${baseUrl || 'https://nubi.example'}/c/mock-certificate-1` };
       }),
 
     shareCreate: (req) =>
@@ -188,7 +213,7 @@ export const createMockApi = (opts: MockOptions = {}): NubiApi => {
         if (req.kind === 'trip' && !req.tripIds?.length) throw new ApiError('http', 400, 'trip_required');
         if (req.kind === 'road' && !req.roadKey) throw new ApiError('http', 400, 'road_required');
         const id = `mock-card-${req.kind}`;
-        return { id, url: `${baseUrl || 'https://nubi.example'}/s/${id}`, imageUrl: 'mock:share-card' };
+        return { id, url: `${baseUrl || 'https://nubi.example'}/s/${id}`, imageUrl: 'mock:share-card.png' };
       }),
 
     getSettings: () => withWait(() => ({ ...settings })),
