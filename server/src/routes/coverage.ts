@@ -1,9 +1,12 @@
 import { Hono } from 'hono';
 import type { Db } from '../db/index.js';
-import { ATTRIBUTION, DRIVEN_CTE, nationalCoverage, RD, ROAD_DRIVEN_CTE, roundPercent, type Roads } from '../roads/index.js';
+import { ATTRIBUTION, DRIVEN_CTE, nationalCoverage, RD, ROAD_DRIVEN_CTE, roundPercent, VEHICLE_SET_SQL, type Roads } from '../roads/index.js';
+import { isFaded } from '../shared/fade.js';
 
 /** 완주 기준(결정): 도로 완주율 95% 이상. */
 export const COMPLETE_PERCENT = 95;
+/** '거의 다 달린 도로'의 하한(완주율 %, 상한은 완주 기준). */
+export const ALMOST_PERCENT = 80;
 export const MAX_SEGMENTS = 5_000;
 export const MAX_BBOX_SPAN_DEG = 1;
 const MAX_ROADS_LIMIT = 200;
@@ -19,8 +22,19 @@ const publicError = (error: string): string => {
 };
 
 /** 사양 5장: 조회 API 4개와 매칭 상태. 모든 응답에 snapshotMonth·attribution을 싣는다. */
-export const coverageRoutes = (db: Db, getRoads: () => Roads | null) => {
+/** [now]는 바램(`faded`) 판정 시계다(생략하면 Date.now). */
+export const coverageRoutes = (db: Db, getRoads: () => Roads | null, now: () => number = Date.now) => {
   const base = (roads: Roads | null) => ({ snapshotMonth: roads?.month ?? null, attribution: ATTRIBUTION });
+  /** 되살린 길이(m): `way_revived` 기록(DB 트리거)을 도로 DB의 유효 길이와 합친다. */
+  const revivedM = (vehicleId: string) =>
+    (
+      db
+        .prepare(
+          `SELECT COALESCE(SUM(w.eff_length_m * r.cov), 0) AS m FROM way_revived r JOIN ${RD}.ways w ON w.way_id = r.way_id
+           WHERE r.vehicle_id IN ${VEHICLE_SET_SQL}`,
+        )
+        .get(vehicleId, vehicleId) as { m: number }
+    ).m;
   const unavailable = () => ({ error: 'roads_db_unavailable' as const, snapshotMonth: null, attribution: ATTRIBUTION });
 
   return new Hono()
@@ -71,6 +85,8 @@ export const coverageRoutes = (db: Db, getRoads: () => Roads | null) => {
           totalKm: round2(roads.totalNamedLengthM / 1000),
           roadsCompleted: counts.completed,
           roadsStarted: counts.started,
+          /** 바랜 길을 다시 달려 되살린 거리(km). 완료율에는 영향이 없다(plan 8장). */
+          revivedKm: round2(revivedM(vehicleId) / 1000),
         },
         200,
       );
@@ -86,10 +102,17 @@ export const coverageRoutes = (db: Db, getRoads: () => Roads | null) => {
       const offsetRaw = Number(c.req.query('offset') ?? 0);
       const limit = Number.isInteger(limitRaw) ? Math.min(Math.max(limitRaw, 1), MAX_ROADS_LIMIT) : 50;
       const offset = Number.isInteger(offsetRaw) ? Math.max(offsetRaw, 0) : 0;
+      const filter = c.req.query('filter') ?? 'all';
+      if (!['all', 'almost'].includes(filter)) return c.json({ error: 'invalid_filter' as const, ...base(roads) }, 400);
       const q = (c.req.query('q') ?? '').trim();
       const order = { percent: 'pct DESC, driven DESC', recent: 'r.last DESC, driven DESC', length: 'driven DESC' }[sort];
       // 검색: 표시 이름과 names_json(그 도로를 이루는 way의 거리명)을 함께 본다. 도로 DB는 읽기 전용이라 LIKE 대신 instr로 와일드카드 걱정을 없앤다.
-      const where = q ? 'WHERE instr(ro.display_name, ?) > 0 OR instr(ro.names_json, ?) > 0' : '';
+      // filter=almost: 거의 다 달린 도로(완주율 80% 이상 95% 미만, plan 11-1).
+      const conds = [
+        ...(q ? ['(instr(ro.display_name, ?) > 0 OR instr(ro.names_json, ?) > 0)'] : []),
+        ...(filter === 'almost' ? [`r.driven / ro.total_length_m >= ${ALMOST_PERCENT / 100} AND r.driven / ro.total_length_m < ${COMPLETE_PERCENT / 100}`] : []),
+      ];
+      const where = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : '';
       const args: (string | number)[] = [vehicleId, vehicleId, ...(q ? [q, q] : [])];
       const withCtes = `WITH ${DRIVEN_CTE}, ${ROAD_DRIVEN_CTE}`;
       const total = (
@@ -186,6 +209,8 @@ export const coverageRoutes = (db: Db, getRoads: () => Roads | null) => {
               displayName: r.display_name,
               coverage: round2(r.cov),
               lastDrivenAt: r.last,
+              /** 마지막 인정에서 365일이 지났으면 true(채도 50%로 그린다). 완료율에는 영향 없음. */
+              faded: isFaded(r.last, now()),
             },
           })),
         },

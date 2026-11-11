@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
 import type { Db } from '../db/index.js';
+import { bodyOf } from '../ext/body.js';
 import { queueMatching } from '../matching/worker.js';
 
 const MAX_POINTS_PER_BATCH = 500;
@@ -135,14 +136,6 @@ const getSummary = (db: Db, tripId: string) => {
 
 const tripExists = (db: Db, tripId: string) => db.prepare('SELECT 1 AS x FROM trips WHERE id = ?').get(tripId) !== undefined;
 
-const readJson = async (req: Request): Promise<unknown> => {
-  try {
-    return await req.json();
-  } catch {
-    return undefined;
-  }
-};
-
 /** 시군구 판정 훅(사양 03 4장). [onStarted]: 새 트립 Start를 받았을 때, [onPoints]: 점을 받았을 때(차량 ID, 트립 ID). */
 export type RegionHooks = { onStarted?: (vehicleId: string) => void; onPoints?: (vehicleId: string, tripId: string) => void };
 
@@ -156,7 +149,7 @@ export const tripsRoutes = (db: Db, onEnded: (tripId: string) => void = () => {}
       }),
     )
     .post('/', async (c) => {
-      const parsed = startBody.safeParse(await readJson(c.req.raw));
+      const parsed = startBody.safeParse(await bodyOf(c));
       if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
       const b = parsed.data;
       // 같은 (vehicleId, localId)로 다시 오면(재시도·응답 유실) 새로 만들지 않고 기존 tripId를 돌려준다.
@@ -171,7 +164,7 @@ export const tripsRoutes = (db: Db, onEnded: (tripId: string) => void = () => {}
     })
     .post('/:tripId/points', async (c) => {
       const tripId = c.req.param('tripId');
-      const parsed = pointsBody.safeParse(await readJson(c.req.raw));
+      const parsed = pointsBody.safeParse(await bodyOf(c));
       if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
       if (!tripExists(db, tripId)) return c.json({ error: 'not_found' }, 404);
       // 종료된 트립에도 점을 받는다. 재시도 순서 때문에 End보다 늦게 도착할 수 있고, 요약은 조회 때 계산하므로 항상 일치한다.
@@ -207,7 +200,7 @@ export const tripsRoutes = (db: Db, onEnded: (tripId: string) => void = () => {}
       return c.json({ accepted, duplicated: parsed.data.points.length - accepted }, 200);
     })
     .post('/:tripId/end', async (c) => {
-      const parsed = endBody.safeParse(await readJson(c.req.raw));
+      const parsed = endBody.safeParse(await bodyOf(c));
       if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400);
       const tripId = c.req.param('tripId');
       if (!tripExists(db, tripId)) return c.json({ error: 'not_found' }, 404);

@@ -4,6 +4,7 @@ import { RG, REGIONS_ATTRIBUTION, type Regions } from '../regions/index.js';
 import { nearestRegions, neighborsOf } from '../regions/neighbors.js';
 import { canonicalVehicleId } from '../matching/pipeline.js';
 import { VEHICLE_SET_SQL } from '../roads/index.js';
+import { isFaded } from '../shared/fade.js';
 
 export const MAX_REGION_BBOX_SPAN_DEG = 3;
 /** `/regions/geo` 도형 캐시: bbox 문자열 단위, 최대 개수·유효 시간. */
@@ -18,7 +19,8 @@ export const VISITED_CTE = `v AS (
 )`;
 
 /** 사양 03 5장. 모든 응답에 snapshotMonth·attribution(행정동 경계 출처)을 싣는다. 지역 DB가 없으면 503. */
-export const regionsRoutes = (db: Db, getRegions: () => Regions | null) => {
+/** [now]는 바램(`faded`) 판정 시계다(생략하면 Date.now). */
+export const regionsRoutes = (db: Db, getRegions: () => Regions | null, now: () => number = Date.now) => {
   const base = (r: Regions | null) => ({ snapshotMonth: r?.month ?? null, attribution: REGIONS_ATTRIBUTION });
   const geoCache = new Map<
     string,
@@ -123,6 +125,8 @@ export const regionsRoutes = (db: Db, getRegions: () => Regions | null) => {
             depop92: r.depop_92 === 1,
             firstAt: r.first_at,
             lastAt: r.last_at,
+            /** 마지막 통과 이상 판정에서 365일이 지났으면 true(등급은 유지, 채도만 50%). */
+            faded: isFaded(r.last_at, now()),
             passes: r.passes,
             visits: r.visits,
             stays: r.stays,
@@ -181,8 +185,8 @@ export const regionsRoutes = (db: Db, getRegions: () => Regions | null) => {
         while (geoCache.size > GEO_CACHE_MAX) geoCache.delete(geoCache.keys().next().value!);
       }
       const levels = new Map(
-        (db.prepare(`WITH ${VISITED_CTE} SELECT code, level FROM v`).all(vehicleId, vehicleId) as { code: string; level: number }[]).map(
-          (r) => [r.code, r.level],
+        (db.prepare(`WITH ${VISITED_CTE} SELECT code, level, last_at FROM v`).all(vehicleId, vehicleId) as { code: string; level: number; last_at: string }[]).map(
+          (r) => [r.code, { level: r.level, faded: isFaded(r.last_at, now()) }],
         ),
       );
       return c.json(
@@ -192,7 +196,7 @@ export const regionsRoutes = (db: Db, getRegions: () => Regions | null) => {
           features: shapes.items.map((r) => ({
             type: 'Feature' as const,
             geometry: r.geometry,
-            properties: { code: r.code, name: r.name, displayName: r.displayName, level: levels.get(r.code) ?? 0, depop89: r.depop89 },
+            properties: { code: r.code, name: r.name, displayName: r.displayName, level: levels.get(r.code)?.level ?? 0, faded: levels.get(r.code)?.faded ?? false, depop89: r.depop89 },
           })),
         },
         200,

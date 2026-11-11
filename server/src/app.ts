@@ -8,6 +8,7 @@ import { attachRegions, resolveRegionsPath, type Regions } from './regions/index
 import { inTx, mergeRegionAliases, resolvePending, runBatch } from './regions/judge.js';
 import { canonicalVehicleId } from './matching/pipeline.js';
 import { coverageRoutes } from './routes/coverage.js';
+import { createExt, type ExtOptions } from './routes/ext.js';
 import { mapRoutes } from './routes/map.js';
 import { regionsRoutes } from './routes/regions.js';
 import { tripsRoutes } from './routes/trips.js';
@@ -34,6 +35,8 @@ export type AppOptions = {
   liveIntervalMs?: number;
   /** 시작 때 끝나지 않은 매칭 작업을 이어서 처리한다(서버 프로세스에서만 켠다). */
   resumeMatching?: boolean;
+  /** 05 야간 계약서 T2 확장 설정(토큰 인증·공개 주소·B2B 키·TourAPI 키 등). 생략한 값은 환경변수에서 읽는다. */
+  ext?: ExtOptions;
 };
 
 // RPC 타입 추론을 위해 라우트는 반드시 체이닝으로 정의한다.
@@ -112,8 +115,11 @@ export const createApp = (db: Db = openDb(), options: AppOptions = {}) => {
       60 * 60 * 1000,
     ).unref();
   }
+  const ext = createExt({ db, getRoads: () => roads, getRegions: () => regions, now, options: options.ext ?? {} });
   const app = new Hono()
+    .use('*', ext.middleware) // 체인 맨 앞: 뒤에 붙는 모든 라우트(T1 /map·/trips/:id/live 포함)에 인증·본문 한도 적용
     .get('/health', (c) => c.json({ ok: true as const }))
+    .route('/', ext.routes) // T2: /trips/:id/points·/live 기록 멈춤 차단이 /trips 라우트보다 먼저 와야 한다(멈춘 차량은 onPoints(잠정 매칭 포함)에 닿지 않는다)
     .route(
       '/trips',
       tripsRoutes(db, worker.enqueue, {
@@ -126,12 +132,12 @@ export const createApp = (db: Db = openDb(), options: AppOptions = {}) => {
     )
     .route(
       '/regions',
-      regionsRoutes(db, () => regions),
+      regionsRoutes(db, () => regions, now),
     )
     .route('/vehicles', vehiclesRoutes(options.vehicleHmacKey ?? resolveVehicleHmacKey(), db))
     .route(
       '/',
-      coverageRoutes(db, () => roads),
+      coverageRoutes(db, () => roads, now),
     )
     .route(
       '/',

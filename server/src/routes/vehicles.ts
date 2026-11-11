@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
 import type { Db } from '../db/index.js';
+import { bodyOf } from '../ext/body.js';
 
 const DEV_KEY = 'nubi-dev-only-vehicle-hmac-key-do-not-use-in-production';
 
@@ -48,12 +49,8 @@ export const vehiclesRoutes = (key: string, db: Db) =>
   new Hono()
     .use(bodyLimit({ maxSize: 4 * 1024, onError: (c) => c.json({ error: 'payload_too_large' }, 413) }))
     .post('/register', async (c) => {
-      let raw: unknown;
-      try {
-        raw = await c.req.json();
-      } catch {
-        return c.json({ error: 'invalid_body' }, 400);
-      }
+      const raw = await bodyOf(c); // 미들웨어가 한 번 파싱한 값(BOM·인코딩 해석을 미들웨어와 맞춘다)
+      if (raw === undefined) return c.json({ error: 'invalid_body' }, 400);
       const parsed = registerBody.safeParse(raw);
       if (!parsed.success) return c.json({ error: 'invalid_body' }, 400);
       const vin = normalizeVin(parsed.data.vin);
@@ -63,12 +60,8 @@ export const vehiclesRoutes = (key: string, db: Db) =>
       return standardVin.test(vin) ? c.json({ vehicleId }, 200) : c.json({ vehicleId, vinFormat: 'nonstandard' as const }, 200);
     })
     .post('/alias', async (c) => {
-      let raw: unknown;
-      try {
-        raw = await c.req.json();
-      } catch {
-        return c.json({ error: 'invalid_body' }, 400);
-      }
+      const raw = await bodyOf(c); // 미들웨어가 한 번 파싱한 값(BOM·인코딩 해석을 미들웨어와 맞춘다)
+      if (raw === undefined) return c.json({ error: 'invalid_body' }, 400);
       const parsed = aliasBody.safeParse(raw);
       if (!parsed.success || parsed.data.fromVehicleId === parsed.data.toVehicleId) return c.json({ error: 'invalid_body' }, 400);
       const { fromVehicleId, toVehicleId } = parsed.data;

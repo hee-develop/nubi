@@ -6,6 +6,7 @@ import type { Db } from '../db/index.js';
 import type { Regions } from '../regions/index.js';
 import { inTx, judgeTrip, resolvePending } from '../regions/judge.js';
 import type { Roads } from '../roads/index.js';
+import { tripDataState } from '../ext/settings.js';
 import { runMatching } from './pipeline.js';
 import { ValhallaError, type TraceDeps } from './valhalla.js';
 
@@ -107,6 +108,11 @@ export const createMatchingWorker = (deps: WorkerDeps) => {
     const job = db.prepare('SELECT status, queued_at FROM region_jobs WHERE trip_id = ?').get(tripId) as
       { status: string; queued_at: string } | undefined;
     if (!job || job.status !== 'queued') return;
+    // 데이터 삭제로 트립이 사라졌거나 동의가 철회됐으면 판정하지 않고 작업을 지운다(경합 방지).
+    if (tripDataState(db, tripId) !== 'ok') {
+      db.prepare('DELETE FROM region_jobs WHERE trip_id = ?').run(tripId);
+      return;
+    }
     db.prepare('UPDATE region_jobs SET attempts = attempts + 1 WHERE trip_id = ?').run(tripId);
     const failRegion = (code: string, detail: string) => {
       const exhausted = now() - Date.parse(job.queued_at) >= REGION_RETRY_LIMIT_MS;
