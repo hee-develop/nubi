@@ -147,6 +147,21 @@ fun cellsCovering(box: Bbox, z: Int, maxCells: Int = 60): List<CellKey> {
     return all.sortedBy { (it.ix + 0.5 - cx).let { d -> d * d } + (it.iy + 0.5 - cy).let { d -> d * d } }.take(maxCells)
 }
 
+/**
+ * 서버에 요청할 칸 목록. **화면이 덮는 칸([screen]의 [cellsCovering])을 먼저** 넣고(화면 중앙에 가까운 순), 남는 자리([maxCells])에 여유 영역([expanded])의 나머지 칸을 중앙에 가까운 순으로 채운다.
+ * 여유 영역만 중심 거리로 자르면 화면 모서리 칸이 빠져 '불러오는 중'이 끝나지 않는다.
+ */
+fun requestCells(screen: Bbox, expanded: Bbox, z: Int, maxCells: Int = 30): List<CellKey> {
+    fun center(b: Bbox) = doubleArrayOf((b.minLon + b.maxLon) / 2, (b.minLat + b.maxLat) / 2)
+    val c = center(expanded)
+    fun dist(k: CellKey) = k.bbox().let { b -> val m = center(b); (m[0] - c[0]).let { d -> d * d } + (m[1] - c[1]).let { d -> d * d } }
+    val first = cellsCovering(screen, z, maxCells).sortedBy(::dist)
+    if (first.size >= maxCells) return first
+    val seen = first.toHashSet()
+    val rest = cellsCovering(expanded, z, Int.MAX_VALUE).filter { it !in seen }.sortedBy(::dist)
+    return first + rest.take(maxCells - first.size)
+}
+
 /** 시군구 칠 요청 칸(서버 z는 [regionZ], 격자는 확대가 낮으면 크게). 응답에는 칸 경계에 걸친 시군구가 통째로 들어와 칸끼리 겹치므로 코드로 합친다. */
 fun regionZ(zoom: Double): Int = floor(zoom + 1e-6).toInt().coerceIn(5, 13)
 

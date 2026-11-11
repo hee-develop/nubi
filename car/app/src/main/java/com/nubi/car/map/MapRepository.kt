@@ -48,7 +48,11 @@ class MapRepository(
     private var generation = 0
     private var pendingJob: Cancellable? = null
     private var retryJob: Cancellable? = null
+    private var bound = true
     private var lastRequest: Request? = null
+
+    /** 마지막 요청 목록(바탕 칸). 스냅샷은 여기에 든 칸만 '받는 중'으로 센다. */
+    private var requested: Set<CellKey> = emptySet()
 
     /** 이번 실행에서 서버에 요청한 칸 수(테스트·디버그 요약용). */
     @Volatile
@@ -71,6 +75,23 @@ class MapRepository(
         version++
     }
 
+    /** 화면이 꺼졌다(백그라운드): 예약된 요청·재시도를 멈춘다. 이미 나간 요청의 응답은 캐시에 그대로 쌓는다. */
+    fun unbind() {
+        synchronized(lock) {
+            bound = false
+            pendingJob?.cancel()
+            pendingJob = null
+            retryJob?.cancel()
+            retryJob = null
+        }
+    }
+
+    /** 화면이 다시 켜졌다: 마지막 뷰포트를 다시 요청한다(unbind 동안 멈춰 있던 재시도를 되살린다). */
+    fun bind() {
+        synchronized(lock) { bound = true }
+        retryLast()
+    }
+
     /** 뷰포트가 바뀌었다. 마지막 호출 뒤 [debounceMs]가 지나면 화면 주변(25% 여유)의 모자란 칸을 받는다. */
     fun requestViewport(vp: Viewport, roads: Boolean, regions: Boolean) {
         synchronized(lock) {
@@ -88,6 +109,7 @@ class MapRepository(
 
     private fun scheduleRetry(delayMs: Long) {
         synchronized(lock) {
+            if (!bound) return // 화면이 꺼져 있으면 재시도를 예약하지 않는다(bind 때 다시 요청한다)
             retryJob?.cancel()
             retryJob = schedule(delayMs) { retryLast() }
         }
@@ -102,10 +124,10 @@ class MapRepository(
         val box = vp.bbox().expand(0.25)
         if (roads) {
             val z = serverZ(vp.zoom)
-            val cx = (box.minLon + box.maxLon) / 2
-            val cy = (box.minLat + box.maxLat) / 2
-            // 화면 가운데에 가까운 칸부터 받는다
-            for (key in cellsCovering(box, z, 30).sortedBy { k -> k.bbox().let { b -> sq((b.minLon + b.maxLon) / 2 - cx) + sq((b.minLat + b.maxLat) / 2 - cy) } }) {
+            // 화면이 덮는 칸을 먼저, 남는 자리에 여유 영역 칸을 넣는다(화면 칸이 요청에서 빠지면 '불러오는 중'이 끝나지 않는다)
+            val list = requestCells(vp.bbox(), box, z, 30)
+            synchronized(lock) { requested = list.toHashSet() }
+            for (key in list) {
                 if (!claim(key) { baseCells.containsKey(key) }) continue
                 submit(key) { gen ->
                     val cell = api.getBase(key, id)
@@ -129,8 +151,6 @@ class MapRepository(
             }
         }
     }
-
-    private fun sq(d: Double) = d * d
 
     /** 칸 수·좌표 수가 상한을 넘으면 오래 안 쓴 칸부터, **현재 z가 아닌 칸을 먼저** 내보낸다. 내보낸 칸을 직전 묶음이 붙잡고 있지 않게 정리한다. lock 안에서 부른다. */
     private fun evictLocked(currentZ: Int) {
@@ -201,9 +221,12 @@ class MapRepository(
             val missing = needed.filter { !baseCells.containsKey(it) }
             if (missing.isNotEmpty()) {
                 val now = nowMs()
+                // 요청하지 않은 칸(요청 목록에도, 받는 중·실패 기록에도 없는 칸)은 '불러오는 중'으로 세지 않는다
+                val pending = missing.filter { it in requested || it in inflight || failedAt.containsKey(it) }
                 load = when {
                     vehicleId() == null -> MapLoad.NO_VEHICLE
-                    missing.any { k -> failedAt[k]?.let { now - it < failBackoffMs } == true } && missing.none { it in inflight } -> MapLoad.FAILED
+                    pending.isEmpty() -> MapLoad.OK
+                    pending.any { k -> failedAt[k]?.let { now - it < failBackoffMs } == true } && pending.none { it in inflight } -> MapLoad.FAILED
                     else -> MapLoad.LOADING
                 }
             }
@@ -225,6 +248,7 @@ class MapRepository(
             regionCells.clear()
             inflight.clear()
             failedAt.clear()
+            requested = emptySet()
             previousBase = emptyList()
             previousRegions = emptyList()
             pendingJob?.cancel()
@@ -262,6 +286,8 @@ class LivePoller(
     private val intervalMs: Long = 20_000,
     private val kickDelayMs: Long = 2_000,
     private val maxWays: Int = 3_000,
+    /** 지금 기록 중인 트립의 **로컬 id**. 트립이 바뀌었는지는 이 값으로 가린다(서버 트립 id는 새 트립의 첫 업로드 전까지 옛 값일 수 있다). 모르면 null. */
+    private val localTripId: () -> String? = { null },
 ) {
     private val lock = Any()
     private var running = false
@@ -270,6 +296,10 @@ class LivePoller(
     private var kickJob: Cancellable? = null
     private var polling = false
     private var lastTrip: String? = null
+    private var lastLocal: String? = null
+
+    /** [clear]마다 올라간다. 진행 중이던 조회 응답이 clear 뒤에 합쳐지지 않게 한다. */
+    private var clearGen = 0
     private val acc = LinkedHashMap<Long, LiveWay>()
     private var cursor = 0L
 
@@ -313,7 +343,9 @@ class LivePoller(
     /** 결과를 지운다(트립이 끝나 확정 기록으로 넘어갔을 때). */
     fun clear() {
         synchronized(lock) {
+            clearGen++
             lastTrip = null
+            lastLocal = null
             acc.clear()
             cursor = 0L
         }
@@ -332,16 +364,19 @@ class LivePoller(
 
     private fun pollOnce() {
         val id = tripId() ?: return
+        val local = localTripId()
+        var gen = 0
         val since = synchronized(lock) {
             if (polling) return
             polling = true
-            if (lastTrip != id) 0L else cursor
+            gen = clearGen
+            if (lastTrip != id || lastLocal != local) 0L else cursor
         }
         try {
             executor.execute {
                 try {
                     val delta = api.getLive(id, since, nowMs())
-                    if (delta != null) merge(id, since, delta)
+                    if (delta != null) merge(id, local, since, gen, delta)
                 } catch (t: Throwable) {
                     Log.w("NubiMap", "live 조회 실패: ${t.javaClass.simpleName}")
                 } finally {
@@ -354,13 +389,15 @@ class LivePoller(
     }
 
     /** 응답을 누적에 합쳐 저장소에 올린다. 트립이 바뀌었으면 누적을 먼저 비운다. */
-    private fun merge(id: String, since: Long, delta: LiveState) {
+    private fun merge(id: String, local: String?, since: Long, gen: Int, delta: LiveState) {
         val before = repo.live
         val state = synchronized(lock) {
-            val newTrip = lastTrip != id
+            if (gen != clearGen) return // 조회 중에 clear가 불렸다: 지난 트립의 응답을 합치지 않는다
+            val newTrip = lastTrip != id || lastLocal != local
             if (newTrip) {
                 acc.clear()
                 lastTrip = id
+                lastLocal = local
             }
             // since=0으로 받은 응답은 서버의 최신 묶음 전체라 누적을 갈아 끼운다
             if (since == 0L) acc.clear()
@@ -370,9 +407,8 @@ class LivePoller(
             }
             while (acc.size > maxWays) acc.remove(acc.keys.first())
             cursor = delta.cursor
-            LiveState(delta.status, delta.upToSeq, acc.values.toList(), delta.region, delta.receivedAtMs, delta.cursor)
+            LiveState(delta.status, delta.upToSeq, acc.values.toList(), delta.region, delta.receivedAtMs, delta.cursor).also { repo.live = it } // lock 안에서 올려 clear와 엇갈리지 않게
         }
-        repo.live = state
         if (before.upToSeq != state.upToSeq || before.ways.size != state.ways.size || before.region?.code != state.region?.code) {
             Log.i("NubiMap", "live 반영 ways=${state.ways.size} new=${state.newCount} +${delta.ways.size} upToSeq=${state.upToSeq} wall=${nowMs()}")
             onChange()

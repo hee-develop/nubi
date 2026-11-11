@@ -213,9 +213,10 @@ class NubiMapView @JvmOverloads constructor(context: Context, attrs: AttributeSe
         val vp = viewport
         var snap = cachedSnap
         if (snap == null || cachedVersion != repo.version || cachedViewport !== vp || cachedRoads != showRoads || cachedRegions != showRegions) {
+            val ver = repo.version // 버전을 먼저 읽고 스냅샷을 뜬다(그 사이 바뀐 데이터는 다음 그리기에서 다시 뜬다)
             snap = repo.snapshot(vp, showRoads, showRegions)
             cachedSnap = snap
-            cachedVersion = repo.version
+            cachedVersion = ver
             cachedViewport = vp
             cachedRoads = showRoads
             cachedRegions = showRegions

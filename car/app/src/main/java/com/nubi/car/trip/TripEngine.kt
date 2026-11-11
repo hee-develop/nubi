@@ -54,6 +54,11 @@ class TripEngine(
     /** debug에서 `now=`로 옮긴 시계 차이. 상태기계에 넘기는 elapsed·벽시계에만 더한다(재시도 간격은 실제 시계로 잰다). */
     private var clockOffsetMillis = 0L
     private var active: TripCtx? = null
+
+    /** 지금 기록 중인 트립의 로컬 id(없으면 null). 지도가 '이 정산이 지금 트립의 것인가'를 가릴 때 쓴다. */
+    @Volatile
+    var recordingLocalId: String? = null
+        private set
     private var failures = 0
     private var nextAttemptElapsed = 0L
     private var draining = false
@@ -283,6 +288,7 @@ class TripEngine(
             machine.reset()
             parkedAwaitingLocation = false
             active = null
+            recordingLocalId = null
             clockOffsetMillis = 0
             failures = 0
             nextAttemptElapsed = 0
@@ -319,6 +325,7 @@ class TripEngine(
                     liveTrips.add(ctx.localId)
                     ctx.held.addAll(e.points)
                     active = ctx
+                    recordingLocalId = ctx.localId
                     withOdometer { km ->
                         ctx.odoStart = km
                         ctx.odoReady = true
@@ -332,6 +339,7 @@ class TripEngine(
                 is TripEvent.Ended -> {
                     val ctx = active ?: continue
                     active = null
+                    recordingLocalId = null
                     if (immediate) {
                         // 서비스가 곧 사라진다. 오도미터를 기다리지 않고 바로 큐에 남긴다.
                         finishTrip(ctx, e.endedAtMillis, null, force = true)

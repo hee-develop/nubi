@@ -411,4 +411,80 @@ class MapRepositoryTest {
         assertFalse(r.live.ways.isNotEmpty())
         p.stop()
     }
+
+    // 재리뷰 minor -------------------------------------------------------------------
+
+    @Test
+    fun 전국_보기에서_화면에_걸친_칸은_모두_요청_목록에_들고_받고_나면_불러오는_중이_아니다() {
+        for (zoom in listOf(5.0, 5.5, 6.0, 6.9)) {
+            val wide = Viewport(127.8, 36.3, zoom, 1900, 700)
+            val screen = wide.bbox()
+            val z = serverZ(zoom)
+            val screenCells = cellsCovering(screen, z, 30)
+            val req = requestCells(screen, screen.expand(0.25), z, 30)
+            assertTrue("z=$zoom 화면 칸이 요청 목록에 모두 들어 있어야 한다", req.containsAll(screenCells))
+            assertTrue(req.size <= 30)
+            assertEquals(req.size, req.toSet().size)
+            api.baseCalls.clear()
+            val r = repo()
+            r.requestViewport(wide, true, false)
+            timer.advance(400)
+            val s = r.snapshot(wide, true, false)
+            assertEquals("z=$zoom", MapLoad.OK, s.load)
+        }
+    }
+
+    @Test
+    fun 요청하지_않은_칸은_불러오는_중으로_세지_않는다() {
+        val r = repo()
+        // 아직 요청 전: 비어 있어도 LOADING이 아니다
+        assertEquals(MapLoad.OK, r.snapshot(vp, true, false).load)
+    }
+
+    @Test
+    fun unbind하면_재시도를_멈추고_bind하면_마지막_뷰포트를_다시_요청한다() {
+        api.failBase = true
+        val r = repo()
+        r.requestViewport(vp, true, false)
+        timer.advance(400)
+        val failed = api.baseCalls.size
+        assertTrue(failed > 0)
+        r.unbind()
+        timer.advance(60_000) // 백오프가 몇 번 지나도
+        assertEquals(failed, api.baseCalls.size) // 백그라운드에서 재시도하지 않는다
+        api.failBase = false
+        r.bind()
+        timer.advance(400)
+        assertTrue(api.baseCalls.size > failed)
+        assertTrue(r.cachedCells > 0)
+    }
+
+    @Test
+    fun 조회_중에_clear가_불리면_그_응답은_합치지_않는다() {
+        val r = repo()
+        val queued = ArrayList<Runnable>()
+        val p = LivePoller(api, { queued.add(it) }, { "t1" }, timer::schedule, r, { timer.now }, intervalMs = 20_000, kickDelayMs = 2_000, maxWays = 5, localTripId = { "L1" })
+        api.live = LiveState("ready", 3, listOf(lw(1)), null, 0L, cursor = 1)
+        p.start()
+        assertEquals(1, queued.size) // 조회가 나가 있다
+        p.clear() // 응답이 오기 전에 트립이 정산돼 지워졌다
+        queued.removeAt(0).run()
+        assertTrue(r.live.ways.isEmpty())
+        p.stop()
+    }
+
+    @Test
+    fun 로컬_트립이_바뀌면_서버_트립_id가_같아도_누적을_비우고_처음부터_받는다() {
+        val r = repo()
+        var local = "L1"
+        val p = LivePoller(api, direct, { "t1" }, timer::schedule, r, { timer.now }, intervalMs = 20_000, kickDelayMs = 2_000, maxWays = 5, localTripId = { local })
+        api.live = LiveState("ready", 3, listOf(lw(1)), null, 0L, cursor = 1)
+        p.start()
+        local = "L2"
+        api.live = LiveState("ready", 4, listOf(lw(2)), null, 0L, cursor = 2)
+        timer.advance(20_000)
+        assertEquals(listOf(0L, 0L), api.liveSinces)
+        assertEquals(listOf(2L), r.live.ways.map { it.id })
+        p.stop()
+    }
 }
