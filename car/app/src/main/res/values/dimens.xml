@@ -18,7 +18,7 @@
     <dimen name="left_column_width">660dp</dimen>
     <dimen name="card_pad_v">36dp</dimen>
     <dimen name="card_pad_h">40dp</dimen>
-    <dimen name="poi_pad">32dp</dimen>
+    <dimen name="poi_pad">20dp</dimen>
     <dimen name="radius_card">36dp</dimen>
     <!-- 앱 영역 너비가 이보다 좁으면(두 앱을 나란히 연 경우 등) 이웃 카드를 축약형으로 바꾸고 본문을 세로로 쌓는다 -->
     <integer name="neighbor_card_min_width_dp">1300</integer>
