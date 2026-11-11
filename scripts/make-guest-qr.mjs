@@ -1,16 +1,9 @@
 // 차량 앱 게스트 QR 자리표시 이미지(정적 VectorDrawable)를 만든다. 아무 의미 없는 고정 문자열을 인코딩하며 앱은 런타임에 QR을 만들지 않는다.
-// 사용: node scripts/make-guest-qr.mjs > car/app/src/main/res/drawable/guest_qr.xml   (toqr는 pnpm 스토어에 있는 것을 쓴다)
-import { createRequire } from "node:module";
-import { readdirSync } from "node:fs";
-import { join } from "node:path";
-
-const root = new URL("..", import.meta.url).pathname;
-const store = join(root, "node_modules/.pnpm");
-const dir = readdirSync(store).find((d) => d.startsWith("toqr@"));
-if (!dir) throw new Error("toqr를 찾지 못했습니다(pnpm install 필요)");
-const { toQR } = createRequire(import.meta.url)(
-  join(store, dir, "node_modules/toqr"),
-);
+// 생성물(guest_qr.xml)은 커밋돼 있어 평소에는 다시 돌릴 필요가 없다. 바꿀 때만 toqr@0.1.1이 해석되는 빈 폴더에서 돌린다:
+//   mkdir /tmp/guest-qr && cd /tmp/guest-qr && npm init -y && npm i toqr@0.1.1
+//   cp <저장소>/scripts/make-guest-qr.mjs . && node make-guest-qr.mjs > <저장소>/car/app/src/main/res/drawable/guest_qr.xml
+// (ESM import는 스크립트 위치에서 toqr를 찾으므로 스크립트를 그 폴더에 복사해 실행한다.)
+import { toQR } from 'toqr';
 
 const bits = toQR("NUBI-GUEST-QR-PLACEHOLDER", 1);
 const n = Math.round(Math.sqrt(bits.length));

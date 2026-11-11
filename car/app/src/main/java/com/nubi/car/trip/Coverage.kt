@@ -90,7 +90,7 @@ internal fun getText(baseUrl: String, path: String): String {
         val code = conn.responseCode
         val text = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() } ?: ""
         if (code in 200..299) return text
-        throw HttpFailure(code, "HTTP $code $path")
+        throw HttpFailure(code, "HTTP $code ${path.substringBefore('?')}") // 쿼리스트링(좌표·차량 ID)은 메시지에 남기지 않는다
     } finally {
         conn.disconnect()
     }

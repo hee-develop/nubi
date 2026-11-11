@@ -26,6 +26,9 @@ env:
 - assertNotVisible: '시군구 .*'
 - assertNotVisible: '인구감소지역 .*'
 - assertNotVisible: '안 가 본 이웃'
+- assertNotVisible: '서울 중구'
+- assertNotVisible: '방문 ●●○'
+- assertNotVisible: '게스트 QR'
 - takeScreenshot: ${SHOT_DIR}/21-region-recording
 - extendedWaitUntil:
     visible: '샘플 12'
@@ -68,6 +71,9 @@ env:
 - assertNotVisible: '인구감소지역 .*'
 - assertNotVisible: '안 가 본 이웃'
 - assertNotVisible: '길안내'
+- assertNotVisible: '서울 중구'
+- assertNotVisible: '방문 ●●○'
+- assertNotVisible: '게스트 QR'
 - takeScreenshot: ${SHOT_DIR}/23-region-gear-d
 
 # 5. 시계를 C 시작(B 종료 + 10시간)으로 옮기고 중구에서 다시 시작 → 숙박
@@ -94,9 +100,9 @@ env:
 - assertVisible: '숙박 ●●●'
 - takeScreenshot: ${SHOT_DIR}/24-region-stay
 
-# 6. 길안내: 이웃 중심점으로 NaviHelper 요청. 결과(보냄/실패)는 팝업 없이 카드 아래 한 줄로만 나온다
+# 6. 길안내: 이웃 중심점으로 NaviHelper 요청(NAVI_ROUTE_SEARCH 권한 필요, 에뮬레이터 실측). 결과는 팝업 없이 카드 아래 한 줄로만 나온다
 - tapOn: '길안내'
 - extendedWaitUntil:
-    visible: '길안내 (요청을 보냈어요|연결에 실패했어요)'
+    visible: '길안내 요청을 보냈어요'
     timeout: 10000
 - takeScreenshot: ${SHOT_DIR}/25-region-navi

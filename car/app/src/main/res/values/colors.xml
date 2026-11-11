@@ -10,13 +10,10 @@
     <color name="accent">#F59E0B</color>
     <color name="on_accent">#1A1204</color>
     <color name="depop">#2DD4BF</color>
-    <color name="none_depop">#1C323A</color>
-    <color name="road">#FBBF24</color>
     <!-- 3단계 배지(앰버 농도): 통과 / 방문 / 숙박 -->
     <color name="stage1">#47F59E0B</color>
     <color name="stage2">#99F59E0B</color>
     <color name="stage3">#F59E0B</color>
     <color name="stage_border">#CCF59E0B</color>
     <color name="stage0">#1A222D</color>
-    <color name="warn_bg">#33F59E0B</color>
 </resources>

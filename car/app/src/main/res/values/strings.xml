@@ -54,6 +54,7 @@
     <string name="guest_qr_soon">준비 중</string>
     <string name="neighbor_label">안 가 본 이웃</string>
     <string name="neighbor_unknown">이웃 정보 없음</string>
+    <string name="neighbor_all_visited">이웃은 모두 가 봤어요</string>
     <string name="depop_tag">인구감소지역</string>
     <string name="poi_kind_sight">관광지</string>
     <string name="poi_kind_festival">축제</string>

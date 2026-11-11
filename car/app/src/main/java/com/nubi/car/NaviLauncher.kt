@@ -23,7 +23,9 @@ class NaviLauncher(context: Context) {
     /** 연결 전에 들어온 요청 하나(마지막 것만 유지한다). */
     private var pending: Pending? = null
 
-    private class Pending(val route: RouteInfo, val onResult: (Boolean) -> Unit)
+    private inner class Pending(val route: RouteInfo, val onResult: (Boolean) -> Unit) {
+        val timeout = Runnable { expire(this) }
+    }
 
     fun request(name: String, lat: Double, lon: Double, onResult: (Boolean) -> Unit) {
         val route = RouteInfo(
@@ -35,29 +37,36 @@ class NaviLauncher(context: Context) {
             poiSubId = "",
             routeOption = RouteOption.RECOMMENDED,
         )
+        var replaced: Pending? = null
         val ready: NaviHelper? = synchronized(lock) {
             if (helper != null && connected) {
                 helper
             } else {
-                pending?.let { old -> main.post { old.onResult(false) } } // 새 요청이 앞 요청을 대신한다
-                pending = Pending(route, onResult)
+                replaced = pending
+                val p = Pending(route, onResult)
+                pending = p
+                main.postDelayed(p.timeout, TIMEOUT_MS)
                 null
             }
+        }
+        replaced?.let { old ->
+            main.removeCallbacks(old.timeout)
+            main.post { old.onResult(false) } // 새 요청이 앞 요청을 대신한다
         }
         if (ready != null) {
             send(ready, route, onResult)
             return
         }
         connect()
-        main.postDelayed({ expire(onResult) }, TIMEOUT_MS)
     }
 
+    /** 화면이 멈출 때: 연결을 끊고 대기 중이던 요청은 결과 없이 버린다(멈춘 화면에 실패 문구를 남기지 않는다). */
     fun release() {
         val old = synchronized(lock) {
             val h = helper
             helper = null
             connected = false
-            pending?.let { p -> main.post { p.onResult(false) } }
+            pending?.let { main.removeCallbacks(it.timeout) }
             pending = null
             h
         }
@@ -77,7 +86,10 @@ class NaviLauncher(context: Context) {
                         connected = true
                         pending.also { pending = null }
                     }
-                    p?.let { send(h, it.route, it.onResult) }
+                    p?.let {
+                        main.removeCallbacks(it.timeout)
+                        send(h, it.route, it.onResult)
+                    }
                 },
                 onFailed = {
                     Log.w(TAG, "내비 연결 실패: ${it?.javaClass?.simpleName}")
@@ -99,7 +111,10 @@ class NaviLauncher(context: Context) {
             pending.also { pending = null }
         }
         runCatching { h.release() }
-        p?.let { main.post { it.onResult(false) } }
+        p?.let {
+            main.removeCallbacks(it.timeout)
+            main.post { it.onResult(false) }
+        }
     }
 
     private fun send(h: NaviHelper, route: RouteInfo, onResult: (Boolean) -> Unit) {
@@ -113,17 +128,21 @@ class NaviLauncher(context: Context) {
         main.post { onResult(ok) }
     }
 
-    private fun expire(onResult: (Boolean) -> Unit) {
-        val hit = synchronized(lock) {
-            val p = pending
-            if (p != null && p.onResult === onResult) {
-                pending = null
-                true
+    /** 제한 시간 안에 연결되지 않았다: 요청을 실패로 알리고, 아직 연결 중인 helper는 정리해 다음 누름에서 새로 연결한다. */
+    private fun expire(p: Pending) {
+        val stale = synchronized(lock) {
+            if (pending !== p) return
+            pending = null
+            if (connected) {
+                null
             } else {
-                false
+                helper.also {
+                    helper = null
+                }
             }
         }
-        if (hit) onResult(false)
+        stale?.let { runCatching { it.release() } }
+        p.onResult(false)
     }
 
     private companion object {

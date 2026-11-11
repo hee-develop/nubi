@@ -455,4 +455,77 @@ class TripEngineTest {
         assertEquals(UploadKind.END_SENT, e.status.upload.kind)
         assertEquals(0, e.status.upload.points)
     }
+
+    // 정차 조회 시점(onParked) ----------------------------------------------------
+
+    private fun TripEngine.loc(lat: Double = 37.5) {
+        onLocation(lat, 127.0, null, null)
+        scheduler.runPosted()
+    }
+
+    @Test
+    fun 위치를_안_채로_P가_되면_정차_알림이_한_번_온다() {
+        val e = engine()
+        var parked = 0
+        e.onParked = { parked++ }
+        e.onServiceStart()
+        scheduler.runPosted()
+        e.loc()
+        e.onGear(Gear.P)
+        scheduler.runPosted()
+        assertEquals(1, parked)
+        e.onGear(Gear.P) // 이미 P라면 다시 알리지 않는다
+        scheduler.runPosted()
+        assertEquals(1, parked)
+        e.onGear(Gear.D)
+        e.onGear(Gear.P)
+        scheduler.runPosted()
+        assertEquals(2, parked)
+        assertEquals(37.5, e.status.lastLocation!!.lat, 0.0)
+    }
+
+    @Test
+    fun P로_콜드_스타트하면_첫_위치가_들어올_때_한_번만_알린다() {
+        val e = engine()
+        var parked = 0
+        e.onParked = { parked++ }
+        e.onServiceStart()
+        scheduler.runPosted()
+        e.onGear(Gear.P)
+        scheduler.runPosted()
+        assertEquals(0, parked) // 위치를 아직 모른다
+        assertNull(e.status.lastLocation)
+        e.loc()
+        assertEquals(1, parked)
+        assertEquals(37.5, e.status.lastLocation!!.lat, 0.0) // 기어 P라 트립에는 안 들어가지만 위치는 보관
+        assertEquals(0, e.status.sampleCount)
+        e.loc(37.6)
+        assertEquals(1, parked)
+    }
+
+    @Test
+    fun 위치를_기다리던_중_P를_벗어나면_알리지_않는다() {
+        val e = engine()
+        var parked = 0
+        e.onParked = { parked++ }
+        e.onServiceStart()
+        scheduler.runPosted()
+        e.onGear(Gear.P)
+        e.onGear(Gear.D)
+        scheduler.runPosted()
+        e.loc()
+        assertEquals(0, parked)
+    }
+
+    @Test
+    fun 서비스를_다시_시작하면_마지막_위치를_잊는다() {
+        val e = engine()
+        e.onServiceStart()
+        scheduler.runPosted()
+        e.loc()
+        assertNotNull(e.status.lastLocation)
+        e.onServiceStart()
+        scheduler.runPosted()
+        assertNull(e.status.lastLocation)
+    }
 }

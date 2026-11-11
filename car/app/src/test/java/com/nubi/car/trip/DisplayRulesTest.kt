@@ -75,10 +75,15 @@ class ParkedRulesTest {
     }
 
     @Test
-    fun 이웃_카드는_좁은_앱_영역에서_숨긴다() {
-        assertEquals(true, neighborCardVisible(true, 1682, 1300))
-        assertEquals(false, neighborCardVisible(true, 840, 1300))
-        assertEquals(true, neighborCardVisible(true, 0, 1300))
-        assertEquals(false, neighborCardVisible(false, 1682, 1300))
+    fun 이웃_카드는_좁은_앱_영역에서_축약형이다() {
+        assertEquals(NeighborLayout.FULL, neighborLayout(true, 1682, 1300))
+        assertEquals(NeighborLayout.COMPACT, neighborLayout(true, 840, 1300))
+        assertEquals(NeighborLayout.FULL, neighborLayout(true, 1300, 1300))
+        assertEquals(NeighborLayout.FULL, neighborLayout(true, 0, 1300))
+        assertEquals(NeighborLayout.HIDDEN, neighborLayout(false, 1682, 1300))
+        assertEquals(NeighborLayout.HIDDEN, neighborLayout(false, 840, 1300))
+        assertEquals(true, narrowAppArea(840, 1300))
+        assertEquals(false, narrowAppArea(1682, 1300))
+        assertEquals(false, narrowAppArea(0, 1300))
     }
 }

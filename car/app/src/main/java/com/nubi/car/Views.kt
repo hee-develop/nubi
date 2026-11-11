@@ -16,6 +16,7 @@ class Views(val root: View) {
 
     val parkedView: View = id(R.id.parked_view)
     val chip: TextView = id(R.id.chip)
+    val body: LinearLayout = id(R.id.body)
     val leftColumn: LinearLayout = id(R.id.left_column)
     val nowLabel: TextView = id(R.id.now_label)
     val stateText: TextView = id(R.id.state_text)
@@ -43,6 +44,7 @@ class Views(val root: View) {
     val neighborName: TextView = id(R.id.neighbor_name)
     val depopTag: TextView = id(R.id.depop_tag)
     val poiRow: View = id(R.id.poi_row)
+    val naviCompact: TextView = id(R.id.navi_compact)
     val naviSight: TextView = id(R.id.navi_sight)
     val naviFestival: TextView = id(R.id.navi_festival)
     val poiSource: TextView = id(R.id.poi_source)

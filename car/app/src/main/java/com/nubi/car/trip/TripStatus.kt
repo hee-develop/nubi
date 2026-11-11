@@ -32,7 +32,7 @@ data class TripStatus(
     val discardedLines: Int = 0,
     /** 암호화 키를 쓸 수 없어 이번 실행은 디스크에 저장하지 않고 메모리에서만 동작 중('저장 보류(키 오류)'). */
     val storageHeld: Boolean = false,
-    /** 마지막으로 채택한 위치(정차 화면의 '지금 있는 곳' 조회용). 없으면 null. 화면에 그리거나 로그에 남기지 않는다. */
+    /** 마지막으로 받은 원시 위치(기어 무관, 트립에는 안 넣음). 정차 화면의 '지금 있는 곳' 조회에만 쓰고 메모리에만 둔다. 없으면 null. 화면에 그리거나 로그에 남기지 않는다. */
     val lastLocation: LatLon? = null,
 ) {
     companion object {

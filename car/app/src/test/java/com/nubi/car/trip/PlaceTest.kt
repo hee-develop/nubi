@@ -108,4 +108,47 @@ class PlaceTest {
         val api = FakeApi({ throw IllegalStateException("x") })
         tracker(api).refresh()
     }
+
+    @Test
+    fun 안_가_본_이웃만_고르고_모두_가_봤으면_표시한다() {
+        val visited = nb.copy(level = 2)
+        val api = FakeApi({ jung }, { listOf(visited, nb.copy(code = "b", level = 0, displayName = "서울 용산구")) })
+        val t = tracker(api)
+        t.refresh()
+        assertEquals("서울 용산구", t.info.neighbor?.displayName)
+        assertEquals(false, t.info.neighborsAllVisited)
+        api.neighbors = { listOf(visited, visited.copy(code = "c", level = 3)) }
+        t.refresh()
+        assertNull(t.info.neighbor)
+        assertEquals(true, t.info.neighborsAllVisited)
+        api.neighbors = { emptyList() } // 이웃 자체가 없으면 '모두 가 봤다'가 아니다
+        t.refresh()
+        assertEquals(false, t.info.neighborsAllVisited)
+    }
+
+    @Test
+    fun 새_위치가_2km_이상_멀어지면_조회_전에_옛_값을_비운다() {
+        val api = FakeApi({ jung }, { listOf(nb) })
+        var loc: LatLon? = here
+        val t = tracker(api, loc = { loc })
+        t.refresh()
+        assertEquals(PlaceInfo(jung, nb), t.info)
+        // 오프라인: 이후 조회가 모두 실패한다
+        api.at = { throw IOException("끊김") }
+        loc = LatLon(here.lat + 0.005, here.lon) // 약 555m: 아직 같은 곳으로 본다
+        t.refresh()
+        assertEquals(PlaceInfo(jung, nb), t.info)
+        loc = LatLon(here.lat + 0.03, here.lon) // 약 3.3km: 옛 시군구를 '지금'으로 두지 않는다
+        t.refresh()
+        assertEquals(PlaceInfo(null, null), t.info)
+    }
+
+    @Test
+    fun clear하면_값과_기준_위치를_모두_지운다() {
+        val api = FakeApi({ jung }, { listOf(nb) })
+        val t = tracker(api)
+        t.refresh()
+        t.clear()
+        assertEquals(PlaceInfo(null, null), t.info)
+    }
 }

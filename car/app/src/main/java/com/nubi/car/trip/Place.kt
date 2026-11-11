@@ -14,7 +14,10 @@ data class PlaceAt(val code: String, val displayName: String, val level: Int, va
 data class Neighbor(val code: String, val displayName: String, val level: Int, val depop92: Boolean, val lat: Double, val lon: Double)
 
 /** 정차 화면이 읽는 '지금 있는 곳'과 '안 가 본 이웃'. 이웃은 [place]에 딸린 값이다. */
-data class PlaceInfo(val place: PlaceAt?, val neighbor: Neighbor?)
+data class PlaceInfo(val place: PlaceAt?, val neighbor: Neighbor?, val neighborsAllVisited: Boolean = false)
+
+/** 마지막 성공 조회 값이 새 위치에서 이만큼(m) 이상 떨어지면 '지금 있는 곳'으로 믿지 않고 비운다. */
+const val PLACE_STALE_DISTANCE_M = 2_000.0
 
 interface PlaceApi {
     /** 점이 속한 시군구. 못 찾으면(404) null. */
@@ -76,20 +79,36 @@ class PlaceTracker(
     var info: PlaceInfo = PlaceInfo(null, null)
         private set
 
+    private val generation = java.util.concurrent.atomic.AtomicInteger()
+
+    /** [info]를 만든 마지막 성공 조회의 좌표. 새 위치가 여기서 [PLACE_STALE_DISTANCE_M] 이상이면 [refresh]가 옛 값을 비운다. */
     @Volatile
-    private var generation = 0
+    private var infoAt: LatLon? = null
 
     /** debug reset 등: 보이던 값을 지우고 진행 중인 조회를 버린다. */
     fun clear() {
-        generation++
+        generation.incrementAndGet()
         info = PlaceInfo(null, null)
+        infoAt = null
     }
 
-    fun refresh() = attempt(++generation, 0L, false)
+    /**
+     * 조회를 시작한다. 새 위치가 마지막 성공 조회 지점에서 [PLACE_STALE_DISTANCE_M] 이상 떨어졌으면 오프라인 등으로 새 값을 못 받더라도
+     * 옛 시군구가 '지금'으로 남지 않도록 먼저 비운다(화면은 상태 문구로 돌아간다).
+     */
+    fun refresh() {
+        val at = location()
+        val last = infoAt
+        if (at != null && last != null && info.place != null && haversineM(last.lat, last.lon, at.lat, at.lon) >= PLACE_STALE_DISTANCE_M) {
+            info = PlaceInfo(null, null)
+            infoAt = null
+        }
+        attempt(generation.incrementAndGet(), 0L, false)
+    }
 
     private fun attempt(gen: Int, waited: Long, retried: Boolean) {
         run {
-            if (gen != generation) return@run
+            if (gen != generation.get()) return@run
             val id = vehicleId()
             val at = location()
             if (at == null) return@run // 위치를 아직 모르면 아무것도 하지 않는다(다음 정차·트립 종료 때 다시 조회)
@@ -106,19 +125,31 @@ class PlaceTracker(
     private fun fetch(gen: Int, at: LatLon, id: String): Boolean {
         try {
             val place = api.getRegionAt(at.lat, at.lon, id)
-            if (gen != generation) return true
+            if (gen != generation.get()) return true
             if (place == null) {
                 info = PlaceInfo(null, null) // 한국 밖 등: 확정된 '모름'이라 이전 값을 지운다
+                infoAt = null
                 return true
             }
-            val neighbor = try {
-                api.getNeighbors(place.code, id).firstOrNull()
+            var neighbor: Neighbor? = null
+            var allVisited = false
+            try {
+                val list = api.getNeighbors(place.code, id)
+                // '안 가 본 이웃'이므로 level 0인 첫 항목만 쓴다(서버가 안 가 본 곳을 앞에 둔다). 하나도 없으면 모두 가 본 것이다.
+                neighbor = list.firstOrNull { it.level == 0 }
+                allVisited = neighbor == null && list.isNotEmpty()
             } catch (e: Exception) {
                 Log.w(TAG, "이웃 조회 실패: ${e.javaClass.simpleName}")
                 // 같은 시군구면 마지막 이웃을 유지하고, 다른 시군구로 옮겼으면 옛 이웃을 버린다
-                if (info.place?.code == place.code) info.neighbor else null
+                if (info.place?.code == place.code) {
+                    neighbor = info.neighbor
+                    allVisited = info.neighborsAllVisited
+                }
             }
-            if (gen == generation) info = PlaceInfo(place, neighbor)
+            if (gen == generation.get()) {
+                info = PlaceInfo(place, neighbor, allVisited)
+                infoAt = at
+            }
             return true
         } catch (e: Exception) {
             Log.w(TAG, "현재 시군구 조회 실패: ${e.javaClass.simpleName}") // 마지막 성공 값 유지

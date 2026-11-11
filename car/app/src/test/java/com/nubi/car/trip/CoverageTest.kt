@@ -295,4 +295,21 @@ class CoverageTest {
         assertEquals(MatchingLine.None, t.matching)
         assertEquals("새 트립 시작 때 시군구 도감도 다시 받는다", before + 1, api.regionCalls)
     }
+
+    @Test
+    fun 트립_종료_매칭_폴링이_끝나면_onTripSettled를_부른다() {
+        val api = FakeApi(listOf({ done("counted", newKm = 1.0, before = 0.1, after = 0.2) }))
+        val t = CoverageTracker(api, direct, { "v" }, poller(api))
+        var settled = 0
+        t.onTripSettled = { settled++ }
+        t.onTripEnded("trip")
+        assertEquals(1, settled)
+        // 결과를 못 받고 시간이 다 돼도(None) 알린다. 새 트립이 시작돼 취소된 폴링은 알리지 않는다.
+        val none = FakeApi(listOf({ waiting("running") }))
+        val t2 = CoverageTracker(none, direct, { "v" }, poller(none))
+        var n2 = 0
+        t2.onTripSettled = { n2++ }
+        t2.onTripEnded("trip")
+        assertEquals(1, n2)
+    }
 }

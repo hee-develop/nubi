@@ -16,6 +16,7 @@ import android.text.Spanned
 import android.text.style.ForegroundColorSpan
 import android.util.Log
 import android.view.View
+import android.widget.LinearLayout
 import android.widget.TextView
 import com.nubi.car.trip.CoverageTracker
 import com.nubi.car.trip.Gear
@@ -37,7 +38,9 @@ import com.nubi.car.trip.formatRegionsDepop
 import com.nubi.car.trip.formatRegionsDex
 import com.nubi.car.trip.formatRoadLine
 import com.nubi.car.trip.limitText
-import com.nubi.car.trip.neighborCardVisible
+import com.nubi.car.trip.NeighborLayout
+import com.nubi.car.trip.narrowAppArea
+import com.nubi.car.trip.neighborLayout
 import com.nubi.car.trip.numbersVisible
 import com.nubi.car.trip.parseAccent
 import com.nubi.car.trip.stageDots
@@ -72,6 +75,12 @@ class MainActivity : Activity() {
     private var naviMessage: String? = null
     private var naviMessageFor: String? = null
 
+    /** 이번 렌더에서 카드에 보인 이웃(길안내 대상). 카드가 안 보이면 null. */
+    private var shownNeighbor: Neighbor? = null
+
+    /** 마지막으로 적용한 앱 영역 모드(좁음 여부). 아직 적용 전이면 null. */
+    private var appliedNarrow: Boolean? = null
+
     private val uxListener = CarUxRestrictionsManager.OnUxRestrictionsChangedListener { restrictions ->
         handler.post {
             applyRestrictions(restrictions)
@@ -99,6 +108,7 @@ class MainActivity : Activity() {
         v.permissionSettings.setOnClickListener { openAppSettings() }
         v.naviSight.setOnClickListener { navigate() }
         v.naviFestival.setOnClickListener { navigate() }
+        v.naviCompact.setOnClickListener { navigate() }
     }
 
     override fun onResume() {
@@ -221,7 +231,7 @@ class MainActivity : Activity() {
     }
 
     /**
-     * 높이가 모자라면(가로 2-window 등) 낮은 순위 줄부터 접는다. 순위: 상태(건강·저장·업로드) > 새 도로 > 시군구 > 인구감소지역 > 처음 지난 곳 > 이벤트 > 전국 > 샘플 > (거리) > 게스트 QR.
+     * 높이가 모자라면(두 앱을 나란히 연 좁은 영역 등) 낮은 순위 줄부터 접는다. 순위: 상태(건강·저장·업로드) > 새 도로 > 시군구 > 인구감소지역 > 처음 지난 곳 > 이벤트 > 전국 > 샘플 > (거리) > 게스트 QR.
      * 이미 보이기로 정한 줄만 대상이다. 화면 크기가 아직 정해지지 않았으면(0) 아무것도 접지 않는다.
      */
     private fun foldToFit() {
@@ -378,32 +388,57 @@ class MainActivity : Activity() {
         v.permissionConfirm.visibility = if (permanentlyDenied) View.GONE else View.VISIBLE
         v.permissionSettings.visibility = if (permanentlyDenied) View.VISIBLE else View.GONE
 
-        // 부가 요소(게스트 QR·이웃 카드·길안내 버튼): 기어 P이고 DO가 없을 때만. 이웃 카드는 앱 영역이 좁으면(2-window) 숨긴다.
+        // 부가 요소(게스트 QR·이웃 카드·길안내 버튼): 기어 P이고 DO가 없을 때만. 앱 영역이 좁으면(두 앱을 나란히 연 경우 등) 이웃 카드는 축약형이다.
         val extras = extrasVisible(showNumbers, distractionOptimized)
         v.guestCard.visibility = if (extras) View.VISIBLE else View.GONE
         val widthDp = (v.root.width / resources.displayMetrics.density).toInt()
-        val cardShown = neighborCardVisible(extras, widthDp, resources.getInteger(R.integer.neighbor_card_min_width_dp))
-        v.neighborCard.visibility = if (cardShown) View.VISIBLE else View.GONE
-        if (cardShown) renderNeighbor(info?.neighbor)
+        val minWidthDp = resources.getInteger(R.integer.neighbor_card_min_width_dp)
+        applyAreaMode(narrowAppArea(widthDp, minWidthDp))
+        val cardLayout = neighborLayout(extras, widthDp, minWidthDp)
+        v.neighborCard.visibility = if (cardLayout == NeighborLayout.HIDDEN) View.GONE else View.VISIBLE
+        shownNeighbor = null
+        if (cardLayout != NeighborLayout.HIDDEN) renderNeighbor(info?.neighbor, info?.neighborsAllVisited == true, cardLayout)
         foldToFit()
     }
 
-    private fun renderNeighbor(n: Neighbor?) {
-        v.neighborName.text = n?.displayName ?: getString(R.string.neighbor_unknown)
+    /** 좁은 앱 영역이면 본문을 세로로 쌓아(왼쪽 열은 너비 전체, 이웃 카드는 아래) 가로로 잘리지 않게 한다. 바뀔 때만 레이아웃 속성을 고친다. */
+    private fun applyAreaMode(narrow: Boolean) {
+        if (appliedNarrow == narrow) return
+        appliedNarrow = narrow
+        val gap = resources.getDimensionPixelSize(R.dimen.column_gap)
+        v.body.orientation = if (narrow) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+        v.leftColumn.layoutParams = if (narrow) {
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+        } else {
+            LinearLayout.LayoutParams(resources.getDimensionPixelSize(R.dimen.left_column_width), LinearLayout.LayoutParams.MATCH_PARENT)
+        }
+        v.neighborCard.layoutParams = if (narrow) {
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = gap / 2 }
+        } else {
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply { marginStart = gap }
+        }
+    }
+
+    private fun renderNeighbor(n: Neighbor?, allVisited: Boolean, layout: NeighborLayout) {
+        v.neighborName.text = n?.displayName ?: getString(if (allVisited) R.string.neighbor_all_visited else R.string.neighbor_unknown)
         v.depopTag.visibility = if (n?.depop92 == true) View.VISIBLE else View.GONE
-        // 목적지(이웃 중심점)를 모르면 길안내를 보낼 수 없으므로 항목 카드·버튼은 숨긴다.
+        // 목적지(이웃 중심점)를 모르거나 안 가 본 이웃이 없으면 항목 카드·길안내 버튼은 숨긴다.
         val hasNeighbor = n != null
-        v.poiRow.visibility = if (hasNeighbor) View.VISIBLE else View.GONE
-        v.poiSource.visibility = if (hasNeighbor) View.VISIBLE else View.GONE
+        val full = layout == NeighborLayout.FULL
+        v.poiRow.visibility = if (hasNeighbor && full) View.VISIBLE else View.GONE
+        v.poiSource.visibility = if (hasNeighbor && full) View.VISIBLE else View.GONE
+        v.naviCompact.visibility = if (hasNeighbor && !full) View.VISIBLE else View.GONE
+        shownNeighbor = n
         if (naviMessageFor != n?.code) naviMessage = null
         v.naviStatus.text = if (hasNeighbor) naviMessage ?: "" else ""
         v.naviStatus.visibility = if (hasNeighbor && naviMessage != null) View.VISIBLE else View.GONE
     }
 
-    /** 길안내 버튼: 이웃 시군구 중심점까지 NaviHelper로 경로를 요청한다. 주행 규제 중에는 버튼이 보이지 않지만 한 번 더 막는다. */
+    /** 길안내 버튼: 화면에 보인 이웃의 시군구 중심점까지 NaviHelper로 경로를 요청한다. 버튼이 안 보이는 상태(DO·기어 P 아님)에서는 한 번 더 막는다. */
     private fun navigate() {
-        if (distractionOptimized) return
-        val n = place.info.neighbor ?: return
+        val s = engine.status
+        if (!extrasVisible(numbersVisible(s.gear, s.state), distractionOptimized)) return
+        val n = shownNeighbor ?: return
         naviMessageFor = n.code
         navi.request(n.displayName, n.lat, n.lon) { ok ->
             naviMessage = getString(if (ok) R.string.navigate_sent else R.string.navigate_failed)

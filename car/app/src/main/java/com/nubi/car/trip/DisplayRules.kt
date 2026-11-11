@@ -61,5 +61,18 @@ fun usesParkedLayout(showNumbers: Boolean, distractionOptimized: Boolean, needsP
 /** 게스트 QR·이웃 카드·길안내 버튼 같은 부가 요소를 보일지: 숫자를 보여도 되고(기어 P) 주행 규제(DO)가 없을 때만. */
 fun extrasVisible(showNumbers: Boolean, distractionOptimized: Boolean): Boolean = showNumbers && !distractionOptimized
 
-/** 오른쪽 이웃 카드를 보일지: 부가 요소가 허용되고 앱 영역이 [minWidthDp] 이상일 때(가로 2-window처럼 좁으면 숨긴다). 너비를 모르면(0 이하) 숨기지 않는다. */
-fun neighborCardVisible(extrasVisible: Boolean, widthDp: Int, minWidthDp: Int): Boolean = extrasVisible && (widthDp <= 0 || widthDp >= minWidthDp)
+/** 이웃 카드의 모습: 숨김 / 전체(예시 항목 카드 2개 + 길안내 2개) / 축약(이웃 이름 + 인구감소 태그 + 길안내 1개). */
+enum class NeighborLayout { HIDDEN, FULL, COMPACT }
+
+/**
+ * 이웃 카드의 모습. 부가 요소가 허용되지 않으면([extrasVisible]=false) 숨기고, 앱 영역이 [fullMinWidthDp]보다 좁으면
+ * (사용자가 두 앱을 나란히 열어 각 앱에 좁은 영역이 주어진 경우 등) 축약형으로 보인다. 너비를 모르면(0 이하) 전체로 본다.
+ */
+fun neighborLayout(extrasVisible: Boolean, widthDp: Int, fullMinWidthDp: Int): NeighborLayout = when {
+    !extrasVisible -> NeighborLayout.HIDDEN
+    widthDp in 1 until fullMinWidthDp -> NeighborLayout.COMPACT
+    else -> NeighborLayout.FULL
+}
+
+/** 앱 영역이 좁아 세로로 쌓는 배치를 쓸지(이웃 카드가 없어도 왼쪽 열을 화면 너비에 맞춘다). 너비를 모르면 쓰지 않는다. */
+fun narrowAppArea(widthDp: Int, fullMinWidthDp: Int): Boolean = widthDp in 1 until fullMinWidthDp
