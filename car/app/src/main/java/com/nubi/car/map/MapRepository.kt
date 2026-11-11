@@ -306,6 +306,10 @@ class LivePoller(
     @Volatile
     var onChange: () -> Unit = {}
 
+    /** 응답이 올 때마다 마지막 점의 시군구(있으면). 음성 안내(처음 들어선 시군구)가 쓴다. 워커 스레드에서 불리고 예외는 폴링에 영향을 주지 않는다. */
+    @Volatile
+    var onRegion: (LiveRegion) -> Unit = {}
+
     /** 폴링을 켠다(이미 켜져 있으면 그대로). 첫 조회는 바로 한다. */
     fun start() {
         val g = synchronized(lock) {
@@ -408,6 +412,13 @@ class LivePoller(
             while (acc.size > maxWays) acc.remove(acc.keys.first())
             cursor = delta.cursor
             LiveState(delta.status, delta.upToSeq, acc.values.toList(), delta.region, delta.receivedAtMs, delta.cursor).also { repo.live = it } // lock 안에서 올려 clear와 엇갈리지 않게
+        }
+        state.region?.let {
+            try {
+                onRegion(it)
+            } catch (t: Throwable) {
+                Log.w("NubiMap", "시군구 알림 예외: ${t.javaClass.simpleName}")
+            }
         }
         if (before.upToSeq != state.upToSeq || before.ways.size != state.ways.size || before.region?.code != state.region?.code) {
             Log.i("NubiMap", "live 반영 ways=${state.ways.size} new=${state.newCount} +${delta.ways.size} upToSeq=${state.upToSeq} wall=${nowMs()}")

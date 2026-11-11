@@ -14,6 +14,8 @@ import com.nubi.car.screens.ExtrasController
 import com.nubi.car.screens.HttpExtrasApi
 import com.nubi.car.screens.IntroTracker
 import com.nubi.car.screens.UxState
+import com.nubi.car.voice.VoiceAdapter
+import com.nubi.car.voice.VoiceDirector
 import com.nubi.car.screens.qrAllowed
 import com.nubi.car.signals.VehicleInfo
 import java.io.File
