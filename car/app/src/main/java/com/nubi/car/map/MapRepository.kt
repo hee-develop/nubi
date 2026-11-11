@@ -65,7 +65,7 @@ class MapRepository(
             val cy = (box.minLat + box.maxLat) / 2
             // 화면 가운데에 가까운 칸부터 받는다
             for (key in cellsCovering(box, z, 30).sortedBy { k -> k.bbox().let { b -> sq((b.minLon + b.maxLon) / 2 - cx) + sq((b.minLat + b.maxLat) / 2 - cy) } }) {
-                if (!claim(key, baseCells.containsKey(key))) continue
+                if (!claim(key) { baseCells.containsKey(key) }) continue
                 submit(key) { gen ->
                     val cell = api.getBase(key, id)
                     synchronized(lock) { if (gen == generation) baseCells[key] = cell }
@@ -75,7 +75,7 @@ class MapRepository(
         if (regions) {
             val rz = regionZ(vp.zoom)
             for (key in regionCellsCovering(box, rz)) {
-                if (!claim(key, regionCells.containsKey(key))) continue
+                if (!claim(key) { regionCells.containsKey(key) }) continue
                 submit(key) { gen ->
                     val cell = api.getRegions(key, id)
                     synchronized(lock) { if (gen == generation) regionCells[key] = cell }
@@ -87,8 +87,8 @@ class MapRepository(
     private fun sq(d: Double) = d * d
 
     /** 이 칸을 지금 받아야 하면 true(받는 중으로 표시). 이미 있거나 받는 중이거나 최근 실패했으면 false. */
-    private fun claim(key: Any, have: Boolean): Boolean = synchronized(lock) {
-        if (have || key in inflight) return false
+    private fun claim(key: Any, have: () -> Boolean): Boolean = synchronized(lock) {
+        if (have() || key in inflight) return false
         val failed = failedAt[key]
         if (failed != null && nowMs() - failed < failBackoffMs) return false
         inflight.add(key)

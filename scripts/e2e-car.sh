@@ -179,6 +179,25 @@ run_flow road-coloring "e2e/maestro/car/road-coloring.yaml" "$ROOT/car/app/src/d
 echo "== 서버 검증: 도로 색칠"
 E2E_BASE_URL="$BASE_URL" node "$ROOT/scripts/verify-trip.mjs" --road-coloring "$ROOT/car/app/src/debug/assets/e2e-north.gpx" "$ROOT/car/app/src/debug/assets/e2e-sejong.gpx" | tee "$RUN_DIR/road-coloring-verify.txt"
 curl -fs "$BASE_URL/trips?vehicleId=$E2E_VEHICLE_ID&limit=200" >"$RUN_DIR/trips-final.json" || true
+echo "== 서버 검증: 주행 중 잠정 색칠(/trips/:id/live)"
+# 세종대로 트립에 주행 중 서버가 잠정 매칭을 돌려 way(isNew)를 쌓았는지, 마지막 점의 시군구가 붙는지, 그 지도 API가 바탕 도로를 주는지 본다
+SEJONG_TRIP="$(node "$ROOT/scripts/verify-trip.mjs" --exists "$BASE_URL" "$ROOT/car/app/src/debug/assets/e2e-sejong.gpx")"
+[ -n "$SEJONG_TRIP" ] || { echo "세종대로 트립을 찾지 못했습니다." >&2; exit 1; }
+curl -fs "$BASE_URL/trips/$SEJONG_TRIP/live" >"$RUN_DIR/live.json"
+curl -fs "$BASE_URL/map/base?bbox=126.96,37.55,127.04,37.60&z=14&vehicleId=$E2E_VEHICLE_ID" >"$RUN_DIR/map-base.json"
+node -e '
+const live = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+const base = JSON.parse(require("node:fs").readFileSync(process.argv[2], "utf8"));
+const fail = (m) => { console.error("실패: " + m); process.exit(1); };
+if (live.status !== "ready") fail("live.status=" + live.status);
+if (!(live.ways.length > 0)) fail("잠정 way가 없습니다");
+if (!live.ways.some((w) => w.isNew)) fail("처음 달린 잠정 way(isNew)가 없습니다");
+if (!live.region || !live.region.displayName) fail("live.region이 없습니다");
+if (!(base.ways.length > 0)) fail("/map/base가 way를 주지 않았습니다");
+const driven = base.ways.filter((w) => w.d).length;
+console.log("잠정 way " + live.ways.length + "개(새 길 " + live.ways.filter((w) => w.isNew).length + "), upToSeq=" + live.upToSeq + ", 지금 시군구=" + live.region.displayName + ", 바탕 way " + base.ways.length + "개 중 달린 길 " + driven + "개");
+if (driven === 0) fail("트립 종료 뒤 바탕 도로에 차량 인정 정보(d)가 없습니다");
+' "$RUN_DIR/live.json" "$RUN_DIR/map-base.json" | tee "$RUN_DIR/live-verify.txt"
 echo "== Maestro 실행: 시군구 색칠 (스크린샷: $SHOTS)"
 run_flow region-coloring "e2e/maestro/car/region-coloring.yaml" "$ROOT/car/app/src/debug/assets/e2e-junggu.gpx" 12 || { echo "Maestro(시군구 색칠) 실패" >&2; exit 1; }
 

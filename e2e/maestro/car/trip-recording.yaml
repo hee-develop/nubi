@@ -19,6 +19,17 @@ env:
 - assertVisible: '정차 중.*'
 - assertVisible: '게스트 QR'
 - assertVisible: '준비 중'
+# 정차 지도(사양 05a): 지도와 패널이 함께 보이고(패널의 게스트 QR이 위에서 이미 보임), 지도 버튼·레이어 토글이 있다.
+# 지도 뷰의 요약(contentDescription)은 debug 빌드에서만 있다: way=그린 way 수, live=잠정 way 수, new=처음 달린 잠정 way 수
+- extendedWaitUntil:
+    visible: '지도 way=.* roads=on regions=on .*'
+    timeout: 20000
+- assertVisible: '도로'
+- assertVisible: '시군구'
+- assertVisible: '내 위치'
+- assertVisible: '전국'
+- assertVisible: '\+'
+- assertVisible: '−'
 - takeScreenshot: ${SHOT_DIR}/01-idle
 
 # 2. 기어 D → 위치 30점(약 725m)을 1초 간격으로 재생. reset이 실제 위치 스트림을 끈 뒤(앞 단계)에 gpx를 시작하므로 섞이지 않는다.
@@ -32,12 +43,23 @@ env:
 - assertNotVisible: '샘플.*'
 - assertNotVisible: '거리.*'
 - assertNotVisible: '전국 .*'
-# 주행 중 화면(시안 03b): 보조 문구만 있고 카드·QR·버튼은 없다
-- assertVisible: '숫자와 지역 카드는 정차\(P\)하면 보여요'
+# 주행 중 화면(사양 05a): 앱 영역 전체 지도 + 위 한 줄(기록 중 · 지금 시군구)뿐이고 카드·QR·버튼은 없다
+- assertVisible: '지도 way=.*'
 - assertNotVisible: '게스트 QR'
 - assertNotVisible: '안 가 본 이웃'
 - assertNotVisible: '길안내'
 - assertNotVisible: '준비 중'
+- assertNotVisible: '도로'
+- assertNotVisible: '시군구'
+- assertNotVisible: '내 위치'
+- assertNotVisible: '전국'
+- assertNotVisible: '\+'
+- assertNotVisible: '−'
+- assertNotVisible: '숫자와 지역 카드는 정차\(P\)하면 보여요'
+# 지나온 길은 서버 응답을 기다리지 않고 로컬 궤적으로 바로 그려진다(점이 쌓이면 trail이 늘어난다)
+- extendedWaitUntil:
+    visible: '지도 .* trail=([5-9]|[1-9][0-9]+) .*'
+    timeout: 30000
 - takeScreenshot: ${SHOT_DIR}/02-recording
 
 # 3. 재생이 끝나 기어 P가 되면 숫자가 보인다: 샘플 30, 거리 500m 이상
@@ -48,6 +70,48 @@ env:
     visible: '거리 (5[0-9][0-9]|[6-9][0-9][0-9]|[0-9]{4,})m'
     timeout: 20000
 - takeScreenshot: ${SHOT_DIR}/03-samples
+
+# 3-1. 정차 지도 조작: 레이어 토글(도로·시군구), 확대·축소, 전국, 내 위치. 지도와 패널(샘플·거리 줄)이 같은 화면에 있다
+- assertVisible: '지도 way=.*'
+- tapOn: '도로'
+- extendedWaitUntil:
+    visible: '지도 .* roads=off .*'
+    timeout: 10000
+- assertVisible: '샘플 30'
+- tapOn: '도로'
+- extendedWaitUntil:
+    visible: '지도 .* roads=on .*'
+    timeout: 10000
+- tapOn: '시군구'
+- extendedWaitUntil:
+    visible: '지도 .* regions=off .*'
+    timeout: 10000
+- tapOn: '시군구'
+- extendedWaitUntil:
+    visible: '지도 .* regions=on .*'
+    timeout: 10000
+- tapOn: '내 위치'
+- extendedWaitUntil:
+    visible: '지도 .* z=14\.0 follow=on'
+    timeout: 10000
+- tapOn: '\+'
+- extendedWaitUntil:
+    visible: '지도 .* z=15\.0 follow=off'
+    timeout: 10000
+- tapOn: '−'
+- extendedWaitUntil:
+    visible: '지도 .* z=14\.0 follow=off'
+    timeout: 10000
+- takeScreenshot: ${SHOT_DIR}/03-map-parked
+- tapOn: '전국'
+- extendedWaitUntil:
+    visible: '지도 .* z=[89]\.[0-9] follow=off'
+    timeout: 10000
+- takeScreenshot: ${SHOT_DIR}/03-map-national
+- tapOn: '내 위치'
+- extendedWaitUntil:
+    visible: '지도 .* z=14\.0 follow=on'
+    timeout: 10000
 
 # 4. 기어 P 뒤 시계를 6분 뒤로 옮긴다 → 종료됨. flush로 서버에 전량 올린다(점이 이미 올라갔으면 End만 보내 '종료 전송 완료')
 - openLink: nubi-debug://signal?gear=P&now=${CLOCK_PLUS_6MIN}&flush=1
