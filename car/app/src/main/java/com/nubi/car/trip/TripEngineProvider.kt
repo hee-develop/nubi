@@ -53,6 +53,9 @@ object TripEngineProvider {
     private var summaryState: TripSummaryState? = null
 
     @Volatile
+    private var voiceAdapterRef: VoiceAdapter? = null
+
+    @Volatile
     private var thumbRepo: MapRepository? = null
 
     fun get(context: Context): TripEngine =
@@ -152,7 +155,7 @@ object TripEngineProvider {
         tracker = coverage
         val engine = TripEngine(clock, scheduler, Executors.newSingleThreadExecutor(), vehicle, store, uploader).also { it.onTripStarted = coverage::onTripStarted }
         // 정차(P) 진입 때와 트립 종료(매칭 폴링이 끝난 뒤) 때 마지막 채택 위치로 현재 시군구·이웃을 한 번 조회한다
-        val place = PlaceTracker(HttpPlaceApi(BuildConfig.SERVER_URL), Executors.newSingleThreadExecutor(), { vehicle.vehicleId }, { engine.status.lastLocation })
+        val place = PlaceTracker(HttpPlaceApi(BuildConfig.SERVER_URL), Executors.newSingleThreadExecutor(), { vehicle.vehicleId }, { engine.status.lastLocation }, paused = { engine.recordingPaused })
         placeTracker = place
         engine.onParked = place::refresh
         // 지도: 서버 칸·잠정 색칠은 워커 2개에서, 지연 예약은 데몬 스케줄러 하나에서 돈다. 주행 중 지도를 켠 경우 업로드를 20초 간격으로 당긴다(계약서 05 3장).
@@ -170,7 +173,9 @@ object TripEngineProvider {
         uploader.onPointsUploaded = { livePoller.kick() }
         engine.onLocationSample = { lat, lon, ts, recording -> screen.onLocationSample(lat, lon, ts, recording) }
         // 음성 안내(I01 처음 들어선 시군구·I03 하차 브리핑). TTS가 실패·미지원이면 아무 일도 하지 않는다
-        val voice = VoiceDirector(VoiceAdapter(context), { engine.status.gear }, { FeatureFlags.voice }, { SystemClock.elapsedRealtime() })
+        val voiceAdapter = VoiceAdapter(context)
+        voiceAdapterRef = voiceAdapter
+        val voice = VoiceDirector(voiceAdapter, { engine.status.gear }, { FeatureFlags.voice }, { SystemClock.elapsedRealtime() })
         livePoller.onRegion = { r -> if (r.firstTime) voice.onFirstRegion(r.code, r.displayName) }
         // 하차 요약 카드: 트립이 끝날 때 궤적 범위를 떠 두고(정산되면 원본 궤적이 지워진다), 정산이 끝나면 카드를 준비한다
         val tripSummary = TripSummaryState()
@@ -194,7 +199,7 @@ object TripEngineProvider {
             api = HttpExtrasApi(BuildConfig.SERVER_URL),
             executor = Executors.newSingleThreadExecutor { r -> Thread(r, "nubi-extras").apply { isDaemon = true } },
             vehicleId = { vehicle.vehicleId },
-            allowed = { qrAllowed(true, engine.status.gear, engine.status.state, UxState.distractionOptimized) },
+            allowed = { !UxState.blocked && qrAllowed(true, engine.status.gear, engine.status.state, false) },
             elapsedMs = { SystemClock.elapsedRealtime() },
             applySettings = { s ->
                 engine.recordingPaused = s.recordingBlocked
@@ -202,15 +207,23 @@ object TripEngineProvider {
                 FeatureFlags.applyServerDrivingMap(s.drivingMap)
             },
             onDataDeleted = {
-                coverage.clear()
-                place.clear()
-                introTracker?.clear()
-                screen.onTripSettled()
-                coverage.refreshNational()
-                coverage.refreshRegions()
+                // 1) 로컬 기록 멈춤을 먼저 켜고 저장, 2) 업로드 큐(dead-letter·서버 등록 포함)·진행 중 트립 버리기,
+                // 3) 요약 카드·궤적·잠정 결과·coverage·place·intro·지도 캐시 비우기
+                engine.purgeAfterDataDeletion()
+                purgeLocalViews(screen, coverage, place)
             },
+            applyLocalPause = { on ->
+                engine.recordingPaused = on
+                store.putString(TripEngine.KEY_PAUSED, if (on) "1" else "0")
+            },
+            gear = { engine.status.gear },
         )
         extrasController = extras
+        // 기어·QR: 기어가 바뀌면 말하는 중인 음성을 다시 확인하고 QR 요청 세대를 올린다
+        engine.addGearListener { _ ->
+            voiceAdapter.recheck()
+            extras.onGearChanged()
+        }
         introTracker = IntroTracker(HttpExtrasApi(BuildConfig.SERVER_URL), Executors.newSingleThreadExecutor { r -> Thread(r, "nubi-intro").apply { isDaemon = true } }, { SystemClock.elapsedRealtime() })
         // 정차(P) 진입 때 서버 설정을 다시 읽는다(폰에서 바꾼 기록 멈춤 등)
         val parkedBefore = engine.onParked
@@ -228,6 +241,30 @@ object TripEngineProvider {
             screen.onTripSettled(settledLocalId, engine.recordingLocalId)
         }
         return engine
+    }
+
+    /** 서비스가 시작됐다: 음성 재생을 다시 받는다. */
+    fun voiceOpen(context: Context) {
+        get(context)
+        voiceAdapterRef?.open()
+    }
+
+    /** 서비스 onDestroy·onTaskRemoved: 재생 중단 → 포커스 반납 → TTS 해제, 이후 새 재생·포커스 요청을 막는다. */
+    fun voiceRelease() {
+        voiceAdapterRef?.release()
+    }
+
+    /** 데이터 삭제 뒤 화면용 로컬 상태를 비운다(release 빌드에서도). 메인·워커 어느 스레드에서 불러도 된다. */
+    private fun purgeLocalViews(screen: MapScreen, coverage: CoverageTracker, place: PlaceTracker) {
+        summaryState?.onTripStarted()
+        introTracker?.clear()
+        coverage.clearAll()
+        place.clear()
+        screen.onTripStarted() // 로컬 궤적과 잠정 결과를 비운다
+        screen.onTripSettled() // 지도 캐시(달린 길·시군구 단계)를 버리고 다시 받는다
+        thumbRepo?.invalidate()
+        coverage.refreshNational()
+        coverage.refreshRegions()
     }
 
     /** 음성 켜기·끄기를 기기에 저장하고 플래그에 반영한다(서버 설정에 없는 항목이라 로컬에만 둔다). */

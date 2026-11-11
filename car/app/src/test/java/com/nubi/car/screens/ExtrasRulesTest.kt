@@ -23,9 +23,10 @@ class ExtrasRulesTest {
     }
 
     @Test
-    fun 기어를_못_읽는_차량은_기록_중이_아닐_때만_허용한다() {
+    fun 기어를_못_읽는_차량은_기록_중이_아닐_때만_메뉴를_허용하고_QR은_거부한다() {
         assertTrue(menuAllowed(true, null, TripState.IDLE, false))
         assertFalse(menuAllowed(true, null, TripState.RECORDING, false))
+        assertFalse("QR은 실제 기어가 P일 때만", qrAllowed(true, null, TripState.IDLE, false))
     }
 
     @Test

@@ -157,7 +157,7 @@ describe('M7 off 모드의 파괴적 API는 로컬 접속만(또는 차량 토�
     expect(viaProxy.status).toBe(403);
     // 조회·트립 쓰기(차량 앱 E2E 경로)는 원격에서도 기존대로
     expect((await call(e, '/vehicles/v1/settings', undefined, remote)).status).toBe(200);
-    expect((await call(e, '/trips', post('', { localId: 'l1', vehicleId: 'v1', driverId: 'v1', startedAt: '2026-11-09T00:00:00Z' }), remote)).status).toBe(201);
+    expect((await call(e, '/trips', post('', { localId: 'l1', vehicleId: 'v-untouched', driverId: 'v-untouched', startedAt: '2026-11-09T00:00:00Z' }), remote)).status).toBe(201); // v1은 위에서 데이터 삭제(동의 철회)를 했으므로 건드리지 않은 차량으로 본다
     expect((await call(e, '/coverage/summary?vehicleId=v1', undefined, remote)).status).toBe(200);
   });
 

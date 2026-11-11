@@ -15,6 +15,20 @@ import com.nubi.car.FeatureFlags
 import com.nubi.car.R
 import com.nubi.car.trip.parseAccent
 
+/** QR 요청 오류의 문구. */
+fun codeErrorRes(e: CodeError): Int = when (e) {
+    CodeError.NOT_PARKED -> R.string.code_error_not_parked
+    CodeError.GUEST_LIMIT -> R.string.code_error_guest_limit
+    CodeError.ALREADY_PAIRED -> R.string.code_error_already_paired
+    CodeError.UNAVAILABLE -> R.string.code_error_unavailable
+    CodeError.FAILED -> R.string.code_error_failed
+    CodeError.NO_VEHICLE -> R.string.code_error_no_vehicle
+    CodeError.RATE_LIMITED -> R.string.code_error_rate_limited
+    CodeError.FORBIDDEN -> R.string.code_error_forbidden
+    CodeError.LOCAL_ONLY -> R.string.code_error_local_only
+    CodeError.AUTH -> R.string.code_error_auth
+}
+
 /** 정차 메뉴 탭. 지도는 기존 정차 지도+패널 화면(본문)이다. */
 enum class MenuTab(val labelRes: Int, val tag: String) {
     MAP(R.string.tab_map, "tab_map"),
@@ -37,6 +51,8 @@ class ParkedMenu(
     private val extras: ExtrasController,
     /** 지금 시각(엔진 시계). 오늘 리포트 날짜에 쓴다. */
     private val nowMs: () -> Long,
+    /** 지금 메뉴를 써도 되는 상태인지(기어 P·DO·설정 금지·플래그). 눌림마다 한 번 더 확인한다(fail-closed). */
+    private val allowedNow: () -> Boolean,
     private val voiceOn: () -> Boolean,
     private val onVoiceToggle: (Boolean) -> Unit,
     private val onChange: () -> Unit,
@@ -71,12 +87,13 @@ class ParkedMenu(
                 text = activity.getString(tab.labelRes)
                 tag = tab.tag
                 contentDescription = null
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 26f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, TOUCH_TEXT_SP)
                 gravity = Gravity.CENTER
-                setPadding(dp(20f), dp(6f), dp(20f), dp(6f))
+                minHeight = dp(MIN_TOUCH_DP)
+                setPadding(dp(16f), dp(6f), dp(16f), dp(6f))
                 isClickable = true
                 isFocusable = true
-                setOnClickListener { select(tab) }
+                setOnClickListener { if (allowedNow()) select(tab) }
             }
             tabViews[tab] = tv
             tabStrip.addView(tv, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(8f) })
@@ -114,6 +131,33 @@ class ParkedMenu(
             }
             MenuTab.MAP -> Unit
         }
+    }
+
+    /**
+     * Back 키: 하위 상태에서는 한 단계만 되돌린다(내 지역 목록 → 설정, 데이터 지우기 확인 → 설정, QR → 닫기, 다른 탭 → 지도). 처리했으면 true,
+     * 최상위(지도 탭)에서는 false를 돌려줘 호출한 쪽이 `moveTaskToBack`을 한다.
+     */
+    fun handleBack(): Boolean {
+        if (scroll.visibility != View.VISIBLE && selected == MenuTab.MAP) return false
+        if (homePicking) {
+            homePicking = false
+        } else if (extras.deleteStep == DeleteStep.CONFIRM_1 || extras.deleteStep == DeleteStep.CONFIRM_2) {
+            extras.cancelDelete()
+        } else if (extras.pair != null) {
+            extras.closeCode(CodeKind.PAIR)
+        } else if (extras.share != null) {
+            extras.closeCode(CodeKind.SHARE)
+        } else if (extras.guest != null && selected == MenuTab.SETTINGS) {
+            extras.closeCode(CodeKind.GUEST)
+        } else if (selected != MenuTab.MAP) {
+            select(MenuTab.MAP)
+            return true
+        } else {
+            return false
+        }
+        shownSignature = null
+        onChange()
+        return true
     }
 
     private fun styleTabs() {
@@ -221,10 +265,11 @@ class ParkedMenu(
         val tv = TextView(activity).apply {
             text = label
             this.tag = tag
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 26f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, TOUCH_TEXT_SP)
             setTextColor(color(if (filled) R.color.on_accent else R.color.text))
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(28f), dp(14f), dp(28f), dp(14f))
+            minHeight = dp(MIN_TOUCH_DP)
+            setPadding(dp(28f), dp(12f), dp(28f), dp(12f))
             isClickable = true
             isFocusable = true
             background = GradientDrawable().apply {
@@ -232,7 +277,7 @@ class ParkedMenu(
                 setColor(color(if (filled) R.color.accent else R.color.panel2))
                 setStroke(dp(1.5f), color(if (filled) R.color.accent else R.color.line))
             }
-            setOnClickListener { onClick() }
+            setOnClickListener { if (allowedNow()) onClick() }
         }
         parent.addView(tv, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
             topMargin = dp(10f)
@@ -341,13 +386,7 @@ class ParkedMenu(
     private fun codeErrorText(kind: CodeKind) {
         val e = extras.codeError ?: return
         if (e.first != kind) return
-        val res = when (e.second) {
-            CodeError.NOT_PARKED -> R.string.code_error_not_parked
-            CodeError.GUEST_LIMIT -> R.string.code_error_guest_limit
-            CodeError.ALREADY_PAIRED -> R.string.code_error_already_paired
-            CodeError.UNAVAILABLE -> R.string.code_error_unavailable
-            CodeError.FAILED -> R.string.code_error_failed
-        }
+        val res = codeErrorRes(e.second)
         text(activity.getString(res), 22f, R.color.muted)
     }
 
@@ -361,7 +400,6 @@ class ParkedMenu(
         r.gravity = Gravity.CENTER_VERTICAL
         val img = ImageView(activity).apply {
             this.tag = tag
-            contentDescription = state.url.substringAfterLast('/').let { null }
             state.matrix?.let { setImageBitmap(qrBitmap(it)) }
             scaleType = ImageView.ScaleType.FIT_XY
         }
@@ -396,6 +434,11 @@ class ParkedMenu(
 
     private fun formatHint(hint: String, st: CodeState): String =
         hint.replace("%1\$s", st.code ?: "").replace("%2\$s", formatRemaining(remainingMs(st.receivedElapsedMs, android.os.SystemClock.elapsedRealtime())))
+
+    private companion object {
+        const val MIN_TOUCH_DP = 80f
+        const val TOUCH_TEXT_SP = 32f
+    }
 
     private fun onOff(b: Boolean) = activity.getString(if (b) R.string.on else R.string.off)
 
@@ -437,7 +480,7 @@ class ParkedMenu(
             if (n > 0) button(activity.getString(R.string.guest_end_all), "guest_end_all_tab", parent = r) { extras.endAllGuests(); onChange() }
             codeErrorText(CodeKind.GUEST)
         } else {
-            qrBlock(g, activity.getString(R.string.guest_code_format, "%1\$s", "%2\$s"), "guest_qr_tab") { extras.closeCode(CodeKind.GUEST); onChange() }
+            qrBlock(g, activity.getString(R.string.guest_code_inline, "%1\$s", "%2\$s"), "guest_qr_tab") { extras.closeCode(CodeKind.GUEST); onChange() }
         }
         if (n > 0) text(activity.getString(R.string.guest_count, n), 22f, R.color.muted)
     }
@@ -481,7 +524,10 @@ class ParkedMenu(
                 val c = chip(item.name, if (item.code == current) 3 else 0, false, false).apply {
                     tag = "home_" + item.code
                     isClickable = true
-                    setOnClickListener { extras.setHomeRegion(item.code); homePicking = false; shownSignature = null; onChange() }
+                    minHeight = dp(MIN_TOUCH_DP)
+                    gravity = Gravity.CENTER
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 28f)
+                    setOnClickListener { if (allowedNow()) { extras.setHomeRegion(item.code); homePicking = false; shownSignature = null; onChange() } }
                 }
                 flow.addView(c)
             }

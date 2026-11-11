@@ -23,7 +23,10 @@ class AuthTest {
     private val cipher = testCipher()
 
     @Before
-    fun before() = Auth.reset()
+    fun before() {
+        Auth.reset()
+        Auth.onUnauthorized = {}
+    }
 
     @After
     fun after() {
@@ -109,7 +112,7 @@ class AuthTest {
 
     // HTTP 계층: 실제 로컬 소켓 서버로 헤더와 401 훅을 본다 ------------------------------
 
-    private class OneShotServer(val status: Int) : AutoCloseable {
+    private class OneShotServer(val status: Int, val body: String = "{\"ok\":true}") : AutoCloseable {
         private val socket = ServerSocket(0)
         val port: Int get() = socket.localPort
 
@@ -126,7 +129,17 @@ class AuthTest {
                         sb.appendLine(line)
                     }
                     request = sb.toString()
-                    val body = "{\"ok\":true}"
+                    // 본문을 다 읽은 뒤 응답한다(안 읽고 닫으면 클라이언트가 연결 재설정을 받아 불안정하다)
+                    val len = Regex("(?i)content-length: *(\\d+)").find(request)?.groupValues?.get(1)?.toInt() ?: 0
+                    if (len > 0) {
+                        val buf = CharArray(len)
+                        var got = 0
+                        while (got < len) {
+                            val n = reader.read(buf, got, len - got)
+                            if (n < 0) break
+                            got += n
+                        }
+                    }
                     c.getOutputStream().write("HTTP/1.1 $status X\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n$body".toByteArray())
                 }
             } catch (e: Exception) {
@@ -174,9 +187,9 @@ class AuthTest {
     }
 
     @Test
-    fun 인증_거절_401과_403은_재등록_훅을_부르고_HttpFailure를_그대로_던진다() {
+    fun 인증_거절_401은_재등록_훅을_부르고_HttpFailure를_그대로_던진다() {
         Auth.token = "t"
-        for (code in listOf(401, 403)) {
+        for (code in listOf(401)) {
             var called = 0
             Auth.onUnauthorized = { called++ }
             OneShotServer(code).use { s ->
@@ -189,5 +202,55 @@ class AuthTest {
             }
             assertEquals(1, called)
         }
+    }
+
+    @Test
+    fun 재등록은_401과_unauthorized만_forbidden과_local_only와_not_parked는_인증_실패가_아니다() {
+        Auth.token = "t"
+        for ((status, body) in listOf(403 to "{\"error\":\"forbidden\"}", 403 to "{\"error\":\"local_only\"}", 403 to "{\"error\":\"not_parked\"}", 403 to "")) {
+            var called = 0
+            Auth.onUnauthorized = { called++ }
+            OneShotServer(status, body).use { s ->
+                try {
+                    getText("http://127.0.0.1:${s.port}", "/x")
+                    throw AssertionError("예외가 나야 한다")
+                } catch (e: HttpFailure) {
+                    assertEquals(status, e.status)
+                    assertEquals(body.takeIf { it.isNotEmpty() }?.substringAfter(":\"")?.substringBefore("\""), e.code)
+                }
+            }
+            assertEquals("403 $body 는 재등록 대상이 아니다", 0, called)
+        }
+        var called = 0
+        Auth.onUnauthorized = { called++ }
+        OneShotServer(403, "{\"error\":\"unauthorized\"}").use { s ->
+            try {
+                getText("http://127.0.0.1:${s.port}", "/x")
+            } catch (e: HttpFailure) {
+                assertEquals("unauthorized", e.code)
+            }
+        }
+        assertEquals(1, called)
+    }
+
+    @Test
+    fun 토큰이_없어도_성공_응답이면_인증_실패_표시가_풀린다() {
+        Auth.failed = true
+        Auth.token = null
+        OneShotServer(200).use { s -> getText("http://127.0.0.1:${s.port}", "/x") }
+        assertFalse(Auth.failed)
+    }
+
+    @Test
+    fun 재등록_시작은_원자적이라_한_번만_통과하고_이미_해_봤으면_실패_상태가_된다() {
+        assertTrue(Auth.beginReregister())
+        assertFalse("진행 중에는 두 번째가 시작하지 않는다", Auth.beginReregister())
+        assertFalse("진행 중 거절은 아직 실패가 아니다", Auth.failed)
+        Auth.finishReregister(true)
+        assertFalse(Auth.beginReregister())
+        assertTrue("재등록 뒤에도 거절되면 실패", Auth.failed)
+        Auth.onAuthorized()
+        assertFalse(Auth.failed)
+        assertTrue("성공 응답 뒤에는 다시 시도할 수 있다", Auth.beginReregister())
     }
 }

@@ -18,7 +18,7 @@ import com.nubi.car.trip.parseAccent
  * 하차 요약 카드 '이번 주행': 새 도로 km, 처음 지난 시군구, 그 트립의 범위에 맞춘 정적 지도 썸네일(별도 저장소를 쓰는 만지지 못하는 지도 뷰).
  * 화면 왼쪽 아래에 겹쳐 보이고 탭하면 닫힌다(30초 뒤 자동으로 닫히는 것은 [TripSummaryState]가 정한다). 주행 중·DO에서는 호출하는 쪽이 숨긴다.
  */
-class SummaryCard(private val activity: Activity, root: FrameLayout, thumbRepo: MapRepository, nowMs: () -> Long, private val onTap: () -> Unit) {
+class SummaryCard(private val activity: Activity, root: FrameLayout, private val thumbRepo: MapRepository, nowMs: () -> Long, private val onTap: () -> Unit) {
     private val density = activity.resources.displayMetrics.density
     private fun dp(v: Float) = (v * density).toInt()
 
@@ -63,6 +63,11 @@ class SummaryCard(private val activity: Activity, root: FrameLayout, thumbRepo: 
             leftMargin = dp(60f)
             bottomMargin = dp(60f)
         })
+    }
+
+    /** 화면이 사라질 때: 썸네일 저장소가 죽은 뷰를 붙들지 않게 리스너를 끊는다. */
+    fun release() {
+        thumbRepo.onChange = {}
     }
 
     private fun text(sp: Float, color: Int, bold: Boolean) = TextView(activity).apply {

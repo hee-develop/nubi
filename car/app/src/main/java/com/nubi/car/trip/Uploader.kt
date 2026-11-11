@@ -296,6 +296,41 @@ class Uploader(
             early.any { it is QueueEntry.End && it.localId == localId } ||
             pending.any { it.first is QueueEntry.End && it.first.localId == localId }
 
+    /** 한 트립의 큐 항목·서버 등록·보류 표시를 모두 버린다(서버가 paused로 거절했을 때). 버린 항목 수를 돌려준다. */
+    private fun dropTrip(localId: String): Int {
+        var n = 0
+        synchronized(lock) {
+            val it = entries.iterator()
+            while (it.hasNext()) {
+                val e = it.next()
+                if (e.localId == localId) {
+                    it.remove()
+                    n++
+                }
+            }
+            points.set(entries.count { it is QueueEntry.Point })
+            total.set(entries.size)
+            registrations.remove(localId)
+            held.remove(localId)
+            structVersion++
+            dirty = true
+        }
+        saveRegistrations()
+        return n
+    }
+
+    /** 사용자가 데이터를 지웠다(동의 철회): 큐·등록·dead-letter를 모두 지운다. 파일은 암호화된 빈 내용으로 다시 쓴다. */
+    fun clearAll() {
+        clear()
+        synchronized(deadLock) {
+            try {
+                if (::deadLetters.isInitialized && !memoryOnly) deadLetters.rewrite(emptyList())
+            } catch (t: Exception) {
+                Log.w(TAG, "dead-letter 비우기 실패: ${t.javaClass.simpleName}")
+            }
+        }
+    }
+
     fun clear() {
         synchronized(lock) {
             entries.clear()
@@ -525,6 +560,10 @@ class Uploader(
                         compact()
                         removed = 0
                     }
+                } catch (e: PausedByServer) {
+                    // 서버가 기록 멈춤·동의 철회로 받지 않는다: 이 트립의 큐 항목·등록을 재시도 없이 버린다(다른 트립은 계속)
+                    Log.i(TAG, "서버가 기록을 받지 않아(paused) 트립을 버림")
+                    removed += dropTrip(step.firstEntry.localId)
                 } catch (e: HttpFailure) {
                     val action = try {
                         classify(step, e, recreated)
@@ -652,6 +691,8 @@ class Uploader(
                 else -> Action.Hold(id, "HELD HTTP $s")
             }
             is Step.Alias -> when {
+                // 401·403은 인증 문제라 다시 보내면 달라질 수 있다: 버리지 않고 보류한다
+                s == 401 || s == 403 -> Action.Hold(id, "HELD HTTP $s")
                 // 400·409 등은 다시 보내도 같으니 dead-letter로 격리한다(보류하면 영영 재시도한다). 404(서버가 아직 모름)는 보류.
                 s == 404 -> Action.Hold(id, "HELD HTTP $s")
                 else -> Action.Isolate

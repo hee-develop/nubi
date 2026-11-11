@@ -24,11 +24,11 @@ interface ExtrasApi {
     fun dailyReport(vehicleId: String, date: String): Report
     fun monthlyReport(vehicleId: String, month: String): Report
 
-    /** 게스트 QR용 코드(P일 때만 서버가 낸다). */
-    fun guestCode(vehicleId: String): CodeInfo
+    /** 게스트 QR용 코드. [gear]는 **실제 기어**(서버가 P일 때만 낸다). */
+    fun guestCode(vehicleId: String, gear: String): CodeInfo
     fun guestSessions(vehicleId: String): Int
     fun guestEndAll(vehicleId: String): Int
-    fun pairCode(vehicleId: String): CodeInfo
+    fun pairCode(vehicleId: String, gear: String): CodeInfo
 
     /** 전국 공유 카드를 만들고 링크를 돌려준다. */
     fun shareNational(vehicleId: String): String
@@ -57,7 +57,7 @@ class HttpExtrasApi(private val baseUrl: String) : ExtrasApi {
 
     override fun monthlyReport(vehicleId: String, month: String) = parseReport(getText(baseUrl, "/reports/monthly?vehicleId=${enc(vehicleId)}&month=$month"))
 
-    override fun guestCode(vehicleId: String) = parseCode(postJson(baseUrl, "/guest/code", JSONObject().put("vehicleId", vehicleId).put("gear", "P")))
+    override fun guestCode(vehicleId: String, gear: String) = parseCode(postJson(baseUrl, "/guest/code", JSONObject().put("vehicleId", vehicleId).put("gear", gear)))
 
     override fun guestSessions(vehicleId: String): Int =
         try {
@@ -77,7 +77,7 @@ class HttpExtrasApi(private val baseUrl: String) : ExtrasApi {
             throw java.io.IOException("응답 형식 오류 guest/end-all")
         }
 
-    override fun pairCode(vehicleId: String) = parseCode(postJson(baseUrl, "/pair/code", JSONObject().put("vehicleId", vehicleId).put("gear", "P")))
+    override fun pairCode(vehicleId: String, gear: String) = parseCode(postJson(baseUrl, "/pair/code", JSONObject().put("vehicleId", vehicleId).put("gear", gear)))
 
     override fun shareNational(vehicleId: String) = parseShareUrl(postJson(baseUrl, "/share/cards", JSONObject().put("vehicleId", vehicleId).put("kind", "national")))
 

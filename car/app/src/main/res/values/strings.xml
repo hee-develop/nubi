@@ -50,16 +50,23 @@
     <string name="stage_stay">숙박</string>
     <string name="stage_format">%1$s %2$s</string>
     <string name="guest_qr_title">게스트 QR</string>
-    <string name="guest_qr_desc">동승자가 폰으로 스캔 · 정차 중에만</string>
+    <string name="guest_qr_desc">동승자가 폰으로 스캔\n정차 중에만</string>
     <string name="guest_add">같이 탄 사람 추가</string>
     <string name="guest_end_all">모두 내리기</string>
     <string name="guest_count">같이 탄 사람 %1$d명</string>
-    <string name="guest_code_format">코드 %1$s · 남은 시간 %2$s</string>
+    <string name="guest_code_format">코드 %1$s</string>
+    <string name="guest_time_format">남은 시간 %1$s</string>
+    <string name="guest_code_inline">코드 %1$s · 남은 시간 %2$s</string>
     <string name="code_error_not_parked">정차(P) 중에만 만들 수 있어요</string>
     <string name="code_error_guest_limit">같이 탈 수 있는 인원이 가득 찼어요</string>
     <string name="code_error_already_paired">이미 연결된 차예요</string>
     <string name="code_error_unavailable">지금은 만들 수 없어요</string>
     <string name="code_error_failed">QR을 만들지 못했어요</string>
+    <string name="code_error_no_vehicle">차량 확인 중이라 잠시 뒤 다시 눌러 주세요</string>
+    <string name="code_error_rate_limited">너무 자주 눌렀어요. 잠시 뒤 다시 눌러 주세요</string>
+    <string name="code_error_forbidden">이 차량에는 권한이 없어요</string>
+    <string name="code_error_local_only">이 서버는 차량 가까이에서만 쓸 수 있어요</string>
+    <string name="code_error_auth">서버 인증이 필요해요</string>
     <string name="neighbor_label">안 가 본 이웃</string>
     <string name="neighbor_unknown">이웃 정보 없음</string>
     <string name="neighbor_all_visited">이웃은 모두 가 봤어요</string>
@@ -134,7 +141,7 @@
     <string name="state_paused">기록 멈춤</string>
     <string name="auth_failed">서버 인증에 실패했어요</string>
     <!-- 지역 소개(05d) -->
-    <string name="poi_label">지금 있는 곳 소개</string>
+    <string name="poi_label">지금 여기: %1$s</string>
     <string name="poi_source_real">자료: 한국관광공사</string>
     <string name="poi_kind_food">맛집</string>
     <!-- 하차 요약 카드 -->

@@ -23,6 +23,12 @@ class VoiceGate(private val minIntervalMs: Long = MIN_INTERVAL_MS) {
     @Synchronized
     fun canSpeak(kind: VoiceKind, now: Long): Boolean = last[kind]?.let { now - it >= minIntervalMs } ?: true
 
+    /** **실제로 말하기 시작했을 때** 부른다(초기화 실패·포커스 거절로 말하지 못한 시도는 횟수를 쓰지 않는다). */
+    @Synchronized
+    fun record(kind: VoiceKind, now: Long) {
+        last[kind] = now
+    }
+
     @Synchronized
     fun tryAcquire(kind: VoiceKind, now: Long): Boolean {
         if (!canSpeak(kind, now)) return false
@@ -41,11 +47,12 @@ fun sanitizeRegionName(name: String): String? =
 /** I01. 예: `강원 홍천군에 처음 왔어요`. 숫자·질문 없음. 이름이 쓸 수 없으면 null. */
 fun firstRegionSentence(displayName: String): String? = sanitizeRegionName(displayName)?.let { "${it}에 처음 왔어요" }
 
-/** I03. 예: `오늘 새 도로 1.2킬로미터를 달렸어요`. 0.1km 미만이거나 값이 이상하면 null(말하지 않는다). */
+/** I03. 예: `이번 주행에서 새 도로 1.2킬로미터를 달렸어요`(값이 한 트립 기준이다). 0.1km 미만이거나 값이 이상하면 null(말하지 않는다). */
 fun briefingSentence(newKm: Double?): String? {
     if (newKm == null || !newKm.isFinite() || newKm < 0.05 || newKm >= 1000) return null
-    val text = String.format(Locale.US, "%.1f", newKm)
-    return "오늘 새 도로 ${text}킬로미터를 달렸어요"
+    // 100km 이상은 소수점을 읽지 않는다(5초 안에 들어가게)
+    val text = String.format(Locale.US, if (newKm >= 100) "%.0f" else "%.1f", newKm)
+    return "이번 주행에서 새 도로 ${text}킬로미터를 달렸어요"
 }
 
 /**
@@ -68,20 +75,26 @@ sealed interface Decision {
     data class Skip(val reason: String) : Decision
 }
 
+/** 지금 이 종류를 말해도 되는 상황인지(플래그·기어). 말하기 직전과 말하는 중에 다시 확인한다: I01은 주행 중(P가 아닌 기어)에만, I03은 정차 P에서만. */
+fun situationAllowed(kind: VoiceKind, flag: Boolean, gear: Gear?): Boolean {
+    if (!flag) return false
+    val driving = gear != null && gear != Gear.P
+    return when (kind) {
+        VoiceKind.FIRST_REGION -> driving
+        VoiceKind.ARRIVAL_BRIEFING -> gear == Gear.P
+    }
+}
+
 /**
- * 말할지 정한다. 순서: 플래그 → 상황(I01은 주행 중에만, I03은 정차 P에서만) → 문장 규칙 → 빈도 제한. 빈도 제한은 마지막에 확인하고 통과하면 기록한다.
- * 주행 중(P가 아닌 기어)에는 I01만 허용하고 숫자가 들어간 문장은 말하지 않는다.
+ * 말할지 정한다. 순서: 플래그·상황 → 문장(5초 이내, 질문 아님, 주행 중 숫자 없음) → 빈도(같은 종류 10분에 1회, **확인만** 하고 기록은 실제로 말하기 시작할 때 [VoiceGate.record]).
  */
 fun decide(kind: VoiceKind, text: String?, flag: Boolean, gear: Gear?, gate: VoiceGate, now: Long): Decision {
     if (!flag) return Decision.Skip("꺼짐")
-    val driving = gear != null && gear != Gear.P
-    when (kind) {
-        VoiceKind.FIRST_REGION -> if (!driving) return Decision.Skip("주행 중 아님")
-        VoiceKind.ARRIVAL_BRIEFING -> if (gear != Gear.P) return Decision.Skip("정차 아님")
-    }
+    if (!situationAllowed(kind, flag, gear)) return Decision.Skip(if (kind == VoiceKind.FIRST_REGION) "주행 중 아님" else "정차 아님")
     if (text == null) return Decision.Skip("문장 없음")
+    val driving = gear != null && gear != Gear.P
     if (driving && text.any { it.isDigit() }) return Decision.Skip("주행 중 숫자 금지")
     if (!isValidSentence(text)) return Decision.Skip("문장 규칙")
-    if (!gate.tryAcquire(kind, now)) return Decision.Skip("빈도 제한")
+    if (!gate.canSpeak(kind, now)) return Decision.Skip("빈도 제한")
     return Decision.Speak(text)
 }

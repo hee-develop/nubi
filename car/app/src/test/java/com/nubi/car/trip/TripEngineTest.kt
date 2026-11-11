@@ -62,15 +62,43 @@ class TripEngineTest {
     }
 
     @Test
+    fun 데이터_삭제_뒤에는_멈춤을_켜고_저장한_뒤_진행_중_트립과_큐를_모두_버린다() {
+        vehicle.vehicleId = "hash"
+        val failing = FakeServer().apply { onPoints = { _, _ -> throw HttpFailure(503, "down") } } // 업로드가 안 돼 큐가 쌓인다
+        val e = engine(uploader(failing))
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.drive(8)
+        assertEquals(TripState.RECORDING, e.status.state)
+        assertTrue(e.status.pendingPoints > 0)
+        assertNotNull(e.recordingLocalId)
+        e.purgeAfterDataDeletion()
+        assertTrue("멈춤은 즉시 켜진다", e.recordingPaused)
+        assertEquals("저장도 한다", "1", store.getString(TripEngine.KEY_PAUSED))
+        scheduler.runPosted()
+        assertEquals(0, e.status.pendingPoints)
+        assertEquals(TripState.IDLE, e.status.state)
+        assertNull(e.recordingLocalId)
+        assertEquals(0, e.status.sampleCount)
+        // 이후 위치 샘플은 버려져 새 트립이 시작되지 않는다
+        e.drive(6, firstIndex = 20)
+        assertEquals(TripState.IDLE, e.status.state)
+        assertTrue(failing.events.none { it.startsWith("end") })
+    }
+
+    @Test
     fun 기어가_바뀌면_알린다() {
         val e = engine()
         val seen = ArrayList<Gear?>()
         e.onGearChange = { seen.add(it) }
         e.onServiceStart()
         e.onGear(Gear.D)
+        val viaListener = ArrayList<Gear?>()
+        e.addGearListener { viaListener.add(it) }
         e.onGear(Gear.P)
         scheduler.runPosted()
         assertEquals(listOf<Gear?>(Gear.D, Gear.P), seen)
+        assertEquals(listOf<Gear?>(Gear.D, Gear.P), viaListener)
     }
 
     @Test

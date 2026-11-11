@@ -1,5 +1,6 @@
 package com.nubi.car.screens
 
+import com.nubi.car.trip.Gear
 import com.nubi.car.trip.HttpFailure
 import com.nubi.car.trip.directExecutor
 import org.json.JSONObject
@@ -16,6 +17,7 @@ class ExtrasControllerTest {
         val puts = ArrayList<JSONObject>()
         var deleted = 0
         var guestFails: Int? = null
+        var guestCode: String? = null
         var guestCalls = 0
         override fun getSettings(vehicleId: String) = settings
         override fun putSettings(vehicleId: String, patch: JSONObject): ServerSettings {
@@ -32,27 +34,32 @@ class ExtrasControllerTest {
         override fun roads(vehicleId: String, almostOnly: Boolean, limit: Int) = listOf(RoadItem("k", "세종대로", 85.0, 850, 1000, false))
         override fun dailyReport(vehicleId: String, date: String) = Report(1, 2.0, 1.5, 0.0, listOf("서울 중구"), 1)
         override fun monthlyReport(vehicleId: String, month: String) = Report(3, 9.0, 4.0, 0.5, emptyList(), 2)
-        override fun guestCode(vehicleId: String): CodeInfo {
+        val gears = ArrayList<String>()
+        override fun guestCode(vehicleId: String, gear: String): CodeInfo {
             guestCalls++
-            guestFails?.let { throw HttpFailure(it, "HTTP $it") }
+            gears.add(gear)
+            guestFails?.let { throw HttpFailure(it, "HTTP $it", guestCode) }
             return CodeInfo("123456", "http://x/g/123456", 0)
         }
         override fun guestSessions(vehicleId: String) = 2
         override fun guestEndAll(vehicleId: String) = 2
-        override fun pairCode(vehicleId: String) = CodeInfo("654321", "http://x/p/654321", 0)
+        override fun pairCode(vehicleId: String, gear: String) = CodeInfo("654321", "http://x/p/654321", 0)
         override fun shareNational(vehicleId: String) = "http://x/s/abc"
         override fun intro(code: String, lat: Double?, lon: Double?) = Intro(code, true, emptyList())
     }
 
     private var parked = true
+    private var gear: Gear? = Gear.P
+    private var localPaused: Boolean? = null
     private var applied: ServerSettings? = null
     private var deletedHook = 0
     private var clock = 0L
     private val api = FakeApi()
 
-    private fun controller() = ExtrasController(
-        api, directExecutor, { "vid" }, { parked }, { clock },
+    private fun controller(executor: java.util.concurrent.Executor = directExecutor) = ExtrasController(
+        api, executor, { "vid" }, { parked }, { clock },
         applySettings = { applied = it }, onDataDeleted = { deletedHook++ },
+        applyLocalPause = { localPaused = it }, gear = { gear },
     )
 
     @Test
@@ -130,7 +137,7 @@ class ExtrasControllerTest {
     fun 받는_사이_기어가_바뀌면_QR을_보이지_않고_버린다() {
         val c = ExtrasController(
             object : ExtrasApi by api {
-                override fun guestCode(vehicleId: String): CodeInfo {
+                override fun guestCode(vehicleId: String, gear: String): CodeInfo {
                     parked = false // 응답을 기다리는 사이 D로
                     return CodeInfo("111111", "http://x/g/111111", 0)
                 }
@@ -160,6 +167,7 @@ class ExtrasControllerTest {
         c.requestGuestCode()
         assertEquals(CodeKind.GUEST to CodeError.GUEST_LIMIT, c.codeError)
         api.guestFails = 403
+        api.guestCode = "not_parked"
         c.requestGuestCode()
         assertEquals(CodeError.NOT_PARKED, c.codeError!!.second)
         api.guestFails = 500
@@ -186,5 +194,142 @@ class ExtrasControllerTest {
         assertEquals("http://x/s/abc", c.share!!.url)
         assertNull(c.share!!.code)
         assertEquals("654321", c.pair!!.code)
+    }
+
+    @Test
+    fun 기록_멈춤_켜기는_서버를_기다리지_않고_로컬에_바로_적용하고_실패하면_다시_보낸다() {
+        val failing = object : ExtrasApi by api {
+            var fail = true
+            override fun putSettings(vehicleId: String, patch: JSONObject): ServerSettings {
+                if (fail) throw java.io.IOException("offline")
+                return api.putSettings(vehicleId, patch)
+            }
+        }
+        val c = ExtrasController(failing, directExecutor, { "vid" }, { parked }, { clock }, applySettings = { applied = it }, applyLocalPause = { localPaused = it }, gear = { gear })
+        c.refreshSettings()
+        c.setPaused(true)
+        assertEquals("오프라인이어도 로컬은 멈춘다", true, localPaused)
+        assertTrue(c.pausePending)
+        assertTrue(c.settings!!.recordingPaused)
+        // 서버 설정을 읽으려 해도(옛 값 false) 대기 중인 멈춤을 덮어쓰지 않는다
+        c.refreshSettings()
+        assertTrue(c.pausePending)
+        assertEquals(true, localPaused)
+        failing.fail = false
+        c.syncPendingPause()
+        assertFalse(c.pausePending)
+        assertTrue(applied!!.recordingPaused)
+    }
+
+    @Test
+    fun 기록_멈춤_끄기는_서버가_확인한_뒤에만_적용한다() {
+        val failing = object : ExtrasApi by api {
+            override fun putSettings(vehicleId: String, patch: JSONObject): ServerSettings = throw java.io.IOException("offline")
+        }
+        api.settings = api.settings.copy(recordingPaused = true)
+        val c = ExtrasController(failing, directExecutor, { "vid" }, { parked }, { clock }, applySettings = { applied = it }, applyLocalPause = { localPaused = it }, gear = { gear })
+        c.refreshSettings()
+        c.setPaused(false)
+        assertNull("서버가 확인하기 전에는 로컬 멈춤을 풀지 않는다", localPaused)
+        assertTrue(applied!!.recordingPaused)
+    }
+
+    @Test
+    fun 데이터_삭제_뒤_설정_조회가_실패해도_로컬_정리는_이미_끝났다() {
+        var order = ""
+        val failing = object : ExtrasApi by api {
+            override fun deleteData(vehicleId: String) { order += "D"; api.deleteData(vehicleId) }
+            override fun getSettings(vehicleId: String): ServerSettings = throw java.io.IOException("offline")
+        }
+        val c = ExtrasController(failing, directExecutor, { "vid" }, { parked }, { clock }, applySettings = { applied = it }, onDataDeleted = { order += "P" }, applyLocalPause = { localPaused = it }, gear = { gear })
+        c.startDelete(); c.confirmDeleteFirst(); c.confirmDeleteFinal()
+        assertEquals("서버 삭제 성공 뒤에 로컬 정리", "DP", order)
+        assertEquals(DeleteStep.DONE, c.deleteStep)
+        assertTrue("설정 조회 실패는 표시만 하고 로컬 상태를 되돌리지 않는다", c.settingsError)
+        assertNull("삭제 전 읽어 둔 설정이 없으니 풀린 적도 없다", applied)
+    }
+
+    @Test
+    fun 삭제_실행기가_작업을_거절하면_FAILED로_두고_다시_시도할_수_있다() {
+        val rejecting = java.util.concurrent.Executor { throw java.util.concurrent.RejectedExecutionException("full") }
+        val c = controller(rejecting)
+        c.startDelete(); c.confirmDeleteFirst(); c.confirmDeleteFinal()
+        assertEquals(DeleteStep.FAILED, c.deleteStep)
+        assertEquals(0, api.deleted)
+        c.startDelete()
+        assertEquals("실패 뒤 다시 시작할 수 있다", DeleteStep.CONFIRM_1, c.deleteStep)
+    }
+
+    @Test
+    fun 삭제_서버_호출이_던지면_FAILED이고_로컬_정리를_하지_않는다() {
+        val boom = object : ExtrasApi by api {
+            override fun deleteData(vehicleId: String) = throw IllegalStateException("x")
+        }
+        val c = ExtrasController(boom, directExecutor, { "vid" }, { parked }, { clock }, applySettings = { }, onDataDeleted = { deletedHook++ }, gear = { gear })
+        c.startDelete(); c.confirmDeleteFirst(); c.confirmDeleteFinal()
+        assertEquals(DeleteStep.FAILED, c.deleteStep)
+        assertEquals(0, deletedHook)
+    }
+
+    @Test
+    fun 화면을_쓸_수_없는_상태에서는_삭제와_설정_변경을_받지_않는다() {
+        val c = controller()
+        parked = false
+        c.startDelete()
+        assertEquals(DeleteStep.NONE, c.deleteStep)
+        c.setPaused(true)
+        assertNull(localPaused)
+        c.setDrivingMap(false)
+        assertTrue(api.puts.isEmpty())
+    }
+
+    @Test
+    fun QR은_실제_기어_P일_때만_받고_서버에_실제_기어를_보낸다_기어를_모르면_거부() {
+        val c = controller()
+        gear = null
+        c.requestGuestCode()
+        assertEquals(0, api.guestCalls)
+        gear = Gear.P
+        c.requestGuestCode()
+        assertEquals(listOf("P"), api.gears)
+    }
+
+    @Test
+    fun 기어가_바뀌면_세대가_올라가_늦게_온_QR_응답은_버려진다() {
+        var ctl: ExtrasController? = null
+        val slow = object : ExtrasApi by api {
+            override fun guestCode(vehicleId: String, gear: String): CodeInfo {
+                ctl!!.onGearChanged() // 기어가 바뀌었다가(이벤트) 다시 P로 돌아왔다
+                return CodeInfo("222222", "http://x/g/222222", 0)
+            }
+        }
+        val c = ExtrasController(slow, directExecutor, { "vid" }, { parked }, { clock }, applySettings = { }, gear = { gear })
+        ctl = c
+        c.requestGuestCode()
+        assertNull("기어가 바뀌는 사이 온 응답은 P로 돌아와도 보이지 않는다", c.guest)
+    }
+
+    @Test
+    fun 오류는_원인별로_다르다_403은_not_parked_forbidden_local_only를_구분한다() {
+        val c = controller()
+        for ((status, code, expect) in listOf(
+            Triple(403, "not_parked", CodeError.NOT_PARKED),
+            Triple(403, "forbidden", CodeError.FORBIDDEN),
+            Triple(403, "local_only", CodeError.LOCAL_ONLY),
+            Triple(401, "unauthorized", CodeError.AUTH),
+            Triple(429, "too_many_requests", CodeError.RATE_LIMITED),
+        )) {
+            api.guestFails = status
+            api.guestCode = code
+            c.requestGuestCode()
+            assertEquals("$status $code", expect, c.codeError!!.second)
+        }
+    }
+
+    @Test
+    fun 차량_ID가_없으면_전용_오류() {
+        val c = ExtrasController(api, directExecutor, { null }, { parked }, { clock }, applySettings = { }, gear = { gear })
+        c.requestGuestCode()
+        assertEquals(CodeKind.GUEST to CodeError.NO_VEHICLE, c.codeError)
     }
 }

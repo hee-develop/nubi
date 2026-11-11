@@ -234,6 +234,15 @@ if (items.length !== 0) { console.error("실패: 데이터 지우기 뒤에도 �
 if (!s.consentWithdrawnAt) { console.error("실패: 위치정보 동의 철회가 기록되지 않았습니다"); process.exit(1); }
 console.log("데이터 지우기 확인: 트립 0개, 동의 철회 " + s.consentWithdrawnAt);
 ' "$RUN_DIR/trips-after-delete.json" "$RUN_DIR/settings-after-delete.json" | tee "$RUN_DIR/delete-verify.txt"
+# 삭제 뒤 몇 초가 지나도 차량 앱이 옛 큐를 다시 올리거나 새 트립을 만들지 않는다(로컬 큐 정리·기록 멈춤, 서버도 차단)
+sleep 8
+curl -fs "$BASE_URL/trips?vehicleId=$E2E_VEHICLE_ID&limit=200" >"$RUN_DIR/trips-after-delete-wait.json"
+node -e '
+const t = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+const items = Array.isArray(t) ? t : (t.items ?? t.trips ?? []);
+if (items.length !== 0) { console.error("실패: 삭제 뒤 기다리는 사이 트립이 " + items.length + "개 다시 생겼습니다"); process.exit(1); }
+console.log("삭제 8초 뒤에도 트립 0개");
+' "$RUN_DIR/trips-after-delete-wait.json" | tee -a "$RUN_DIR/delete-verify.txt"
 verify_voice | tee -a "$RUN_DIR/delete-verify.txt"
 write_summary
 echo "== 통과. 산출물: $RUN_DIR"

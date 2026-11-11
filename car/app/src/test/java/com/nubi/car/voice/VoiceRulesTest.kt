@@ -23,8 +23,8 @@ class VoiceRulesTest {
 
     @Test
     fun 하차_브리핑_문장() {
-        assertEquals("오늘 새 도로 1.2킬로미터를 달렸어요", briefingSentence(1.23))
-        assertEquals("오늘 새 도로 0.1킬로미터를 달렸어요", briefingSentence(0.1))
+        assertEquals("이번 주행에서 새 도로 1.2킬로미터를 달렸어요", briefingSentence(1.23))
+        assertEquals("이번 주행에서 새 도로 0.1킬로미터를 달렸어요", briefingSentence(0.1))
         assertNull(briefingSentence(0.0))
         assertNull(briefingSentence(0.04))
         assertNull(briefingSentence(null))
@@ -92,26 +92,79 @@ class VoiceRulesTest {
         assertTrue(decide(VoiceKind.ARRIVAL_BRIEFING, null, true, Gear.P, VoiceGate(), 0) is Decision.Skip)
     }
 
+    private class FakeSpeaker(val start: Boolean = true) : Speaker {
+        val said = ArrayList<Pair<String, VoiceKind>>()
+        var lastAllowed: (() -> Boolean)? = null
+        override fun speak(text: String, kind: VoiceKind, stillAllowed: () -> Boolean, onStarted: () -> Unit): Boolean {
+            said.add(text to kind)
+            lastAllowed = stillAllowed
+            if (start) onStarted()
+            return true
+        }
+    }
+
     @Test
     fun 디렉터는_같은_시군구를_한_트립에_한_번만_말하고_실패해도_크래시하지_않는다() {
-        val said = ArrayList<Pair<String, VoiceKind>>()
+        val sp = FakeSpeaker()
         var gear: Gear? = Gear.D
         var clock = 0L
-        val d = VoiceDirector({ t, k -> said.add(t to k); true }, { gear }, { true }, { clock })
+        val d = VoiceDirector(sp, { gear }, { true }, { clock })
         d.onFirstRegion("11110", "서울 종로구")
         d.onFirstRegion("11110", "서울 종로구")
-        assertEquals(listOf("서울 종로구에 처음 왔어요" to VoiceKind.FIRST_REGION), said)
-        // 10분 안의 다른 시군구는 빈도 제한
+        assertEquals(listOf("서울 종로구에 처음 왔어요" to VoiceKind.FIRST_REGION), sp.said)
+        // 10분 안의 다른 시군구는 빈도 제한, 지나간 일이라 나중에도 다시 말하지 않는다
         clock = 5 * min
         d.onFirstRegion("11140", "서울 중구")
-        assertEquals(1, said.size)
+        assertEquals(1, sp.said.size)
+        clock = 20 * min
+        d.onFirstRegion("11140", "서울 중구")
+        assertEquals("건너뛴 시군구는 10분 뒤에도 말하지 않는다", 1, sp.said.size)
         // 정차 후 하차 브리핑은 따로 센다
         gear = Gear.P
         d.onTripSettled(1.2)
-        assertEquals("오늘 새 도로 1.2킬로미터를 달렸어요", said.last().first)
+        assertEquals("이번 주행에서 새 도로 1.2킬로미터를 달렸어요", sp.said.last().first)
         // 말하기가 던져도 삼킨다
-        val boom = VoiceDirector({ _, _ -> throw IllegalStateException("tts") }, { Gear.D }, { true }, { 0 })
+        val boom = VoiceDirector({ _, _, _, _ -> throw IllegalStateException("tts") }, { Gear.D }, { true }, { 0 })
         boom.onFirstRegion("1", "서울 중구")
         boom.onTripSettled(1.0)
+    }
+
+    @Test
+    fun 말하기가_시작되지_않으면_빈도_횟수를_쓰지_않고_같은_시군구를_다시_시도한다() {
+        val sp = FakeSpeaker(start = false) // 초기화 실패·포커스 거절 등
+        val d = VoiceDirector(sp, { Gear.D }, { true }, { 0 })
+        d.onFirstRegion("11110", "서울 종로구")
+        d.onFirstRegion("11110", "서울 종로구")
+        assertEquals("시작하지 못했으니 다음 응답에서 다시 시도한다", 2, sp.said.size)
+        val ok = FakeSpeaker()
+        val d2 = VoiceDirector(ok, { Gear.D }, { true }, { 0 })
+        d2.onFirstRegion("11110", "서울 종로구")
+        d2.onFirstRegion("11140", "서울 중구")
+        assertEquals("시작했으면 10분 제한이 걸린다", 1, ok.said.size)
+    }
+
+    @Test
+    fun 재생_직전_확인_콜백은_기어가_바뀌면_거짓이다() {
+        val sp = FakeSpeaker()
+        var gear: Gear? = Gear.D
+        var flag = true
+        val d = VoiceDirector(sp, { gear }, { flag }, { 0 })
+        d.onFirstRegion("11110", "서울 종로구")
+        val allowed = sp.lastAllowed!!
+        assertTrue(allowed())
+        gear = Gear.P
+        assertFalse("P가 되면 I01은 더 이상 허용되지 않는다", allowed())
+        gear = Gear.D
+        flag = false
+        assertFalse("플래그가 꺼져도 마찬가지", allowed())
+        // I03은 P에서만 허용
+        val sp2 = FakeSpeaker()
+        gear = Gear.P
+        flag = true
+        VoiceDirector(sp2, { gear }, { flag }, { 0 }).onTripSettled(2.0)
+        val a2 = sp2.lastAllowed!!
+        assertTrue(a2())
+        gear = Gear.D
+        assertFalse(a2())
     }
 }

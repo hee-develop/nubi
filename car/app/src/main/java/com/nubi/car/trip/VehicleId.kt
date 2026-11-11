@@ -73,13 +73,9 @@ class VehicleIdResolver(
      * 실패하거나 이미 한 번 해 본 뒤라면 [Auth.failed]를 켠다(화면이 상태 문구를 보인다). 업로드 큐는 건드리지 않는다.
      */
     fun onUnauthorized() {
-        if (Auth.reregistered) {
-            Auth.failed = true
-            return
-        }
-        Auth.reregistered = true
+        if (!Auth.beginReregister()) return // 진행 중이거나(결과를 기다림) 이미 해 봤다(beginReregister가 실패 상태를 켠다)
         runAlways {
-            if (!refreshToken()) Auth.failed = true
+            Auth.finishReregister(refreshToken())
         }
     }
 

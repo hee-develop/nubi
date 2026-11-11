@@ -500,6 +500,15 @@
                         android:visibility="gone" />
 
                     <TextView
+                        android:id="@+id/guest_time"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textColor="@color/accent"
+                        android:textSize="@dimen/text_sub"
+                        android:textStyle="bold"
+                        android:visibility="gone" />
+
+                    <TextView
                         android:id="@+id/guest_count"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
@@ -550,19 +559,25 @@
             </LinearLayout>
         </LinearLayout>
 
-        <!-- 오른쪽 이웃 카드 -->
+        <!-- 오른쪽 열: 위는 이웃 카드(안 가 본 이웃 + 길안내 1개), 아래는 지금 여기 소개 카드(관광지·축제 + 길안내) -->
         <LinearLayout
             android:id="@+id/neighbor_card"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_marginStart="@dimen/column_gap"
             android:layout_weight="1"
+            android:orientation="vertical">
+
+        <LinearLayout
+            android:id="@+id/neighbor_inner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
             android:background="@drawable/bg_card"
             android:orientation="vertical"
             android:paddingStart="@dimen/card_pad_h"
-            android:paddingTop="@dimen/card_pad_v"
+            android:paddingTop="20dp"
             android:paddingEnd="@dimen/card_pad_h"
-            android:paddingBottom="@dimen/card_pad_v">
+            android:paddingBottom="20dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -589,7 +604,7 @@
                         android:maxLines="1"
                         android:ellipsize="end"
                         android:textColor="@color/text"
-                        android:textSize="@dimen/text_big"
+                        android:textSize="@dimen/text_poi"
                         android:textStyle="bold" />
                 </LinearLayout>
 
@@ -629,11 +644,27 @@
                     android:visibility="gone" />
             </LinearLayout>
 
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/intro_card"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_marginTop="16dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_card"
+                android:orientation="vertical"
+                android:paddingStart="@dimen/card_pad_h"
+                android:paddingTop="@dimen/card_pad_v"
+                android:paddingEnd="@dimen/card_pad_h"
+                android:paddingBottom="@dimen/card_pad_v">
+
             <TextView
                 android:id="@+id/poi_label"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
+                android:textStyle="bold"
+                android:layout_marginTop="0dp"
                 android:text="@string/poi_label"
                 android:textColor="@color/muted"
                 android:textSize="@dimen/text_sub" />
@@ -770,11 +801,13 @@
                 android:text="@string/poi_source"
                 android:textColor="@color/muted"
                 android:textSize="@dimen/text_sub" />
+            </LinearLayout>
 
             <TextView
                 android:id="@+id/navi_status"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
                 android:textColor="@color/accent"
                 android:textSize="@dimen/text_sub" />
         </LinearLayout>

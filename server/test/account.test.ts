@@ -59,13 +59,41 @@ describe('설정', () => {
 
   it('기록 멈춤이면 점 업로드를 저장하지 않고 200으로 응답한다(차량 큐가 쌓이지 않게), 다시 켜면 저장한다', async () => {
     const e = await setup();
+    const pts = eastPoints(80, T0);
+    const start = await call(e, '/trips', post('', { localId: crypto.randomUUID(), vehicleId: V, driverId: V, startedAt: pts[0]!.ts }));
+    const tripId = start.body.tripId as string;
     await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: true }));
-    const a = await drive(e, V, T0);
-    expect(a.up.body).toEqual({ accepted: 0, duplicated: 0, paused: true });
+    const up = await call(e, `/trips/${tripId}/points`, post('', { points: pts }));
+    expect(up.body).toEqual({ accepted: 0, duplicated: 0, paused: true });
     expect((e.db.prepare('SELECT COUNT(*) AS n FROM trip_points').get() as any).n).toBe(0);
     await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: false }));
     const b = await drive(e, V, T0 + HOUR);
     expect(b.up.body.accepted).toBe(80);
+  });
+
+  it('기록 멈춤·동의 철회면 트립 생성·종료도 행을 만들지 않고 200 paused로 응답한다(이중 방어)', async () => {
+    const e = await setup();
+    const pts = eastPoints(10, T0);
+    const open = await call(e, '/trips', post('', { localId: 'open-1', vehicleId: V, driverId: V, startedAt: pts[0]!.ts }));
+    const openId = open.body.tripId as string;
+    await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: true }));
+    const before = (e.db.prepare('SELECT COUNT(*) AS n FROM trips').get() as any).n;
+    const create = await call(e, '/trips', post('', { localId: 'new-1', vehicleId: V, driverId: V, startedAt: pts[0]!.ts }));
+    expect(create.status).toBe(200);
+    expect(create.body).toEqual({ paused: true });
+    expect((e.db.prepare('SELECT COUNT(*) AS n FROM trips').get() as any).n).toBe(before);
+    const end = await call(e, `/trips/${openId}/end`, post('', { endedAt: pts.at(-1)!.ts }));
+    expect(end.body).toEqual({ paused: true });
+    expect((e.db.prepare('SELECT ended_at FROM trips WHERE id = ?').get(openId) as any).ended_at).toBeNull();
+    // 동의 철회(데이터 삭제) 뒤에도 같다
+    await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: false }));
+    await call(e, `/vehicles/${V}/data`, { method: 'DELETE' });
+    const after = await call(e, '/trips', post('', { localId: 'new-2', vehicleId: V, driverId: V, startedAt: pts[0]!.ts }));
+    expect(after.body).toEqual({ paused: true });
+    expect((e.db.prepare('SELECT COUNT(*) AS n FROM trips').get() as any).n).toBe(0);
+    // 다른 차량은 영향이 없다
+    const other = await call(e, '/trips', post('', { localId: 'o-1', vehicleId: 'other-vehicle', driverId: 'x', startedAt: pts[0]!.ts }));
+    expect(typeof other.body.tripId).toBe('string');
   });
 
   it('토큰 인증 required: 설정은 그 차량 토큰만(401·403)', async () => {

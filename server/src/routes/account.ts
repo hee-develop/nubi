@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { canonicalVehicleId } from '../matching/pipeline.js';
 import { VEHICLE_SET_SQL } from '../roads/index.js';
 import { vehicleScoped } from '../ext/auth.js';
+import { bodyOf } from '../ext/body.js';
 import { isRecordingBlocked, readSettings } from '../ext/settings.js';
 import { iso, parseBody, SQL_SHIFT_DAYS, type ExtDeps } from '../ext/util.js';
 
@@ -34,6 +35,17 @@ export const accountRoutes = (deps: ExtDeps) => {
     .post('/trips/:tripId/points', async (c, next) => {
       const t = db.prepare('SELECT vehicle_id FROM trips WHERE id = ?').get(c.req.param('tripId')) as { vehicle_id: string } | undefined;
       if (t && isRecordingBlocked(db, t.vehicle_id)) return c.json({ accepted: 0, duplicated: 0, paused: true as const }, 200);
+      return next();
+    })
+    // 트립 생성·종료도 같은 차단(기록 멈춤·동의 철회, 이중 방어): 차단 중이면 행을 만들지 않고 200 `{ paused: true }`. 차량 업로더는 이 응답을 받으면 그 트립을 재시도 없이 버린다.
+    .post('/trips', async (c, next) => {
+      const b = (await bodyOf(c)) as { vehicleId?: unknown } | undefined;
+      if (typeof b?.vehicleId === 'string' && b.vehicleId.length > 0 && b.vehicleId.length <= 128 && isRecordingBlocked(db, b.vehicleId)) return c.json({ paused: true as const }, 200);
+      return next();
+    })
+    .post('/trips/:tripId/end', async (c, next) => {
+      const t = db.prepare('SELECT vehicle_id FROM trips WHERE id = ?').get(c.req.param('tripId')) as { vehicle_id: string } | undefined;
+      if (t && isRecordingBlocked(db, t.vehicle_id)) return c.json({ paused: true as const }, 200);
       return next();
     })
     // T1 실시간 색칠(`GET /trips/:id/live`)에도 같은 차단을 건다: 멈춘 차량은 잠정 결과를 만들지도 내보내지도 않는다. T1 라우트는 이 라우트보다 뒤에 붙는다.

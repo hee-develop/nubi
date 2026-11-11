@@ -23,10 +23,10 @@ class IntroTrackerTest {
         override fun roads(vehicleId: String, almostOnly: Boolean, limit: Int) = throw UnsupportedOperationException()
         override fun dailyReport(vehicleId: String, date: String) = throw UnsupportedOperationException()
         override fun monthlyReport(vehicleId: String, month: String) = throw UnsupportedOperationException()
-        override fun guestCode(vehicleId: String) = throw UnsupportedOperationException()
+        override fun guestCode(vehicleId: String, gear: String) = throw UnsupportedOperationException()
         override fun guestSessions(vehicleId: String) = throw UnsupportedOperationException()
         override fun guestEndAll(vehicleId: String) = throw UnsupportedOperationException()
-        override fun pairCode(vehicleId: String) = throw UnsupportedOperationException()
+        override fun pairCode(vehicleId: String, gear: String) = throw UnsupportedOperationException()
         override fun shareNational(vehicleId: String) = throw UnsupportedOperationException()
     }
 

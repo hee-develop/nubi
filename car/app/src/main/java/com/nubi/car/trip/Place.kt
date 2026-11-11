@@ -74,6 +74,8 @@ class PlaceTracker(
     /** 지연 예약. 기본은 데몬 스케줄러 스레드 하나. 테스트는 가짜를 꽂는다. */
     private val schedule: (Long, () -> Unit) -> Unit = defaultSchedule,
     private val retryDelayMs: Long = 30_000,
+    /** 기록 멈춤 중이면 true: `/regions/at` 호출을 포함해 위치를 서버로 보내지 않는다. */
+    private val paused: () -> Boolean = { false },
 ) {
     @Volatile
     var info: PlaceInfo = PlaceInfo(null, null)
@@ -97,6 +99,7 @@ class PlaceTracker(
      * 옛 시군구가 '지금'으로 남지 않도록 먼저 비운다(화면은 상태 문구로 돌아간다).
      */
     fun refresh() {
+        if (paused()) return
         val at = location()
         val last = infoAt
         if (at != null && last != null && info.place != null && haversineM(last.lat, last.lon, at.lat, at.lon) >= PLACE_STALE_DISTANCE_M) {
@@ -109,6 +112,7 @@ class PlaceTracker(
     private fun attempt(gen: Int, waited: Long, retried: Boolean) {
         run {
             if (gen != generation.get()) return@run
+            if (paused()) return@run
             val id = vehicleId()
             val at = location()
             if (at == null) return@run // 위치를 아직 모르면 아무것도 하지 않는다(다음 정차·트립 종료 때 다시 조회)

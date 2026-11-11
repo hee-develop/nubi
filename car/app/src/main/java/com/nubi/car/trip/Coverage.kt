@@ -324,6 +324,19 @@ class CoverageTracker(
         }
     }
 
+    /** 데이터 삭제 뒤: 보이던 줄과 저장해 둔 전국 완료율·도감 요약까지 모두 비운다(옛 숫자가 다시 보이지 않게). */
+    fun clearAll() {
+        clear()
+        nationalPercent = null
+        regions = null
+        try {
+            cache?.putString(KEY_NATIONAL, "")
+            cache?.putString(KEY_REGIONS, "")
+        } catch (t: Throwable) {
+            Log.w("NubiCoverage", "요약 캐시 비우기 실패: ${t.javaClass.simpleName}")
+        }
+    }
+
     /** debug reset 등: 보이던 줄을 지운다. */
     fun clear() {
         generation++

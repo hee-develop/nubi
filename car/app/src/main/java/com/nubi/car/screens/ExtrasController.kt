@@ -1,13 +1,15 @@
 package com.nubi.car.screens
 
 import android.util.Log
+import com.nubi.car.trip.Gear
 import com.nubi.car.trip.HttpFailure
 import org.json.JSONObject
 import java.util.concurrent.Executor
+import java.util.concurrent.atomic.AtomicInteger
 
 enum class CodeKind { GUEST, PAIR, SHARE }
 
-enum class CodeError { NOT_PARKED, GUEST_LIMIT, ALREADY_PAIRED, UNAVAILABLE, FAILED }
+enum class CodeError { NOT_PARKED, GUEST_LIMIT, ALREADY_PAIRED, UNAVAILABLE, FAILED, NO_VEHICLE, RATE_LIMITED, FORBIDDEN, LOCAL_ONLY, AUTH }
 
 /** 화면에 떠 있는 QR 하나. [code]는 6자리(공유 카드는 없음), [receivedElapsedMs]는 받은 순간의 단조 시계. */
 class CodeState(val kind: CodeKind, val url: String, val code: String?, val receivedElapsedMs: Long, val matrix: Array<BooleanArray>?)
@@ -28,10 +30,24 @@ class ExtrasController(
     private val elapsedMs: () -> Long,
     /** 서버 설정을 받았다(엔진·플래그에 반영). 워커 스레드에서 불린다. */
     private val applySettings: (ServerSettings) -> Unit,
-    /** 데이터를 지웠다(지도 캐시·도감·전국 숫자를 비운다). */
+    /**
+     * 데이터 삭제가 서버에서 성공했다. 로컬 정리를 **이 순서로** 한다: 기록 멈춤을 먼저 켜고 저장 → 업로드 큐·진행 중 트립 버리기 → 요약·궤적·잠정 결과·coverage·place·intro·지도 캐시 비우기.
+     * 워커 스레드에서 불린다.
+     */
     private val onDataDeleted: () -> Unit = {},
-    private val wallMs: () -> Long = { System.currentTimeMillis() },
+    /** 기록 멈춤 **켜기**를 서버 응답을 기다리지 않고 로컬(엔진)에 바로 적용하고 저장한다. 오프라인에서도 멈춰야 한다. */
+    private val applyLocalPause: (Boolean) -> Unit = {},
+    /** 지금 기어(서버에 실제 값을 보낸다). */
+    private val gear: () -> Gear? = { Gear.P },
 ) {
+    /** 요청마다 올리는 세대 번호. 기어가 바뀌거나 코드를 닫을 때 올라가서 늦게 온 응답이 QR을 되살리지 못한다. */
+    private val generation = AtomicInteger()
+
+    /** 로컬에서 멈췄지만(켜기) 서버에는 아직 닿지 않았다. 서버 동기화를 재시도한다([syncPendingPause]). */
+    @Volatile
+    var pausePending = false
+        private set
+
     @Volatile
     var settings: ServerSettings? = null
         private set
@@ -73,35 +89,78 @@ class ExtrasController(
 
     // 설정 -----------------------------------------------------------------
 
-    /** 시작할 때와 정차 진입 때 부른다. 실패하면 마지막 값을 유지한다. */
-    fun refreshSettings() = work {
+    /** 시작할 때와 정차 진입 때 부른다. 실패하면 마지막 값을 유지한다. 로컬 멈춤이 서버에 아직 안 닿았으면 서버 값으로 덮지 않고 동기화를 다시 시도한다. */
+    fun refreshSettings() {
+        if (pausePending) {
+            syncPause()
+            return
+        }
+        work {
+            val id = vehicleId() ?: return@work
+            try {
+                val s = api.getSettings(id)
+                if (pausePending) return@work // 읽는 사이 로컬 멈춤이 걸렸다
+                settings = s
+                settingsError = false
+                applySettings(s)
+            } catch (e: Exception) {
+                settingsError = true
+                Log.w(TAG, "설정 조회 실패: ${e.javaClass.simpleName}")
+            }
+        }
+    }
+
+    /** 설정 한 항목을 바꾼다(부분 갱신). 서버 응답이 새 값이다(서버가 확인한 뒤에 적용). 화면을 열어도 되는 상태일 때만. */
+    fun update(patch: JSONObject) {
+        if (!allowed()) return
+        work {
+            val id = vehicleId() ?: return@work
+            try {
+                val s = api.putSettings(id, patch)
+                settings = s
+                settingsError = false
+                applySettings(s)
+            } catch (e: Exception) {
+                settingsError = true
+                Log.w(TAG, "설정 변경 실패: ${e.javaClass.simpleName}")
+            }
+        }
+    }
+
+    /**
+     * 기록 멈춤. **켜기**는 로컬에 즉시 적용·저장한 뒤 서버에 보내고(실패하면 정차할 때와 주기적으로 다시 보낸다), **끄기**는 서버가 확인한 뒤에만 적용한다.
+     */
+    fun setPaused(paused: Boolean) {
+        if (!allowed()) return
+        if (!paused) {
+            update(JSONObject().put("recordingPaused", false))
+            return
+        }
+        applyLocalPause(true)
+        pausePending = true
+        settings = settings?.copy(recordingPaused = true)
+        settingsError = false
+        syncPause()
+    }
+
+    /** 로컬 멈춤이 서버에 안 닿았을 때 다시 보낸다(정차 진입·화면 복귀·주기). 닿았으면 아무 일도 하지 않는다. */
+    fun syncPendingPause() {
+        if (pausePending) syncPause()
+    }
+
+    private fun syncPause() = work {
         val id = vehicleId() ?: return@work
         try {
-            val s = api.getSettings(id)
+            val s = api.putSettings(id, JSONObject().put("recordingPaused", true))
+            pausePending = false
             settings = s
             settingsError = false
             applySettings(s)
         } catch (e: Exception) {
-            settingsError = true
-            Log.w(TAG, "설정 조회 실패: ${e.javaClass.simpleName}")
+            settingsError = true // 로컬 멈춤은 그대로 두고 나중에 다시 보낸다
+            Log.w(TAG, "기록 멈춤 서버 동기화 실패(로컬은 멈춤): ${e.javaClass.simpleName}")
         }
     }
-
-    /** 설정 한 항목을 바꾼다(부분 갱신). 서버 응답이 새 값이다. */
-    fun update(patch: JSONObject) = work {
-        val id = vehicleId() ?: return@work
-        try {
-            val s = api.putSettings(id, patch)
-            settings = s
-            settingsError = false
-            applySettings(s)
-        } catch (e: Exception) {
-            settingsError = true
-            Log.w(TAG, "설정 변경 실패: ${e.javaClass.simpleName}")
-        }
-    }
-
-    fun setPaused(paused: Boolean) = update(JSONObject().put("recordingPaused", paused))
 
     fun setDrivingMap(on: Boolean) = update(JSONObject().put("drivingMap", on))
 
@@ -111,10 +170,18 @@ class ExtrasController(
     // 데이터 지우기(2단계 확인) ----------------------------------------------
 
     fun startDelete() {
+        if (!allowed()) {
+            deleteStep = DeleteStep.NONE
+            return
+        }
         if (deleteStep == DeleteStep.NONE || deleteStep == DeleteStep.DONE || deleteStep == DeleteStep.FAILED) deleteStep = DeleteStep.CONFIRM_1
     }
 
     fun confirmDeleteFirst() {
+        if (!allowed()) {
+            deleteStep = DeleteStep.NONE
+            return
+        }
         if (deleteStep == DeleteStep.CONFIRM_1) deleteStep = DeleteStep.CONFIRM_2
     }
 
@@ -122,11 +189,18 @@ class ExtrasController(
         if (deleteStep != DeleteStep.WORKING) deleteStep = DeleteStep.NONE
     }
 
-    /** 두 번째 확인 뒤에만 서버를 부른다. 그 밖의 단계에서는 아무 일도 하지 않는다. */
+    /**
+     * 두 번째 확인 뒤에만 서버를 부른다. 성공하면 [onDataDeleted]로 로컬을 정리하고(기록 멈춤 먼저) 설정을 다시 읽는다.
+     * 작업을 못 올렸거나 실패하면 FAILED로 두어 다시 시도할 수 있다.
+     */
     fun confirmDeleteFinal() {
         if (deleteStep != DeleteStep.CONFIRM_2) return
+        if (!allowed()) {
+            deleteStep = DeleteStep.NONE
+            return
+        }
         deleteStep = DeleteStep.WORKING
-        work {
+        val queued = work {
             val id = vehicleId()
             if (id == null) {
                 deleteStep = DeleteStep.FAILED
@@ -134,24 +208,28 @@ class ExtrasController(
             }
             try {
                 api.deleteData(id)
-                deleteStep = DeleteStep.DONE
-                dex.clear()
-                almostRoads.clear()
-                allRoads.clear()
-                daily.clear()
-                monthly.clear()
-                guestCount = null
-                try {
-                    onDataDeleted()
-                } catch (t: Throwable) {
-                    Log.w(TAG, "삭제 알림 예외: ${t.javaClass.simpleName}")
-                }
-                refreshSettings()
-            } catch (e: Exception) {
+            } catch (t: Throwable) {
                 deleteStep = DeleteStep.FAILED
-                Log.w(TAG, "데이터 삭제 실패: ${e.javaClass.simpleName}")
+                Log.w(TAG, "데이터 삭제 실패: ${t.javaClass.simpleName}")
+                return@work
             }
+            try {
+                onDataDeleted()
+            } catch (t: Throwable) {
+                Log.w(TAG, "삭제 뒤 로컬 정리 예외: ${t.javaClass.simpleName}")
+            }
+            dex.clear()
+            almostRoads.clear()
+            allRoads.clear()
+            daily.clear()
+            monthly.clear()
+            guestCount = null
+            closeCodes()
+            deleteStep = DeleteStep.DONE
+            // 서버 설정 조회가 실패해도 로컬 멈춤은 유지된다(onDataDeleted가 이미 켰다)
+            refreshSettings()
         }
+        if (!queued) deleteStep = DeleteStep.FAILED
     }
 
     // 조회 탭 ----------------------------------------------------------------
@@ -188,33 +266,39 @@ class ExtrasController(
 
     // QR --------------------------------------------------------------------
 
-    fun requestGuestCode() = issue(CodeKind.GUEST) {
-        val c = api.guestCode(it)
+    fun requestGuestCode() = issue(CodeKind.GUEST) { id, g ->
+        val c = api.guestCode(id, g)
         CodeState(CodeKind.GUEST, c.url, c.code, elapsedMs(), qrMatrix(c.url))
     }
 
-    fun requestPairCode() = issue(CodeKind.PAIR) {
-        val c = api.pairCode(it)
+    fun requestPairCode() = issue(CodeKind.PAIR) { id, g ->
+        val c = api.pairCode(id, g)
         CodeState(CodeKind.PAIR, c.url, c.code, elapsedMs(), qrMatrix(c.url))
     }
 
-    fun requestShare() = issue(CodeKind.SHARE) {
-        val url = api.shareNational(it)
+    fun requestShare() = issue(CodeKind.SHARE) { id, _ ->
+        val url = api.shareNational(id)
         CodeState(CodeKind.SHARE, url, null, elapsedMs(), qrMatrix(url))
     }
 
-    private fun issue(kind: CodeKind, make: (String) -> CodeState) {
-        if (!allowed()) {
+    private fun issue(kind: CodeKind, make: (String, String) -> CodeState) {
+        val g = gear()
+        if (!allowed() || g != Gear.P) {
             closeCodes()
             return
         }
         codeError = null
+        val gen = generation.incrementAndGet()
         work {
-            val id = vehicleId() ?: return@work
+            val id = vehicleId()
+            if (id == null) {
+                codeError = kind to CodeError.NO_VEHICLE
+                return@work
+            }
             try {
-                val s = make(id)
-                // 받는 사이 기어가 P를 벗어났으면 보이지 않고 버린다(plan 9-2)
-                if (!allowed()) return@work
+                val s = make(id, g.name)
+                // 받는 사이 기어가 P를 벗어났거나 코드를 닫았다면(세대가 바뀜) 보이지 않고 버린다(plan 9-2)
+                if (gen != generation.get() || !allowed() || gear() != Gear.P) return@work
                 when (kind) {
                     CodeKind.GUEST -> guest = s
                     CodeKind.PAIR -> pair = s
@@ -222,22 +306,35 @@ class ExtrasController(
                 }
                 if (s.matrix == null) codeError = kind to CodeError.FAILED
             } catch (e: HttpFailure) {
+                if (gen != generation.get()) return@work
                 codeError = kind to when {
-                    e.status == 403 -> CodeError.NOT_PARKED
+                    e.status == 401 || e.code == "unauthorized" -> CodeError.AUTH
+                    e.status == 403 && e.code == "local_only" -> CodeError.LOCAL_ONLY
+                    e.status == 403 && e.code == "not_parked" -> CodeError.NOT_PARKED
+                    e.status == 403 -> CodeError.FORBIDDEN
+                    e.status == 429 -> CodeError.RATE_LIMITED
                     e.status == 409 && kind == CodeKind.GUEST -> CodeError.GUEST_LIMIT
                     e.status == 409 -> CodeError.ALREADY_PAIRED
                     e.status == 503 -> CodeError.UNAVAILABLE
                     else -> CodeError.FAILED
                 }
             } catch (e: Exception) {
+                if (gen != generation.get()) return@work
                 codeError = kind to CodeError.FAILED
                 Log.w(TAG, "QR 요청 실패: ${e.javaClass.simpleName}")
             }
         }
     }
 
+    /** 기어가 바뀌었다(엔진 콜백). 진행 중인 QR 요청을 무효로 하고, P가 아니면 열려 있는 QR을 바로 닫는다. */
+    fun onGearChanged() {
+        generation.incrementAndGet()
+        if (!allowed() || gear() != Gear.P) closeCodes()
+    }
+
     /** 모든 QR·코드를 지운다. 기어가 P를 벗어나거나 DO가 걸리면 화면이 바로 부른다. */
     fun closeCodes() {
+        generation.incrementAndGet()
         guest = null
         pair = null
         share = null
@@ -279,18 +376,19 @@ class ExtrasController(
         }
     }
 
-    private fun work(block: () -> Unit) {
-        try {
-            executor.execute {
-                try {
-                    block()
-                } catch (t: Throwable) {
-                    Log.w(TAG, "작업 예외: ${t.javaClass.simpleName}")
-                }
+    /** [block]을 워커에 올린다. 올렸으면 true, 실행기가 거절했으면 false. */
+    private fun work(block: () -> Unit): Boolean = try {
+        executor.execute {
+            try {
+                block()
+            } catch (t: Throwable) {
+                Log.w(TAG, "작업 예외: ${t.javaClass.simpleName}")
             }
-        } catch (t: Throwable) {
-            Log.w(TAG, "작업 등록 실패: ${t.javaClass.simpleName}")
         }
+        true
+    } catch (t: Throwable) {
+        Log.w(TAG, "작업 등록 실패: ${t.javaClass.simpleName}")
+        false
     }
 
     private companion object {

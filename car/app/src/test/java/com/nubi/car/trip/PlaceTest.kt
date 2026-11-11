@@ -43,6 +43,18 @@ class PlaceTest {
     }
 
     @Test
+    fun 기록_멈춤_중에는_위치를_서버로_보내지_않는다() {
+        val api = FakeApi({ jung })
+        var paused = true
+        val t = PlaceTracker(api, direct, { "v" }, { here }, { _, _ -> }, 30_000, paused = { paused })
+        t.refresh()
+        assertEquals("regions/at 호출 없음", 0, api.atCalls)
+        paused = false
+        t.refresh()
+        assertEquals(1, api.atCalls)
+    }
+
+    @Test
     fun 위치를_모르면_조회하지_않는다() {
         val api = FakeApi({ jung })
         tracker(api, loc = { null }).refresh()

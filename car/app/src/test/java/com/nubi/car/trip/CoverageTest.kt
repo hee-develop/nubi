@@ -312,4 +312,21 @@ class CoverageTest {
         t2.onTripEnded("trip")
         assertEquals(1, n2)
     }
+
+    @Test
+    fun 데이터_삭제_뒤에는_저장해_둔_전국_완료율과_도감까지_비운다() {
+        val store = MapStore()
+        store.putString("nationalPercent", "12.5")
+        val api = object : CoverageApi {
+            override fun getMatching(tripId: String): MatchingResponse? = null
+            override fun getNationalPercent(vehicleId: String) = 12.5
+        }
+        val t = CoverageTracker(api, Executor { it.run() }, { "v" }, cache = store)
+        assertEquals(12.5, t.nationalPercent!!, 0.0)
+        t.clearAll()
+        assertNull(t.nationalPercent)
+        assertNull(t.regions)
+        // 새 인스턴스가 저장소에서 옛 값을 다시 읽지 않는다
+        assertNull(CoverageTracker(api, Executor { it.run() }, { "v" }, cache = store).nationalPercent)
+    }
 }

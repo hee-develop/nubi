@@ -41,9 +41,9 @@
 ## 음성 안내 (`voice/`)
 
 - **I01**: 처음 들어선 시군구 한 문장(`강원 홍천군에 처음 왔어요`). 잠정 색칠 응답(`/trips/:id/live`)의 `region.firstTime`이 오면 주행 중(P가 아닌 기어)에 말한다. 한 트립에서 같은 시군구는 한 번. 숫자·질문 없음.
-- **I03**: 하차 브리핑 한 문장(`오늘 새 도로 1.2킬로미터를 달렸어요`). 트립 정산이 끝났을 때 기어가 P이고 새 도로가 0.05km 이상일 때만. 숫자는 P에서만 말한다.
+- **I03**: 하차 브리핑 한 문장(`이번 주행에서 새 도로 1.2킬로미터를 달렸어요`). 트립 정산이 끝났을 때 기어가 P이고 새 도로가 0.05km 이상일 때만. 숫자는 P에서만 말한다.
 - 규칙(plan 4-4)은 순수 함수 `decide`·`VoiceGate`·`isValidSentence`(`VoiceRules.kt`, JVM 테스트): 플래그 → 상황(I01은 주행 중에만, I03은 P에서만) → 문장(5초 이내 추정, 질문 아님, 주행 중 숫자 없음, 시군구 이름은 한글·공백만) → 빈도(같은 종류 10분에 1회 이하). 주행 중에는 질문하지 않고 상호·광고는 읽지 않는다(문장은 템플릿과 시군구 이름뿐, TourAPI 항목은 읽지 않는다).
-- 소리 내기(`VoiceAdapter`): Pleos `TextToSpeech`(ON_DEVICE). 오디오 포커스는 `AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK`(USAGE_ASSISTANT·SPEECH, `setWillPauseWhenDucked(false)`)로 받고 끝·오류·상한(8초)·포커스 상실 때 반납한다. 포커스를 못 받으면 말하지 않는다. 선행 묵음: 포커스를 받은 뒤 **200ms 뒤** 재생을 시작한다(가이드 150~200ms). TTS 초기화 실패·미지원·예외는 모두 삼키고 아무 일도 하지 않으며(크래시 없음), 초기화 실패 뒤 5분은 다시 시도하지 않는다. 로그(태그 `NubiVoice`)에는 종류와 글자 수만 남기고 문장은 남기지 않는다. 권한 `pleos.car.permission.TTS_SERVICE` 추가(normal 등급).
+- 소리 내기(`VoiceAdapter`): Pleos `TextToSpeech`(ON_DEVICE). 오디오 포커스는 `AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK`(`USAGE_ASSISTANCE_NAVIGATION_GUIDANCE`·SPEECH, `setWillPauseWhenDucked(false)`)로 받고 끝·오류·상한(8초)·포커스 상실 때 반납한다. 포커스를 못 받으면 말하지 않는다. 선행 묵음: 포커스를 받은 뒤 **200ms 뒤** 재생을 시작한다(가이드 150~200ms). TTS 초기화 실패·미지원·예외는 모두 삼키고 아무 일도 하지 않으며(크래시 없음), 초기화 실패 뒤 5분은 다시 시도하지 않는다. 로그(태그 `NubiVoice`)에는 종류와 글자 수만 남기고 문장은 남기지 않는다. 권한 `pleos.car.permission.TTS_SERVICE` 추가(normal 등급).
 - 에뮬레이터 로그 예(E2E, 소리 자체는 확인하지 못함):
   `TTS 준비됨` → `TTS 요청 I01 글자=14` → `오디오 포커스 GRANTED(MAY_DUCK)` → `TTS 시작`(요청 후 약 0.2초) → `오디오 포커스 반납(TTS 완료)`. 같은 종류가 10분 안에 또 오면 `I01 건너뜀: 빈도 제한`.
 
@@ -69,11 +69,29 @@
 
 `scripts/e2e-car.sh`는 flow 4개를 돈다(앞 3개 유지, 새 `e2e/maestro/car/parked-menu.yaml`). 정차 메뉴 flow: 탭 5개·도감 229/92·도로·오늘(리포트·공유 QR)·설정 토글(`기록 멈춤` 상태 문구 포함)·내 지역·차주 연결 QR·게스트 QR 표시와 **기어 D에서 사라짐**·데이터 지우기 2단계 확인과 끝까지 진행. 끝나면 스크립트가 서버에서 트립 0개·동의 철회를 확인하고, logcat에서 TTS 요청(I01·I03)·오디오 포커스 GRANTED·반납을 확인한다. 기존 flow에서 바뀐 단언: `준비 중`(없어야 함)·`같이 탄 사람 추가`(있어야 함), 지도 레이어 토글 `도로`는 정차 메뉴 탭과 이름이 같아 `id`로 누름, 지역 소개는 이웃보다 늦게 오므로 `예시 항목`을 기다림(`지금 있는 곳 소개` 추가). 주행 중 단언(숫자·카드·QR·메뉴 없음)은 모두 유지하고 탭 이름(`도감`·`오늘`·`설정`)을 더했다.
 
+## 리뷰 반영(2차)
+
+**데이터 삭제 뒤 로컬 정리**: 서버 삭제가 성공하면 `ExtrasController`가 `onDataDeleted`를 부르고 순서는 (1) 로컬 `recordingPaused=true` 켜고 저장, (2) 업로드 큐·dead-letter·서버 등록 비우기(`Uploader.clearAll`), (3) 진행 중 트립·상태기계 버리기(`TripEngine.purgeAfterDataDeletion`, release에서도 동작, debug `reset`과 같은 `discardState`를 쓴다), (4) 요약 카드·궤적·잠정 결과·coverage(전국 완료율·도감 저장값 포함)·place·intro·도감 캐시·지도 캐시 비우기. 설정 조회가 실패해도 로컬 멈춤은 유지된다. 서버도 두 겹으로 막는다: `POST /trips`·`/trips/:id/end`가 기록 멈춤·동의 철회 차량이면 행을 만들지 않고 200 `{ paused: true }`(`routes/account.ts`, 점 업로드와 같은 방식, 서버 테스트). 차량 업로더는 이 응답(`PausedByServer`)을 받으면 그 트립의 큐 항목·등록을 재시도 없이 버린다. 삭제 실행기가 작업을 거절하거나 서버 호출이 실패하면 `DeleteStep.FAILED`로 두고 다시 시도할 수 있다.
+
+**인증 오류 분류**: 재등록은 401 또는 응답 `{error:'unauthorized'}`일 때만 한다(진행 중 플래그를 원자적으로 잡아 한 번만, `Auth.beginReregister`). `forbidden`·`local_only`·`not_parked`는 인증 실패가 아니라 오류 문구(`CodeError.FORBIDDEN`·`LOCAL_ONLY`·`NOT_PARKED`)로 따로 보인다. 토큰이 없는 모드에서도 2xx면 `Auth.failed`를 푼다. 업로더의 Alias 단계는 401·403이면 격리(dead-letter)하지 않고 보류한다. 차량 ID가 없을 때(`NO_VEHICLE`)·429(`RATE_LIMITED`)도 문구가 따로 있다.
+
+**기록 멈춤(오프라인)**: 멈춤 **켜기**는 로컬(엔진)에 즉시 적용·저장한 뒤 서버에 보내고, 못 보내면 `pausePending`으로 남겨 정차 진입·화면 복귀·30초 주기(`syncPendingPause`)에 다시 보낸다(대기 중에는 서버 값으로 덮지 않는다). **끄기**는 서버가 확인한 뒤에만 로컬에 적용한다. 멈춤 중에는 `place.refresh()`(`/regions/at`)와 지역 소개 호출을 하지 않는다(위치 좌표를 서버로 보내지 않는다). 지도 칸 요청은 화면에 보이는 영역의 bbox라 막지 않았다(기록이 아니라 열람이다).
+
+**음성**: 말하기 직전(포커스 요청 전과 선행 묵음 지연 뒤 실제 `speak` 직전)에 호출자의 `stillAllowed`(기어·플래그, I01은 주행 중·I03은 P)를 다시 확인하고, 기어가 바뀌면(`engine.addGearListener` → `VoiceAdapter.recheck`) 말하는 중이어도 즉시 멈추고 포커스를 반납한다. `onDone`·`onError` 콜백은 발화 상태(`SpeechTurns`)가 소리가 **시작된** 지금 발화의 것일 때만 받아들인다(취소한 발화의 늦은 콜백이 새 발화를 끝내지 못한다). 10분 빈도 제한은 **실제로 말하기 시작할 때만** 기록한다(초기화 실패·포커스 거절은 횟수를 쓰지 않고 다음 응답에서 다시 시도한다). 규칙으로 건너뛴 시군구는 지나간 일로 보고 10분 뒤에도 말하지 않는다. 서비스 `onDestroy`·`onTaskRemoved`에서 `VoiceAdapter.release()`(재생 중단 → 포커스 반납 → TTS 해제)를 부르고 `open()` 전까지 새 재생·포커스 요청을 막는다(서비스 시작 때 `open`).
+- 오디오 usage 근거: 가이드 오디오 컨텍스트 표(`audio-focus-development-guide`)에서 `USAGE_ASSISTANT`는 VOICE_COMMAND, `USAGE_ASSISTANCE_NAVIGATION_GUIDANCE`는 NAVIGATION이다. 누비의 문장은 음성 비서 응답이 아니라 주행 위치 기반 짧은 안내라 NAVIGATION 컨텍스트가 맞다고 보고 바꿨다. `ANNOUNCEMENT` 컨텍스트는 공개 SDK(compileSdk 36 `AudioAttributes`)에 usage 상수가 없어 쓸 수 없었다. 순정 내비 안내와 겹치면 시스템 포커스 정책(NAVIGATION 간 충돌)이 정하며 실차 확인이 필요하다.
+- 선행 묵음은 SDK 한계(TTS가 오디오 데이터를 주지 않음) 때문에 가이드가 권장하지 않는 재생 지연 방식(200ms)으로 대체했다. 음성 문구는 위치·주행 결과를 알리는 상태 알림뿐이고 보상·유도·질문·광고는 없다.
+
+**주행 규제**: `CarUxRestrictions.activeRestrictions`의 `UX_RESTRICTIONS_NO_SETUP` 비트를 따로 보관(`setupBlocked`, 모르면 true)하고 DO와 함께 메뉴·QR·설정·삭제·하차 카드·게스트 카드 판정에 넣는다(`UxState.blocked`). QR은 **실제 기어가 P일 때만**(기어를 모르면 거부) 받고 서버에도 실제 기어를 보낸다. QR 요청마다 세대 번호를 두고 기어가 바뀌면 올려서 늦게 온 응답을 버린다. 탭·버튼·내 지역 칸의 클릭마다 `allowedNow`로 한 번 더 확인한다.
+
+**조작성**: 정차 메뉴 탭과 버튼은 최소 높이 80dp·글자 32sp(내 지역 칸은 28sp), Back은 하위 상태(내 지역 목록·데이터 지우기 확인·QR·다른 탭)에서 한 단계만 되돌리고 최상위(지도 탭)에서만 `moveTaskToBack`. 정차 패널의 오른쪽 열은 이웃 카드(이름·인구감소 태그·길안내 1개, 한 줄)와 `지금 여기: {시군구}` 소개 카드(관광지·축제·길안내)로 나눴다(공간이 모자라면 소개 카드가 우선). 게스트 카드는 문구를 두 줄로 나누고 코드와 남은 시간을 따로 줄에 둔다.
+
+**기타**: `zxing:core`를 3.5.4(Maven Central 최신 안정, 3.3.3에서 올림)로 올렸다. `SummaryCard`는 `onDestroy`에서 썸네일 저장소 리스너를 끊는다.
+
 ## 계약서와 다른 점
 
 1. `voice` 서버 설정은 서버에 없어 기기 로컬 저장이다. `drivingMap`·`voice` 모두 "끌 수만 있다"(빌드 기본값 AND): 계약은 "덮어쓴다"이지만 아침에 기본값을 false로 빼면 서버가 되살리지 못하게 했다.
 2. I03(하차 브리핑)은 I01과 빈도 제한을 **따로** 센다(종류별 10분에 1회). 한 몫으로 세면 트립 끝 브리핑이 직전 시군구 안내에 막힌다.
-3. 선행 묵음은 오디오 데이터가 아니라 **재생 지연 200ms**다(TTS SDK가 오디오를 주지 않는다). 가이드가 권장하지 않는 방식이라 실차에서 첫 음절 손실을 확인해야 한다.
+3. 선행 묵음은 오디오 데이터가 아니라 **재생 지연 200ms**다(TTS SDK가 오디오를 주지 않는다, 위 '음성' 참고). 가이드가 권장하지 않는 방식이라 실차에서 첫 음절 손실을 확인해야 한다.
 4. 게스트 QR 기능을 설정 탭에도 뒀다(패널이 좁아 게스트 카드가 접히는 상태가 있어서).
 5. 도로를 눌러 지도로 이동하는 기능은 구현하지 않았다.
 
@@ -81,7 +99,7 @@
 
 - 도로 → 지도 이동: `/coverage/roads`가 좌표(bbox)를 주지 않고 `/coverage/segments`·`/map/base`는 bbox를 먼저 요구해 도로 하나의 위치를 알 방법이 없다. 서버에 `roadKey → bbox`가 생기면 `MapScreen.centerOn`으로 이을 수 있다.
 - 음성은 소리를 확인하지 못했다(로그만). I01은 잠정 색칠 폴링(화면이 떠 있을 때만 돈다)에 의존해, 화면이 백그라운드면 나오지 않는다. TTS SDK 신청은 콘솔에서 아직 '준비 중'(차곡 docs/sdk-check.md), 실차 오디오 포커스 정책은 미확인.
-- 기록 멈춤 중에는 위치 샘플을 모두 버려서 정차 화면의 `지금 시군구`·지도 내 위치가 갱신되지 않는다.
+- 기록 멈춤 중에는 위치 샘플을 모두 버리고 `/regions/at`도 부르지 않아서 정차 화면의 `지금 시군구`·지도 내 위치가 갱신되지 않는다.
 - QR의 주소는 서버가 만든 `url`이라 `NUBI_PUBLIC_URL`을 배포 주소로 두지 않으면(에뮬레이터는 `http://10.0.2.2:<포트>/…`) 폰에서 열리지 않는다. 폰이 `/g/:code`로 실제 게스트 참여하는 흐름은 에뮬레이터로 확인하지 않았다.
 - 토큰 인증(`NUBI_AUTH`≠off)은 JVM 테스트(헤더 부착·401/403 재등록 1회·저장)로만 확인했다. E2E 서버는 인증이 꺼져 있다(기본값).
 - 지역 소개는 TourAPI 키가 없어 `sample: true`만 에뮬레이터로 확인했다.

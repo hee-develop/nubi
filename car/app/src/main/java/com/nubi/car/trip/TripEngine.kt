@@ -108,6 +108,13 @@ class TripEngine(
     @Volatile
     var onTripEnded: () -> Unit = {}
 
+    private val gearListeners = java.util.concurrent.CopyOnWriteArrayList<(Gear?) -> Unit>()
+
+    /** 기어가 바뀔 때마다 부를 리스너를 더한다(음성·QR 등 화면과 무관한 쪽). 엔진 스레드에서 불린다. */
+    fun addGearListener(l: (Gear?) -> Unit) {
+        gearListeners.add(l)
+    }
+
     /** 기어가 바뀌었다(화면이 QR·메뉴를 바로 닫으려고 쓴다). 엔진 스레드에서 불린다. */
     @Volatile
     var onGearChange: (Gear?) -> Unit = {}
@@ -273,6 +280,13 @@ class TripEngine(
             } catch (t: Throwable) {
                 Log.w(TAG, "기어 알림 예외: ${t.javaClass.simpleName}")
             }
+            for (l in gearListeners) {
+                try {
+                    l(gear)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "기어 리스너 예외: ${t.javaClass.simpleName}")
+                }
+            }
         }
     }
 
@@ -306,18 +320,37 @@ class TripEngine(
         if (!BuildConfig.DEBUG) return
         acceptRealLocation = false
         scheduler.post {
-            machine.reset()
-            parkedAwaitingLocation = false
-            active = null
-            recordingLocalId = null
+            discardState()
             clockOffsetMillis = 0
-            failures = 0
-            nextAttemptElapsed = 0
-            lastUpload = UploadStatus()
-            liveTrips.clear()
-            uploader.clear()
-            publish()
         }
+    }
+
+    /**
+     * 사용자가 서버 데이터를 지웠다(위치정보 동의 철회): 로컬에서도 **먼저** 기록 멈춤을 켜고 저장한 뒤, 진행 중 트립·상태기계·업로드 큐(dead-letter·서버 등록 포함)를 모두 버린다.
+     * release 빌드에서도 동작한다. 서버 설정 조회가 실패해도 멈춤은 유지된다(풀리는 것은 서버가 확인한 뒤에만).
+     */
+    fun purgeAfterDataDeletion() {
+        recordingPaused = true
+        try {
+            store.putString(KEY_PAUSED, "1")
+        } catch (t: Throwable) {
+            Log.w(TAG, "기록 멈춤 저장 실패: ${t.javaClass.simpleName}")
+        }
+        scheduler.post { discardState(clearDeadLetters = true) }
+    }
+
+    /** 상태기계·진행 중 트립·큐를 비운다(엔진 스레드). [reset]과 [purgeAfterDataDeletion]이 함께 쓴다. */
+    private fun discardState(clearDeadLetters: Boolean = false) {
+        machine.reset()
+        parkedAwaitingLocation = false
+        active = null
+        recordingLocalId = null
+        failures = 0
+        nextAttemptElapsed = 0
+        lastUpload = UploadStatus()
+        liveTrips.clear()
+        if (clearDeadLetters) uploader.clearAll() else uploader.clear()
+        publish()
     }
 
     // 내부 ---------------------------------------------------------------

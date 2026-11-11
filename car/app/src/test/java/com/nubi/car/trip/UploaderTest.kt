@@ -2,6 +2,7 @@ package com.nubi.car.trip
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -766,6 +767,68 @@ class UploaderTest {
         u2.enqueue(QueueEntry.Alias("c", "d"))
         assertEquals(DrainKind.RETRY, u2.drain().kind)
         assertEquals(1, u2.pendingEntries)
+    }
+
+    @Test
+    fun 서버가_paused로_거절하면_그_트립만_재시도_없이_버린다() {
+        val server = FakeServer().apply { onCreate = { if (it.localId == "a") throw PausedByServer("paused") } }
+        val u = uploader(server)
+        u.enqueue(start("a"), *points("a", 0..2), QueueEntry.End("a", 3, null))
+        u.enqueue(start("b"), *points("b", 0..1), QueueEntry.End("b", 4, null))
+        val r = u.drain()
+        assertEquals(DrainKind.OK, r.kind)
+        assertEquals("b는 정상 업로드", listOf(0, 1), server.seqs("b"))
+        assertEquals("a의 Start 한 번만 시도하고 항목은 모두 버린다", 2, server.createCalls)
+        assertEquals(0, u.pendingEntries)
+        assertEquals(0, u.pendingPoints)
+        assertEquals("dead-letter로 보내지 않고 그냥 버린다", 0, u.readDeadLetters().size)
+        assertEquals(DrainKind.OK, u.drain().kind)
+        assertEquals(2, server.createCalls)
+    }
+
+    @Test
+    fun 종료_요청이_paused면_그_트립의_등록과_남은_항목을_버리고_종료_알림을_부르지_않는다() {
+        val server = FakeServer().apply { onEnd = { _, _ -> throw PausedByServer("paused") } }
+        val u = uploader(server)
+        var ended = 0
+        u.onTripEnded = { _, _ -> ended++ }
+        u.enqueue(start("a"), *points("a", 0..1), QueueEntry.End("a", 2, null))
+        assertEquals(DrainKind.OK, u.drain().kind)
+        assertEquals(0, u.pendingEntries)
+        assertEquals(0, ended)
+        assertEquals(1, server.createCalls)
+        assertEquals(DrainKind.OK, u.drain().kind)
+        assertEquals(1, server.createCalls)
+    }
+
+    private fun aliasHeld(code: Int) {
+        val server = FakeServer().apply { onAlias = { throw HttpFailure(code, "auth") } }
+        val u = uploader(server)
+        u.enqueue(QueueEntry.Alias("a", "b"))
+        u.drain()
+        assertEquals("HTTP $code: 항목이 남는다", 1, u.pendingEntries)
+        assertEquals("dead-letter로 가지 않는다", 0, u.readDeadLetters().size)
+    }
+
+    @Test
+    fun alias는_401이면_격리하지_않고_보류한다() = aliasHeld(401)
+
+    @Test
+    fun alias는_403이면_격리하지_않고_보류한다() = aliasHeld(403)
+
+    @Test
+    fun clearAll은_큐와_dead_letter와_서버_등록을_모두_비운다() {
+        val server = FakeServer().apply { onAlias = { throw HttpFailure(409, "conflict") } }
+        val u = uploader(server)
+        u.enqueue(QueueEntry.Alias("a", "b"), start("t"), *points("t", 0..2))
+        u.drain()
+        assertEquals(1, u.readDeadLetters().size)
+        u.enqueue(start("t2"), *points("t2", 0..1))
+        u.clearAll()
+        assertEquals(0, u.pendingEntries)
+        assertEquals(0, u.pendingPoints)
+        assertEquals(0, u.readDeadLetters().size)
+        assertNull(u.liveTripId)
     }
 
     @Test

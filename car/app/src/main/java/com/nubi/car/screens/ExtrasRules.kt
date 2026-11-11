@@ -13,9 +13,9 @@ import com.nubi.car.trip.numbersVisible
 fun menuAllowed(flag: Boolean, gear: Gear?, state: TripState, distractionOptimized: Boolean): Boolean =
     flag && extrasVisible(numbersVisible(gear, state), distractionOptimized)
 
-/** QR·코드를 보여도 되는지(plan 9-2). 기어가 P를 벗어나거나 DO가 걸리면 false라 바로 닫는다. [flag]는 guest/share 플래그. */
+/** QR·코드를 보여도 되는지(plan 9-2). **기어가 P일 때만**(기어를 모르면 거부) 허용하고, P를 벗어나거나 DO가 걸리면 false라 바로 닫는다. [flag]는 guest/share 플래그. */
 fun qrAllowed(flag: Boolean, gear: Gear?, state: TripState, distractionOptimized: Boolean): Boolean =
-    menuAllowed(flag, gear, state, distractionOptimized)
+    gear == Gear.P && menuAllowed(flag, gear, state, distractionOptimized)
 
 /** 코드 유효 시간(서버 `CODE_TTL_MS`, 5분). 남은 시간은 기기 단조 시계로 센다(서버·기기 시계 차이나 debug 시계에 흔들리지 않게). */
 const val CODE_TTL_MS = 5 * 60_000L
