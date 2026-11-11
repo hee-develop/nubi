@@ -174,7 +174,7 @@ export const guestRoutes = (deps: ExtDeps) => {
       if (!parsed.success) return c.json({ error: (raw as { consent?: unknown } | undefined)?.consent === false ? 'consent_required' : 'invalid_body' }, 400);
       const r = joinGuest(deps, guard, clientKey(c), parsed.data, w);
       if (!r.ok && (r.status === 404 || r.status === 410)) await guard.delayIfNeeded();
-      return r.ok ? c.json({ sessionId: r.sessionId, token: r.token }, 200) : c.json({ error: r.error }, r.status);
+      return r.ok ? c.json({ sessionId: r.sessionId, token: r.token as string /* API 경로는 apiToken을 끄지 않아 항상 문자열 */ }, 200) : c.json({ error: r.error }, r.status);
     })
     .post('/guest/end-all', async (c) => {
       const p = await parseBody(c, vehicleBody);

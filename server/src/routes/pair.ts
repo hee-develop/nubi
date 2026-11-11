@@ -86,7 +86,7 @@ export const pairRoutes = (deps: ExtDeps) => {
       const made = claimPair(deps, state.vehicleId, now(), iso(now()));
       if (!made) return c.json({ error: 'already_paired' }, 409);
       db.prepare('UPDATE link_codes SET used_at = ? WHERE code = ?').run(iso(now()), p.data.code);
-      return c.json(made, 200);
+      return c.json({ ...made, token: made.token as string /* API 경로는 apiToken을 끄지 않아 항상 문자열 */ }, 200);
     })
     .get('/pair', (c) => {
       const vehicleId = c.req.query('vehicleId');

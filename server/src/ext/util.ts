@@ -1,4 +1,4 @@
-import type { Context } from 'hono';
+import type { Context, TypedResponse } from 'hono';
 import { bodyOf } from './body.js';
 import type { z } from 'zod';
 import type { Db } from '../db/index.js';
@@ -48,8 +48,11 @@ export const parseAuthMode = (v: string | undefined): AuthMode => (v === 'option
 /** 본문(미들웨어가 한 번 파싱한 값). 비었거나 파싱 실패면 undefined. */
 export const readJson = (c: Context): Promise<unknown> => bodyOf(c);
 
-/** 본문을 zod로 검증한다. 실패하면 입력을 되돌려 주지 않고 `{ error: 'invalid_body' }`만 400으로 낸다. */
-export const parseBody = async <T extends z.ZodType>(c: Context, schema: T): Promise<{ ok: true; data: z.infer<T> } | { ok: false; res: Response }> => {
+/** 본문을 zod로 검증한다. 실패하면 입력을 되돌려 주지 않고 `{ error: 'invalid_body' }`만 400으로 낸다(`res`를 타입 있는 응답으로 둬야 Hono RPC가 성공 응답 타입을 `{}`로 뭉개지 않는다). */
+export const parseBody = async <T extends z.ZodType>(
+  c: Context,
+  schema: T,
+): Promise<{ ok: true; data: z.infer<T> } | { ok: false; res: Response & TypedResponse<{ error: string }, 400, 'json'> }> => {
   const parsed = schema.safeParse(await bodyOf(c));
   if (!parsed.success) return { ok: false, res: c.json({ error: 'invalid_body' }, 400) };
   return { ok: true, data: parsed.data };
