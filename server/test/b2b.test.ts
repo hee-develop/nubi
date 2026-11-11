@@ -167,40 +167,58 @@ describe('코스·완주 인증', () => {
     expect((await call(e, `/b2b/courses/${c.id}/completions?month=2026-11`)).status).toBe(401);
   });
 
-  it('인증서: 완주하면 HTML(차량 ID·날짜 없음), 미완주 409, 없는 코스 404, vehicleId 없으면 400. 번호는 코스·차량마다 고정', async () => {
+  it('인증서: 완주하면 추측 불가 id의 공개 HTML(차량 ID·날짜 없음), 미완주 409, 없는 코스 404, 형식 오류 400. 같은 코스·차량은 같은 인증서', async () => {
     const e = await setup();
     const c = (await course(e)).body;
     drive(e, 'done', [[1, 1], [2, 0.96]]);
     drive(e, 'half', [[1, 1], [2, 0.5]]);
-    const r = await call(e, `/courses/${c.id}/certificate?vehicleId=done`);
+    const issue = (v: string, id = c.id) => call(e, `/courses/${id}/certificate`, post('', { vehicleId: v }));
+    const cert = await issue('done');
+    expect(cert.status).toBe(200);
+    expect(cert.body.id).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    expect(cert.body.number).toMatch(/^NB-[0-9A-F]{10}$/);
+    expect(cert.body.url).toBe(`http://localhost/c/${cert.body.id}`);
+    expect(JSON.stringify(cert.body)).not.toContain('done');
+    expect((await issue('done')).body).toEqual(cert.body); // 멱등
+    const r = await call(e, `/c/${cert.body.id}`); // 토큰 없이 열림, URL에 vehicleId 없음
     expect(r.status).toBe(200);
     expect(r.res.headers.get('content-type')).toContain('text/html');
-    expect(r.res.headers.get('cache-control')).toBe('no-store');
+    expect(r.res.headers.get('cache-control')).toBe('private, max-age=300');
     expect(r.text).toContain('코스 완주 인증서');
     expect(r.text).toContain('양구 펀치볼 둘레길');
     expect(r.text).toContain('양구군');
-    expect(r.text).toMatch(/NB-[0-9A-F]{10}/);
+    expect(r.text).toContain(cert.body.number);
+    expect(r.text).toContain('완주율 95% 이상'); // 판정 기준 문구는 실제 기준(95%)과 같다
+    expect(r.text).not.toMatch(/>\s*100%\s*</); // 예전의 '완주 구간 100%' 표기는 없다
     expect(r.text).not.toContain('done');
     expect(r.text).not.toMatch(/20\d\d-\d\d|20\d\d년/);
-    expect((await call(e, `/courses/${c.id}/certificate?vehicleId=done`)).text).toBe(r.text);
     drive(e, 'done2', [[1, 1], [2, 1]]);
-    expect((await call(e, `/courses/${c.id}/certificate?vehicleId=done2`)).text).not.toBe(r.text);
-    expect((await call(e, `/courses/${c.id}/certificate?vehicleId=half`)).status).toBe(409);
-    expect((await call(e, `/courses/${c.id}/certificate?vehicleId=nobody`)).status).toBe(409);
-    expect((await call(e, '/courses/nope/certificate?vehicleId=done')).status).toBe(404);
-    expect((await call(e, `/courses/${c.id}/certificate`)).status).toBe(400);
+    expect((await issue('done2')).body.id).not.toBe(cert.body.id);
+    expect((await issue('half')).body).toEqual({ error: 'not_completed' });
+    expect((await issue('nobody')).status).toBe(409);
+    expect((await issue('done', 'nope')).status).toBe(404);
+    expect((await call(e, `/courses/${c.id}/certificate`, post('', {}))).status).toBe(400);
+    expect((await call(e, '/c/nonexistent0000000000')).status).toBe(404);
+    expect((await call(e, '/c/x')).status).toBe(404);
+    // 예전 vehicleId 쿼리 경로는 없다
+    expect((await call(e, `/courses/${c.id}/certificate?vehicleId=done`)).status).toBe(404);
+    // 차량 데이터 삭제 때 인증서도 지워진다
+    await call(e, '/vehicles/done/data', { method: 'DELETE' });
+    expect((await call(e, `/c/${cert.body.id}`)).status).toBe(404);
   });
 
-  it('인증 required에서 인증서는 차량 토큰이 필요하다(401·403)', async () => {
-    // 이 테스트만 required 앱
+  it('인증 required에서 인증서 발급은 차량 토큰이 필요하다(401·403), 조회 페이지는 공개', async () => {
     const roadsPath = await makeRoadsDb(join(tmp(), 'r2.sqlite'), [W(1, 1000, 'nm:a', [127.9, 38.1])]);
     const r = extApp({ roadsPath, ext: { b2bKey: KEY, auth: 'required' } });
     const a = (await call(r, '/vehicles/register', post('', { vin: 'KMHABCDEF12345678' }))).body;
     const b = (await call(r, '/vehicles/register', post('', { vin: 'KMHZZZZZZ12345678' }))).body;
     const c = (await b2b(r, '/b2b/courses', post('', { name: '코스', regionCode: '51800', roadKeys: ['nm:a'] }))).body;
     r.db.prepare("INSERT INTO driven_ways VALUES (?, 1, 1, 'a', 'b', 't', '209901')").run(a.vehicleId);
-    expect((await call(r, `/courses/${c.id}/certificate?vehicleId=${a.vehicleId}`)).status).toBe(401);
-    expect((await call(r, `/courses/${c.id}/certificate?vehicleId=${a.vehicleId}`, { headers: bearer(b.vehicleToken) })).status).toBe(403);
-    expect((await call(r, `/courses/${c.id}/certificate?vehicleId=${a.vehicleId}`, { headers: bearer(a.vehicleToken) })).status).toBe(200);
+    const issue = (h: Record<string, string> = {}) => call(r, `/courses/${c.id}/certificate`, post('', { vehicleId: a.vehicleId }, h));
+    expect((await issue()).status).toBe(401);
+    expect((await issue(bearer(b.vehicleToken))).status).toBe(403);
+    const ok = await issue(bearer(a.vehicleToken));
+    expect(ok.status).toBe(200);
+    expect((await call(r, `/c/${ok.body.id}`)).status).toBe(200);
   });
 });

@@ -30,7 +30,8 @@ const drive = async (e: ExtApp, vehicleId = V, km = 6.7, lat0 = 37.5) => {
   return tripId;
 };
 const create = (e: ExtApp, body: unknown, headers: Record<string, string> = {}) => call(e, '/share/cards', post('', body, headers));
-const svgOf = async (e: ExtApp, id: string) => (await call(e, `/share/cards/${id}.svg`)).text;
+/** 내부 보관 SVG(공개 경로로는 내보내지 않는다). */
+const svgOf = async (e: ExtApp, id: string) => (e.db.prepare('SELECT svg FROM share_cards WHERE id = ?').get(id) as { svg: string }).svg;
 
 /** SVG 안 굵기 [width]인 경로의 y 좌표 범위. */
 const pathYRange = (svg: string, width: number) => {
@@ -41,6 +42,39 @@ const pathYRange = (svg: string, width: number) => {
 };
 
 describe('공유 카드', () => {
+  it('PNG는 만들 때 한 번만 렌더해 저장하고 GET은 저장본을 준다. 변환기가 없으면 생성 503(SVG로 내보내지 않음)', async () => {
+    let calls = 0;
+    const renderer = async (svg: string) => {
+      calls++;
+      return svg.includes('전국') ? Buffer.from('PNG-BYTES-FIXED') : null;
+    };
+    const e = await setup({ ext: { pngRenderer: renderer } });
+    await drive(e);
+    const r = await create(e, { vehicleId: V, kind: 'national' });
+    expect(r.status).toBe(200);
+    for (let i = 0; i < 3; i++) expect(Buffer.from(await (await e.app.request(`/share/cards/${r.body.id}.png`)).arrayBuffer()).toString()).toBe('PNG-BYTES-FIXED');
+    expect(calls).toBe(1);
+    // 변환기가 null을 돌려주면 카드를 만들지 않는다
+    const tripId = await drive(e, V, 6.7);
+    const bad = await create(e, { vehicleId: V, kind: 'trip', tripIds: [tripId] });
+    expect(bad.status).toBe(503);
+    expect(bad.body).toEqual({ error: 'png_unavailable' });
+    expect((e.db.prepare('SELECT COUNT(*) AS n FROM share_cards').get() as { n: number }).n).toBe(1);
+  });
+
+  it('의심(suspect) 트립은 여행 카드에서 제외한다(전부 의심이면 409 trip_not_eligible)', async () => {
+    const e = await setup();
+    const a = await drive(e, V, 6.7);
+    const b = await drive(e, V, 6.7, 37.62);
+    const before = pathYRange(await svgOf(e, (await create(e, { vehicleId: V, kind: 'trip', tripIds: [a, b] })).body.id), 8)!;
+    const mark = (id: string) => e.db.prepare("UPDATE trip_matching SET result_json = json_set(result_json, '$.outcome', 'suspect') WHERE trip_id = ?").run(id);
+    mark(b);
+    const after = pathYRange(await svgOf(e, (await create(e, { vehicleId: V, kind: 'trip', tripIds: [a, b] })).body.id), 8)!;
+    expect(after.max - after.min).toBeLessThan(before.max - before.min); // b 구간이 빠져 범위가 줄었다
+    mark(a);
+    expect((await create(e, { vehicleId: V, kind: 'trip', tripIds: [a, b] })).body).toEqual({ error: 'trip_not_eligible' });
+  });
+
   it('전국 카드: 응답 형태, PNG(800x960)·SVG 모두 내려가고 비식별(좌표·way id·차량 ID 없음)', async () => {
     const e = await setup();
     const tripId = await drive(e);
@@ -56,9 +90,12 @@ describe('공유 카드', () => {
     const buf = Buffer.from(await png.arrayBuffer());
     expect(buf.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
     expect([buf.readUInt32BE(16), buf.readUInt32BE(20)]).toEqual([800, 960]);
-    const svgRes = await e.app.request(`/share/cards/${r.body.id}.svg`);
-    expect(svgRes.headers.get('content-type')).toContain('image/svg+xml');
-    const svg = await svgRes.text();
+    expect(png.headers.get('cache-control')).toBe('private, max-age=300');
+    expect(png.headers.get('content-security-policy')).toContain('sandbox');
+    expect(png.headers.get('x-content-type-options')).toBe('nosniff');
+    // 공개 경로는 PNG만: .svg는 없다
+    expect((await call(e, `/share/cards/${r.body.id}.svg`)).status).toBe(404);
+    const svg = await svgOf(e, r.body.id);
     expect(svg).toContain('© OpenStreetMap contributors');
     expect(svg).toContain('누비');
     expect(svg).toMatch(/전국 완료율 [\d.]+%/);
@@ -81,10 +118,13 @@ describe('공유 카드', () => {
     expect(svg).not.toMatch(/\d{2,3}\.\d{4,}/);
     for (const secret of [V, tripId, 'nm:']) expect(svg).not.toContain(secret);
     expect(svg).not.toMatch(/2026-11|T\d\d:\d\d/);
-    // 6.7km 궤적에서 양 끝 1km씩을 지우면 약 4.7km가 남는다. 틀은 최소 0.06°(약 6.67km)라 453px(= 540 × 0.84)를 6.67km에 대응시키면 약 319px(지우지 않으면 453px 가득)
+    // 6.7km 궤적에서 양 끝을 1km(반경) + 0.3km(경계 추가 절단)씩 지우면 약 4.1km가 남는다. 틀은 최소 0.06°(약 6.67km)라 453px(= 540 × 0.84)를 6.67km에 대응시키면 약 278px(지우지 않으면 453px 가득)
     const y = pathYRange(svg, 8)!;
-    expect(y.max - y.min).toBeGreaterThan(295);
-    expect(y.max - y.min).toBeLessThan(345);
+    expect(y.max - y.min).toBeGreaterThan(255);
+    expect(y.max - y.min).toBeLessThan(300);
+    // 좌표는 정수 픽셀로 양자화한다(경로 데이터에 소수점이 없다)
+    const d = /<path d="([^"]+)" fill="none" stroke="#f59e0b" stroke-width="8"/.exec(svg)![1]!;
+    expect(d).not.toContain('.');
   });
 
   it('여행 카드: 전부 반경 1km 안이면 그릴 것이 없어 409(too_short), 없는 트립·남의 트립은 404, 형식 오류는 400', async () => {

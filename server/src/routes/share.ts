@@ -4,7 +4,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
 import { nationalCard, roadCard, tripCard, type CardMeta } from '../ext/cards.js';
 import { publicBase, RateLimiter } from '../ext/auth.js';
-import { pngAvailable, svgToPng } from '../ext/render.js';
+import { svgToPng } from '../ext/render.js';
 import { iso, parseBody, type ExtDeps } from '../ext/util.js';
 import { canonicalVehicleId } from '../matching/pipeline.js';
 
@@ -17,7 +17,7 @@ const body = z.discriminatedUnion('kind', [
 
 /** 차량당 보관하는 카드 수(넘으면 오래된 것부터 지운다). */
 const MAX_CARDS_PER_VEHICLE = 100;
-const FILE_RE = /^([A-Za-z0-9_-]{8,40})\.(png|svg)$/;
+const FILE_RE = /^([A-Za-z0-9_-]{8,40})\.png$/;
 
 /** 공유 카드(plan 10-1): 이미지(PNG, 변환기가 없으면 SVG)로만 내보낸다. 좌표 원본·way id·차량 ID는 이미지와 응답에 없다. */
 export const shareRoutes = (deps: ExtDeps) => {
@@ -33,25 +33,37 @@ export const shareRoutes = (deps: ExtDeps) => {
       limiter.record(vehicleId);
       const r = p.data.kind === 'national' ? nationalCard(deps, vehicleId) : p.data.kind === 'trip' ? tripCard(deps, vehicleId, p.data.tripIds) : roadCard(deps, vehicleId, p.data.roadKey);
       if (!r.ok) return c.json({ error: r.error }, r.status);
+      // PNG는 만들 때 한 번만 렌더해 저장한다(GET은 저장본). 변환기가 없으면 SVG로 내보내지 않고 503이다(공개 경로는 PNG만).
+      const png = await (deps.options.pngRenderer ?? ((svg: string) => svgToPng(svg, deps.options.fontFile)))(r.svg);
+      if (!png) return c.json({ error: 'png_unavailable' }, 503);
       const cardId = randomBytes(12).toString('base64url');
-      db.prepare('INSERT INTO share_cards (id, vehicle_id, kind, svg, meta_json, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(cardId, vehicleId, p.data.kind, r.svg, JSON.stringify(r.meta satisfies CardMeta), iso(now()));
+      db.prepare('INSERT INTO share_cards (id, vehicle_id, kind, svg, png, meta_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+        cardId,
+        vehicleId,
+        p.data.kind,
+        r.svg,
+        png,
+        JSON.stringify(r.meta satisfies CardMeta),
+        iso(now()),
+      );
       db.prepare(
         `DELETE FROM share_cards WHERE vehicle_id = ? AND id NOT IN (SELECT id FROM share_cards WHERE vehicle_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
       ).run(vehicleId, vehicleId, MAX_CARDS_PER_VEHICLE);
       const base = publicBase(deps, c);
-      const ext = (await pngAvailable()) ? 'png' : 'svg';
-      return c.json({ id: cardId, url: `${base}/s/${cardId}`, imageUrl: `${base}/share/cards/${cardId}.${ext}` }, 200);
+      return c.json({ id: cardId, url: `${base}/s/${cardId}`, imageUrl: `${base}/share/cards/${cardId}.png` }, 200);
     })
-    .get('/share/cards/:file', async (c) => {
+    .get('/share/cards/:file', (c) => {
       const m = FILE_RE.exec(c.req.param('file'));
       if (!m) return c.json({ error: 'not_found' }, 404);
-      const row = db.prepare('SELECT svg FROM share_cards WHERE id = ?').get(m[1]) as { svg: string } | undefined;
-      if (!row) return c.json({ error: 'not_found' }, 404);
-      const headers = { 'cache-control': 'public, max-age=3600', 'x-content-type-options': 'nosniff', 'content-disposition': `inline; filename="nubi-${m[1]}.${m[2]}"` };
-      if (m[2] === 'svg') return c.body(row.svg, 200, { ...headers, 'content-type': 'image/svg+xml; charset=utf-8' });
-      const png = await svgToPng(row.svg, deps.options.fontFile);
-      if (!png) return c.json({ error: 'png_unavailable' }, 503);
-      return c.body(new Uint8Array(png), 200, { ...headers, 'content-type': 'image/png' });
+      const row = db.prepare('SELECT png FROM share_cards WHERE id = ?').get(m[1]) as { png: Uint8Array | null } | undefined;
+      if (!row?.png) return c.json({ error: 'not_found' }, 404);
+      return c.body(new Uint8Array(row.png), 200, {
+        'content-type': 'image/png',
+        'cache-control': 'private, max-age=300',
+        'x-content-type-options': 'nosniff',
+        'content-security-policy': "default-src 'none'; sandbox",
+        'content-disposition': `inline; filename="nubi-${m[1]}.png"`,
+      });
     })
     .delete('/share/cards/:id', (c) => {
       const vehicleId = c.req.query('vehicleId');

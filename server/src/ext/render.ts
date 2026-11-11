@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 /**
  * 공유 카드·내 지도 이미지 렌더러(plan 10-1). 도형은 도로 DB·지역 DB에서 읽되 **화면 픽셀 좌표로만** SVG에 싣는다.
  * 경도·위도 원본, way id, 차량 ID는 SVG에 들어가지 않는다. PNG는 SVG를 `@resvg/resvg-js`로 변환한다(없으면 SVG만).
@@ -29,7 +30,7 @@ export const KOREA_BBOX: [number, number, number, number] = [124.5, 33.0, 131.95
 
 export const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-/** bbox를 [w]x[h] 안에 비율을 지켜 맞추는 투영(경도는 중간 위도의 cos로 보정). 좌표는 소수 1자리 픽셀. */
+/** bbox를 [w]x[h] 안에 비율을 지켜 맞추는 투영(경도는 중간 위도의 cos로 보정). 좌표는 **정수 픽셀**로 양자화한다(내보내는 이미지에서 원래 좌표를 되돌리기 어렵게). */
 export const fit = (bbox: [number, number, number, number], w: number, h: number, pad = 0.04) => {
   const [minLon, minLat, maxLon, maxLat] = bbox;
   const k = Math.cos((((minLat + maxLat) / 2) * Math.PI) / 180);
@@ -38,7 +39,7 @@ export const fit = (bbox: [number, number, number, number], w: number, h: number
   const scale = Math.min((w * (1 - 2 * pad)) / spanX, (h * (1 - 2 * pad)) / spanY);
   const ox = (w - spanX * scale) / 2;
   const oy = (h - spanY * scale) / 2;
-  return (p: LonLat): [number, number] => [Math.round((ox + (p[0] - minLon) * k * scale) * 10) / 10, Math.round((oy + (maxLat - p[1]) * scale) * 10) / 10];
+  return (p: LonLat): [number, number] => [Math.round(ox + (p[0] - minLon) * k * scale), Math.round(oy + (maxLat - p[1]) * scale)];
 };
 
 /** 픽셀 간격 [minPx] 미만의 점을 솎는다(처음·끝은 남긴다). 점 하나로 줄면 짧은 점 선으로 그린다. */
@@ -51,11 +52,11 @@ const pathOf = (pts: [number, number][], minPx: number, seen: Set<string>): stri
   }
   if (pts.length > 1) kept.push(pts.at(-1)!);
   const last = kept.at(-1)!;
-  if (kept.length === 2 && Math.hypot(last[0] - kept[0]![0], last[1] - kept[0]![1]) < 0.4) {
+  if (kept.length === 2 && Math.hypot(last[0] - kept[0]![0], last[1] - kept[0]![1]) < 1) {
     const key = `${kept[0]![0]},${kept[0]![1]}`;
     if (seen.has(key)) return '';
     seen.add(key);
-    return `M${kept[0]![0]} ${kept[0]![1]}h0.1`;
+    return `M${kept[0]![0]} ${kept[0]![1]}h1`;
   }
   return 'M' + kept.map((p) => `${p[0]} ${p[1]}`).join('L');
 };
@@ -161,14 +162,32 @@ type ResvgModule = typeof import('@resvg/resvg-js');
 let resvg: Promise<ResvgModule | null> | null = null;
 const loadResvg = () => (resvg ??= import('@resvg/resvg-js').then((m) => m, () => null));
 
+const FONT_CANDIDATES = [
+  '/System/Library/Fonts/AppleSDGothicNeo.ttc',
+  '/System/Library/Fonts/Supplemental/AppleGothic.ttf',
+  '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+  '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+  '/usr/share/fonts/truetype/nanum/NanumGothic.ttf',
+  '/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc',
+];
+let fontCache: { want: string | undefined; path: string | null } | null = null;
+/** 한글 글꼴 파일 경로를 프로세스에서 한 번만 찾는다(지정 파일 → 알려진 경로). 없으면 null(시스템 글꼴 탐색으로 대신). */
+const findFont = (file?: string): string | null => {
+  const want = file ?? process.env.NUBI_CARD_FONT;
+  if (fontCache && fontCache.want === want) return fontCache.path;
+  const path = (want ? [want] : FONT_CANDIDATES).find((f) => existsSync(f)) ?? null;
+  fontCache = { want, path };
+  return path;
+};
+
 /** PNG 변환이 가능한가(`@resvg/resvg-js`가 올라오는가). */
 export const pngAvailable = async (): Promise<boolean> => (await loadResvg()) !== null;
 
-/** SVG → PNG(가로 800). 변환기가 없으면 null. */
+/** SVG → PNG(가로 800). 카드를 만들 때 한 번만 부른다(저장해 두고 GET은 저장본을 돌려준다). 변환기가 없으면 null. */
 export const svgToPng = async (svg: string, fontFile?: string): Promise<Buffer | null> => {
   const mod = await loadResvg();
   if (!mod) return null;
-  const font = fontFile ?? process.env.NUBI_CARD_FONT;
-  const r = new mod.Resvg(svg, { fitTo: { mode: 'width', value: 800 }, font: { loadSystemFonts: true, ...(font ? { fontFiles: [font] } : {}) } });
+  const font = findFont(fontFile);
+  const r = new mod.Resvg(svg, { fitTo: { mode: 'width', value: 800 }, font: font ? { fontFiles: [font], loadSystemFonts: false } : { loadSystemFonts: true } });
   return Buffer.from(r.render().asPng());
 };

@@ -1,7 +1,8 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { Hono, type Context } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
-import { clientKey, RateLimiter } from '../ext/auth.js';
+import { clientKey, publicBase, RateLimiter } from '../ext/auth.js';
 import { esc, htmlResponse, page } from '../ext/html.js';
 import { DAY_MS, iso, kstMonthRange, KST_MS, parseBody, type ExtDeps } from '../ext/util.js';
 import { canonicalVehicleId } from '../matching/pipeline.js';
@@ -17,6 +18,7 @@ export const DWELL_MS = 3 * 3_600_000;
 const MAX_PARK_MS = 7 * DAY_MS;
 
 const roadKeys = z.array(z.string().min(1).max(200)).min(1).max(100);
+const certBody = z.object({ vehicleId: z.string().min(1).max(128) });
 const courseBody = z.object({ name: z.string().trim().min(1).max(60), regionCode: z.string().regex(/^\d{5}$/), roadKeys });
 
 const eqKey = (a: string, b: string) => timingSafeEqual(createHash('sha256').update(a).digest(), createHash('sha256').update(b).digest());
@@ -177,6 +179,7 @@ export const b2bRoutes = (deps: ExtDeps) => {
   const courseJson = (c: Course) => ({ id: c.id, name: c.name, regionCode: c.region_code, roadKeys: c.road_keys, lengthKm: lengthKm(c.road_keys) });
 
   return new Hono()
+    .use('/b2b/*', bodyLimit({ maxSize: 8 * 1024, onError: (c) => c.json({ error: 'payload_too_large' }, 413) }))
     .get('/b2b/regions/:code/monthly', (c) => {
       const denied = guard(c);
       if (denied) return denied;
@@ -233,32 +236,50 @@ export const b2bRoutes = (deps: ExtDeps) => {
       });
       return c.json({ items }, 200);
     })
-    // 코스 완주 인증서(HTML, plan 13-7 시안 05). 차량 ID·운전자·날짜는 싣지 않는다.
-    .get('/courses/:id/certificate', (c) => {
-      const raw = c.req.query('vehicleId');
-      if (!raw) return htmlResponse(c, page({ title: '인증서', body: `<div class="logo">누비</div><div class="card err"><p>차량 정보가 필요합니다.</p></div>` }), 400);
+    // 코스 완주 인증서 발급(plan 13-7 시안 05): 완주한 차량만. 인증서는 추측 불가능한 id의 공개 페이지 `/c/:id`로 보인다(차량 ID가 URL에 없다).
+    // 같은 코스·차량은 같은 인증서를 돌려준다. 발급 시점의 코스 정보를 스냅샷으로 둔다(차량 ID·운전자·날짜는 싣지 않는다).
+    .post('/courses/:id/certificate', async (c) => {
+      const p = await parseBody(c, certBody);
+      if (!p.ok) return p.res;
       const course = loadCourse(deps, c.req.param('id'));
-      if (!course) return htmlResponse(c, page({ title: '인증서', body: `<div class="logo">누비</div><div class="card err"><p>코스를 찾을 수 없습니다.</p></div>` }), 404);
-      if (!deps.getRoads()) return htmlResponse(c, page({ title: '인증서', body: `<div class="logo">누비</div><div class="card err"><p>도로 데이터를 아직 쓸 수 없습니다.</p></div>` }), 503);
-      const vehicleId = canonicalVehicleId(db, raw);
-      if (completers(deps, course, vehicleId).length === 0)
-        return htmlResponse(c, page({ title: '코스 완주 인증서', body: `<div class="logo">누비</div><div class="card err"><p>아직 이 코스를 완주하지 않았습니다.</p></div>` }), 409);
+      if (!course) return c.json({ error: 'not_found' }, 404);
+      if (!deps.getRoads()) return c.json({ error: 'roads_db_unavailable' }, 503);
+      const vehicleId = canonicalVehicleId(db, p.data.vehicleId);
+      if (completers(deps, course, vehicleId).length === 0) return c.json({ error: 'not_completed' }, 409);
+      const base = publicBase(deps, c);
+      const have = db.prepare('SELECT id, cert_no FROM certificates WHERE course_id = ? AND vehicle_id = ?').get(course.id, vehicleId) as { id: string; cert_no: string } | undefined;
+      if (have) return c.json({ id: have.id, number: have.cert_no, url: `${base}/c/${have.id}` }, 200);
       const regions = deps.getRegions();
-      const km = lengthKm(course.road_keys);
-      const rn = regions?.names().get(course.region_code)?.displayName ?? course.region_code;
+      const snap = {
+        courseName: course.name,
+        regionName: regions?.names().get(course.region_code)?.displayName ?? course.region_code,
+        lengthKm: lengthKm(course.road_keys),
+        roads: course.road_keys.length,
+      };
+      const id = randomBytes(16).toString('base64url');
+      const number = certNo(course.id, vehicleId);
+      db.prepare('INSERT INTO certificates (id, course_id, vehicle_id, cert_no, snapshot_json, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(id, course.id, vehicleId, number, JSON.stringify(snap), iso(now()));
+      return c.json({ id, number, url: `${base}/c/${id}` }, 200);
+    })
+    .get('/c/:id', (c) => {
+      const row = /^[A-Za-z0-9_-]{16,64}$/.test(c.req.param('id'))
+        ? (db.prepare('SELECT cert_no, snapshot_json FROM certificates WHERE id = ?').get(c.req.param('id')) as { cert_no: string; snapshot_json: string } | undefined)
+        : undefined;
+      if (!row) return htmlResponse(c, page({ title: '인증서', body: `<div class="logo">누비</div><div class="card err"><p>인증서를 찾을 수 없습니다.</p></div>` }), 404);
+      const snap = JSON.parse(row.snapshot_json) as { courseName: string; regionName: string; lengthKm: number | null; roads: number };
       const body = `<div class="logo">누비</div>
 <p class="muted">차량 검증 코스 완주 인증</p>
 <h1>코스 완주 인증서</h1>
-<div class="card"><p style="color:var(--amber);font-size:22px;font-weight:800;margin:0">${esc(course.name)}${km !== null ? ` (차량 ${km}km)` : ''}</p></div>
+<div class="card"><p style="color:var(--amber);font-size:22px;font-weight:800;margin:0">${esc(snap.courseName)}${snap.lengthKm !== null ? ` (차량 ${snap.lengthKm}km)` : ''}</p></div>
 <div class="card">
-<p class="muted">인증 번호</p><p><b>${esc(certNo(course.id, vehicleId))}</b></p>
-<p class="muted">완주 구간</p><p><b style="font-size:28px;color:var(--fresh)">100%</b> <span class="muted">(코스 도로 ${course.road_keys.length}개 모두 완주)</span></p>
+<p class="muted">인증 번호</p><p><b>${esc(row.cert_no)}</b></p>
+<p class="muted">완주 기준</p><p><b>코스 도로 ${snap.roads}개를 모두 완주율 ${COMPLETE_PERCENT}% 이상으로 완주</b></p>
 <p class="muted">판정 근거</p><p><b>차량 위치·기어·오도미터로 검증</b></p>
-<p class="muted">제휴 지자체</p><p><b>${esc(rn)}</b></p>
+<p class="muted">제휴 지자체</p><p><b>${esc(snap.regionName)}</b></p>
 <p class="muted">표시 안 함</p><p><b>차량 ID · 운전자 · 날짜</b></p>
 </div>
 <div class="card" style="text-align:center"><div style="border:3px dashed #5b6b80;border-radius:14px;padding:36px 8px"><b>지자체 혜택 QR</b><br><span class="muted">(자리)</span></div></div>
 <p class="foot">© OpenStreetMap contributors · 누비</p>`;
-      return htmlResponse(c, page({ title: '코스 완주 인증서', body, description: `${course.name} 코스 완주 인증` }));
+      return htmlResponse(c, page({ title: '코스 완주 인증서', body, description: `${snap.courseName} 코스 완주 인증` }), 200, 'private, max-age=300');
     });
 };

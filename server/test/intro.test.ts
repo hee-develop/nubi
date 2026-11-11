@@ -49,7 +49,7 @@ describe('지역 소개', () => {
     expect(r.status).toBe(200);
     expect(r.body.sample).toBe(false);
     expect(r.body.items).toHaveLength(6);
-    expect(r.body.items[0]).toMatchObject({ kind: 'attraction', title: '제목-12-A', lat: 37.56, lon: 126.98, addr: '서울 중구 어딘가', distanceM: 120 });
+    expect(r.body.items[0]).toMatchObject({ kind: 'attraction', title: '제목-12-A', lat: 37.56, lon: 126.98, addr: '서울 중구 어딘가', distanceM: 0 }); // 거리는 API 값이 아니라 요청 위치에서 다시 계산
     expect(r.body.items[1].addr).toBeUndefined();
     expect(JSON.stringify(r.body)).not.toContain('SECRET-KEY-123');
     expect(urls.map((u) => new URL(u).searchParams.get('contentTypeId'))).toEqual(['12', '15', '39']);
@@ -65,6 +65,40 @@ describe('지역 소개', () => {
     e.clock.t += DAY;
     await call(e, '/regions/11140/intro?lat=37.56&lon=126.98');
     expect(fetchFn).toHaveBeenCalledTimes(6);
+  });
+
+  it('외부 호출에는 반올림한 좌표(0.01도)만 보내고, 거리는 정확한 위치에서 요청마다 다시 계산하며, 시군구 밖 좌표는 400', async () => {
+    const urls: URL[] = [];
+    const fetchFn = vi.fn(async (input: string | URL | Request) => {
+      urls.push(new URL(String(input)));
+      return ok([item('가까운곳', 126.98, 37.56), item('먼곳', 127.02, 37.56)]);
+    });
+    const e = extApp({ ext: { tourApiKey: 'k', fetchFn: fetchFn as unknown as typeof fetch } });
+    const r1 = await call(e, '/regions/11140/intro?lat=37.5649&lon=126.9751');
+    expect(r1.status).toBe(200);
+    expect(urls[0]!.searchParams.get('mapY')).toBe('37.56');
+    expect(urls[0]!.searchParams.get('mapX')).toBe('126.98');
+    expect(urls.every((u) => !u.toString().includes('37.5649') && !u.toString().includes('126.9751'))).toBe(true);
+    // 같은 칸(반올림 좌표가 같음)의 다른 위치: 호출은 캐시, 거리는 다시 계산
+    const r2 = await call(e, '/regions/11140/intro?lat=37.5551&lon=126.9840');
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+    const d = (r: any) => r.body.items.filter((i: any) => i.kind === 'attraction').map((i: any) => i.distanceM);
+    expect(d(r1)[0]).not.toBe(d(r2)[0]);
+    expect(d(r1)).toEqual([...d(r1)].sort((a: number, b: number) => a - b));
+    // 시군구 bbox 밖 위치
+    for (const q of ['lat=35.1&lon=129.0', 'lat=37.9&lon=126.98', 'lat=37.56&lon=128.5']) expect((await call(e, `/regions/11140/intro?${q}`)).body).toEqual({ error: 'invalid_point' });
+  });
+
+  it('요청 횟수 제한(출처별)과 TourAPI 일일 호출 상한을 넘으면 429(rate_limited), 캐시 적중은 상한에 세지 않는다', async () => {
+    const fetchFn = vi.fn(async () => ok([item('a', 126.98, 37.56)]));
+    const e = extApp({ ext: { tourApiKey: 'k', fetchFn: fetchFn as unknown as typeof fetch, rateLimit: { max: 1, windowMs: 60_000 } } });
+    // max=1 → 출처별 6회/창
+    for (let i = 0; i < 6; i++) expect((await call(e, '/regions/11140/intro')).status).toBe(200);
+    expect((await call(e, '/regions/11140/intro')).body).toEqual({ error: 'rate_limited' });
+    expect(fetchFn).toHaveBeenCalledTimes(3); // 캐시: 종류별 1회씩
+    const e2 = extApp({ ext: { tourApiKey: 'k', fetchFn: fetchFn as unknown as typeof fetch } });
+    e2.db.prepare("INSERT INTO intro_calls (day, n) VALUES ('2026-11-12', 1000)").run();
+    expect((await call(e2, '/regions/11140/intro')).body).toEqual({ error: 'rate_limited' });
   });
 
   it('TourAPI 오류(HTTP·네트워크·형식)는 502이고 키·URL을 로그·응답에 남기지 않으며, 잘못된 항목은 건너뛴다', async () => {

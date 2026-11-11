@@ -47,7 +47,7 @@ const buildReport = (deps: ExtDeps, vehicleId: string, fromMs: number, toMs: num
   const revived = roads
     ? (db
         .prepare(
-          `SELECT COALESCE(SUM(w.eff_length_m), 0) AS m FROM way_revived r JOIN ${RD}.ways w ON w.way_id = r.way_id
+          `SELECT COALESCE(SUM(w.eff_length_m * r.cov), 0) AS m FROM way_revived r JOIN ${RD}.ways w ON w.way_id = r.way_id
            WHERE r.vehicle_id IN ${VEHICLE_SET_SQL} AND r.revived_at >= ? AND r.revived_at < ?`,
         )
         .get(vehicleId, vehicleId, iso(fromMs), iso(toMs)) as { m: number })

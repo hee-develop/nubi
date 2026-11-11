@@ -15,6 +15,8 @@ export type CardResult = { ok: true; svg: string; meta: CardMeta } | { ok: false
 
 /** 여행 카드에서 출발·도착 지점 주변을 지우는 반경(m, plan 10-1 가안). */
 export const TRIP_CUT_RADIUS_M = 1_000;
+/** 반경 경계에서 남는 첫 조각의 끝점이 1km 지점을 그대로 드러내지 않도록, 경로를 따라 이만큼 더 자른다(양 끝). */
+export const TRIP_EDGE_EXTRA_M = 300;
 const MAX_TRIP_IDS = 20;
 
 const km1 = (m: number) => Math.round(m / 100) / 10;
@@ -68,7 +70,7 @@ export const nationalCard = (deps: ExtDeps, rawVehicleId: string): CardResult =>
   const sum = regions ? regionSummary(regionItems(deps.db, regions, levels)) : null;
   const revived = (
     deps.db
-      .prepare(`SELECT COALESCE(SUM(w.eff_length_m), 0) AS m FROM way_revived r JOIN ${RD}.ways w ON w.way_id = r.way_id WHERE r.vehicle_id IN ${VEHICLE_SET_SQL}`)
+      .prepare(`SELECT COALESCE(SUM(w.eff_length_m * r.cov), 0) AS m FROM way_revived r JOIN ${RD}.ways w ON w.way_id = r.way_id WHERE r.vehicle_id IN ${VEHICLE_SET_SQL}`)
       .get(vehicleId, vehicleId) as { m: number }
   ).m;
   const lines: string[] = [
@@ -95,18 +97,40 @@ export const tripCard = (deps: ExtDeps, rawVehicleId: string, tripIds: string[])
     )
     .all(...ids, vehicleId, vehicleId) as { id: string; started_at: string }[];
   if (rows.length !== ids.length) return { ok: false, status: 404, error: 'trip_not_found' };
+  // 의심(suspect: 오도미터 불일치 등) 트립은 카드에 쓰지 않는다.
+  const suspect = new Set(
+    (db.prepare(`SELECT trip_id, result_json FROM trip_matching WHERE trip_id IN (${ids.map(() => '?').join(',')})`).all(...ids) as { trip_id: string; result_json: string | null }[])
+      .filter((m) => {
+        try {
+          return m.result_json !== null && (JSON.parse(m.result_json) as { outcome?: string }).outcome === 'suspect';
+        } catch {
+          return false;
+        }
+      })
+      .map((m) => m.trip_id),
+  );
+  const eligible = rows.filter((t) => !suspect.has(t.id));
+  if (eligible.length === 0) return { ok: false, status: 409, error: 'trip_not_eligible' };
   const home = hiddenHome(deps, vehicleId);
   const regions = deps.getRegions();
   const runs: LonLat[][] = [];
-  for (const t of rows) {
+  for (const t of eligible) {
     const pts = db.prepare('SELECT lat, lon FROM trip_points WHERE trip_id = ? ORDER BY seq').all(t.id) as { lat: number; lon: number }[];
     if (pts.length < 2) continue;
     const a = pts[0]!;
     const b = pts.at(-1)!;
     let run: LonLat[] = [];
     let lastKept: { lat: number; lon: number } | null = null;
-    for (const p of pts) {
-      const cut = haversineM(a.lat, a.lon, p.lat, p.lon) <= TRIP_CUT_RADIUS_M || haversineM(b.lat, b.lon, p.lat, p.lon) <= TRIP_CUT_RADIUS_M;
+    // 경로를 따른 누적 거리(출발에서 · 도착까지)로도 자른다
+    const cum: number[] = [0];
+    for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1]! + haversineM(pts[i - 1]!.lat, pts[i - 1]!.lon, pts[i]!.lat, pts[i]!.lon));
+    const total = cum.at(-1)!;
+    for (const [i, p] of pts.entries()) {
+      const cut =
+        haversineM(a.lat, a.lon, p.lat, p.lon) <= TRIP_CUT_RADIUS_M ||
+        haversineM(b.lat, b.lon, p.lat, p.lon) <= TRIP_CUT_RADIUS_M ||
+        cum[i]! <= TRIP_CUT_RADIUS_M + TRIP_EDGE_EXTRA_M ||
+        total - cum[i]! <= TRIP_CUT_RADIUS_M + TRIP_EDGE_EXTRA_M;
       const inHome = !cut && home !== null && regions !== null && (() => { const c = regions.locate(p.lon, p.lat); return c !== null && regions.canonical(c) === home; })();
       if (cut || inHome) {
         if (run.length >= 2) runs.push(run);
@@ -164,10 +188,10 @@ export const tripCard = (deps: ExtDeps, rawVehicleId: string, tripIds: string[])
     : [];
   const lines = [
     `새 도로 ${Math.round(matched.km * 10) / 10}km`,
-    roadNames.length > 0 ? (roadNames.length > 1 ? `${roadNames[0]} 외 ${roadNames.length - 1}` : roadNames[0]!) : `${rows.length}번의 주행`,
+    roadNames.length > 0 ? (roadNames.length > 1 ? `${roadNames[0]} 외 ${roadNames.length - 1}` : roadNames[0]!) : `${eligible.length}번의 주행`,
     first.length > 0 ? `${first[0]!.n}${first.length > 1 ? ` 외 ${first.length - 1}곳` : ''} 첫 방문` : '',
   ];
-  const label = monthLabel(rows[0]!.started_at);
+  const label = monthLabel(eligible[0]!.started_at);
   const text: CardText = { label, lines: lines as CardText['lines'], aria: '출발·도착을 지운 주행 경로 조각' };
   return { ok: true, svg: cardSvg(inner, text, { fade: true }), meta: { kind: 'trip', label, lines: lines.filter(Boolean), aria: text.aria } };
 };
