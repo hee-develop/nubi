@@ -155,6 +155,17 @@ CREATE TABLE IF NOT EXISTS intro_cache (
 );
 `;
 
+/** B2B 코스(plan 13-7). 코스 = 도로(road_key) 목록 + 이름 + 시군구. 완주 인증서와 월 완주 집계가 쓴다. */
+export const SCHEMA_COURSES = `
+CREATE TABLE IF NOT EXISTS courses (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  region_code TEXT NOT NULL,
+  road_keys_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+`;
+
 /** 확장 스키마를 만든다. 여러 번 불러도 같다. */
 export const ensureExtSchema = (db: Db) => {
   db.exec(SCHEMA_FADE);
@@ -163,4 +174,5 @@ export const ensureExtSchema = (db: Db) => {
   db.exec(SCHEMA_SETTINGS);
   db.exec(SCHEMA_SHARE);
   db.exec(SCHEMA_INTRO);
+  db.exec(SCHEMA_COURSES);
 };

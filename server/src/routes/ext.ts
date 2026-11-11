@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { ensureExtSchema } from '../db/schema-ext.js';
 import type { ExtDeps } from '../ext/util.js';
 import { authMiddleware } from '../ext/auth.js';
+import { b2bRoutes } from './b2b.js';
 import { accountRoutes } from './account.js';
 import { guestRoutes } from './guest.js';
 import { introRoutes } from './intro.js';
@@ -17,5 +18,5 @@ export type { ExtOptions } from '../ext/util.js';
  */
 export const extRoutes = (deps: ExtDeps) => {
   ensureExtSchema(deps.db);
-  return new Hono().use('*', authMiddleware(deps)).route('/', guestRoutes(deps)).route('/', pairRoutes(deps)).route('/', accountRoutes(deps)).route('/', reportsRoutes(deps)).route('/', shareRoutes(deps)).route('/', introRoutes(deps));
+  return new Hono().use('*', authMiddleware(deps)).route('/', guestRoutes(deps)).route('/', pairRoutes(deps)).route('/', accountRoutes(deps)).route('/', reportsRoutes(deps)).route('/', shareRoutes(deps)).route('/', introRoutes(deps)).route('/', b2bRoutes(deps));
 };
