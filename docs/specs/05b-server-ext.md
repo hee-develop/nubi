@@ -14,6 +14,8 @@
 |---|---|---|---|
 | `NUBI_AUTH` | `ext.auth` | `off` | `off`/`optional`/`required` |
 | `NUBI_DEBUG=1` | `ext.debug` | 꺼짐 | `POST /debug/age`(production에서는 켜지지 않는다) |
+| `NUBI_TRUST_PROXY=<n>` | - | 0(신뢰 안 함) | 서버 앞의 신뢰하는 프록시 **홉 수**. X-Forwarded-For의 **오른쪽에서 n번째**를 클라이언트 주소로 쓴다(맨 왼쪽 금지). 아래 '배포 설정' 참고 |
+| - | `ext.inProcessLocal` | false | **테스트 전용**: 소켓 주소가 없는 프로세스 안 호출(`app.request`)을 로컬로 본다. 실제 서버는 항상 소켓 주소가 있어 영향 없음 |
 | `NUBI_PUBLIC_URL` | `ext.publicUrl` | 요청 origin | QR·공유 링크 바탕 주소 |
 | `NUBI_B2B_KEY` | `ext.b2bKey` | 없음 | 없으면 B2B API는 503 |
 | `NUBI_TOURAPI_KEY` | `ext.tourApiKey` | 없음 | 없으면 지역 소개는 예시 |
@@ -68,11 +70,19 @@
 ## 토큰 인증 (`NUBI_AUTH`)
 - 토큰은 32바이트 무작위 base64url이고 DB에는 SHA-256 해시만 저장한다. 종류: 차량 토큰(register 응답, 차량당 최근 5개, 만료 없이 폐기만), 계정 토큰(차주·게스트). 계정 토큰 scope: `api`(Bearer, 180일), `web`(쿠키, 7일, 내리기·삭제 가능), `view`(24시간 읽기 전용). `auth_tokens.expires_at`·`revoked_at`로 만료·폐기하고(연결 해제 = 폐기) Bearer API는 `api` scope만 받는다.
 - `optional`: Bearer가 있을 때만 검증(틀리면 401, 다른 차량이면 403). `required`: 모든 API에 Bearer 필요. 요청이 가리키는 **모든** 차량 ID(쿼리 `vehicleId`(반복 키 포함)·`/vehicles/:id/…` 경로·`/trips/:id…`의 트립 소유 차량·JSON 본문 `vehicleId`/`toVehicleId`/(alias 외) `fromVehicleId`)를 모아 하나라도 토큰 범위 밖이면 403. 본문을 16KB까지 읽지 못하면 413 fail-closed(트립 점 업로드는 본문을 파싱하지 않고 경로의 트립 소유만 본다). 게스트 계정은 차량 API 접근 불가.
-- alias(`POST /vehicles/alias`): `toVehicleId`는 토큰 범위여야 하고, `fromVehicleId`는 토큰이 있는 정본·차주 연결된 차량·다른 alias의 대상이면 409 `alias_source_is_vehicle`(모든 모드).
+- alias(`POST /vehicles/alias`): `toVehicleId`는 토큰 범위여야 하고, `fromVehicleId`는 토큰이 있는 정본·차주 연결된 차량·다른 alias의 대상이면 409 `alias_source_is_vehicle`(모든 모드). **인증 모드(optional·required)에서는 트립·인정 도로·시군구 기록이 하나라도 있는 ID도 출발점이 될 수 없다**(그 기록은 이미 누군가의 것). `off`에서는 차량 앱이 UUID로 올린 트립을 나중에 서버 ID에 잇는 기존 흐름을 위해 데이터 검사를 하지 않는다.
 - 본문 한도: 앱 전역 1MB(`content-length`를 먼저 보고 스트림도 센다, 미들웨어가 라우트보다 앞), settings·debug·B2B·share는 더 작게(1~8KB).
-- `off`에서도 파괴적·민감 호출(`DELETE /vehicles/:id/data`, `PUT /vehicles/:id/settings`, `POST /pair/code`)은 **로컬 접속(127.0.0.1·::1·10.0.2.x)만** 허용한다. 프록시 헤더(`X-Forwarded-For`·`Forwarded`·`X-Real-IP`)가 있으면 로컬이 아니다. 맞는 차량 토큰이 있으면 원격에서도 허용(optional). 차량 앱의 트립 업로드·조회 경로는 그대로다.
+- `off`에서도 파괴적·민감 호출(`DELETE /vehicles/:id/data`, `PUT /vehicles/:id/settings`, `POST /pair/code`, `POST /guest/code`, `POST /guest/end-all`)은 **로컬 접속(127.0.0.1·::1)만** 허용한다. 차량 에뮬레이터 트래픽도 호스트에서는 127.0.0.1로 보인다(10.0.2.x는 로컬이 아니다). **소켓 주소를 모르면 로컬이 아니다**(fail-closed). 신뢰 프록시 설정이 없는데 프록시 헤더(`X-Forwarded-For`·`Forwarded`·`X-Real-IP`)가 있으면 로컬이 아니다. 맞는 차량 토큰이 있으면 원격에서도 허용(optional). 차량 앱의 트립 업로드·조회 경로는 그대로다.
+- **공개 배포는 `NUBI_AUTH=optional` 이상이 필수이고, `off`는 로컬 개발 전용이다**(off의 보호는 위 로컬 제한뿐이다).
+- 본문 파싱(C1): 미들웨어가 JSON 본문을 **한 번만** 파싱해(Fetch 표준: UTF-8, 앞의 BOM 제거, UTF-16 등은 실패) 컨텍스트에 두고 범위 검사와 **모든 라우트**(`trips`·`vehicles` 포함)가 그 값만 쓴다(`bodyOf(c)`, 라우트가 `c.req.json()`을 직접 부르지 않는다). 인증 모드에서 비어 있지 않은 본문이 파싱에 실패하거나 JSON 객체가 아니면(배열·문자열·숫자·null) 미들웨어가 400 `invalid_body`로 막는다. 빈 본문은 라우트가 400. 폼 페이지(`/g`·`/p`·`/me`)는 JSON 파싱 대상이 아니다.
+- 경로 정규화: 차량 경로 판정은 점 구간·연속 슬래시·끝 슬래시를 접고 구간을 디코드한 경로로 한다(`/vehicles/V/./data` 우회 방지). `/vehicles/:id/…` 전체(alias·register 제외)를 차량 경로로 본다. 디코드할 수 없으면 400. 경로 파라미터에 차량 ID를 받는 새 라우트는 `vehicleScoped(deps)` 가드(기본 거부)를 함께 단다.
 - 면제: `/health`, `POST /vehicles/register`, `POST /pair/claim`, `POST /guest/claim`, 웹 페이지(`/g`·`/p`·`/me`·`/s`·`/c`), `/b2b/*`(자체 키), `/viewer`, `GET /share/cards/*`, `GET /courses`.
 - 코드 시도 제한: 출처(IPv6는 /64 단위)별 실패 10회/5분을 넘으면 맞는 코드도 429. 전역 잠금은 없다(서비스 거부 방지). 전체 실패가 많으면 실패 응답에 지연(최대 2초)만 건다. 한 코드를 건드린(페이지 열람·claim) 횟수가 8회를 넘으면 그 코드는 무효(410 `code_used`). JSON API와 웹 페이지가 한 카운터를 쓴다. 출처별 제한·카드·B2B 키 실패 제한은 메모리라 재시작하면 초기화된다.
+
+## 배포 설정 (프록시·쿠키)
+- 서버 앞에 리버스 프록시(예: nginx·ALB)가 n개 있으면 `NUBI_TRUST_PROXY=n`. 클라이언트 주소는 X-Forwarded-For의 **오른쪽에서 n번째**(프록시가 덧붙인 값)이고 맨 왼쪽은 클라이언트가 위조할 수 있어 쓰지 않는다. 프록시는 들어온 XFF를 지우지 말고 **뒤에 덧붙여야** 한다(프록시가 있는데 미설정이면 로컬 판정은 fail-closed, 시도 제한은 모든 사용자가 프록시 주소 하나로 묶인다). XFF가 n개보다 짧으면 소켓 주소로 돌아간다.
+- 같은 설정이 있을 때만 `X-Forwarded-Proto: https`를 믿어 쿠키에 `Secure`와 `__Host-` 접두사를 붙인다. 공개 주소가 https(`NUBI_PUBLIC_URL`)여도 같다. http 개발에서는 접두사 없는 `nubi_me`. 읽을 때는 두 이름을 모두 본다.
+- POST 웹 페이지(`/g|p/:code/join`, `/me/leave|delete-session|withdraw`)는 Origin(없으면 Referer)이 있으면 서비스 호스트와 같아야 하고 아니면 403(헤더가 없으면 통과). 쿠키는 SameSite=Lax라 이중 방어다.
 
 ## 게스트 규칙 구현
 - 인정 기준은 하나: **트립의 점 중 시각이 세션 창(시작~종료)에 드는 부분**. 트립 규칙(P 5분 등)은 바꾸지 않았고, 정차 중 탑승·하차(트립 도중)도 겹친 구간만 인정한다.
@@ -80,7 +90,8 @@
   - 시군구: 같은 겹친 점으로 통과를 판정하고(의심 트립 제외), 방문·숙박은 트립의 마지막 점이 창 안일 때(내리기 전에 도착)만 `region_events`에서 인정한다.
 - 차주 계정이 다른 차에 게스트로 탄 기록은 `/me/summary`·`/me/regions`·`/me` 페이지의 도로·시군구·완료율에 내 차량 기록과 합쳐 보인다(way·시군구별 최댓값).
 - 종료(먼저 오는 것): 내리기 · `end-all` · 마지막 트립 종료(진행 중이면 마지막 점) 후 12시간(읽기·claim·새 트립 시작 때 게으르게 적용, 종료 시각은 마지막 활동 + 12시간) · 게스트(차주 계정)가 자기 차에서 트립을 시작(`POST /trips` 성공 응답을 미들웨어가 본다).
-- 겹침: 같은 계정이 열린 세션이 있으면 새 세션은 409. 세션 전 트립은 소급하지 않는다.
+- 겹침: 같은 계정이 열린 세션이 있으면 새 세션은 409. 세션 전 트립은 소급하지 않는다. 웹에서 차주 쿠키로 `/g/:code/join`하면 그 차주 계정으로 앉는다(새 익명 계정·쿠키 재발급 없음).
+- 캐시: 게스트 도로 계산은 (세션 창·겹친 점 수·그 차량 `driven_ways` 갱신 버전)이 같으면 재사용하고, 시군구 계산도 입력 서명이 같으면 재사용한다.
 - 삭제: 세션 삭제는 도로 기록과 닉네임(`guest_sessions.nickname`)을 지운다. 게스트 탈퇴(`DELETE /me`, 웹 `/me/withdraw`)는 세션·닉네임·토큰·계정을 지운다.
 - 주의: 이 판정은 `driven_ways`를 **읽기만** 한다. `driven_ways`를 바꾸는 DB 트리거(되살림 `way_revived`)는 확정 매칭(`runMatching`의 upsert)만 대상이어야 한다. **T1의 실시간 잠정 매칭은 `driven_ways`에 쓰면 안 된다**(완료율·도감·되살림에 섞인다).
 
@@ -139,3 +150,20 @@
 | 데이터 삭제 | 삭제 후 진행 중 매칭이 결과를 쓸 수 있음 | 쓰기 직전 트립·동의 철회 재확인(경합 방지) | - |
 | 스키마 | `extRoutes()`가 만듦 | `openDb()`가 만듦(+열 마이그레이션) | - |
 | `app.ts` 연결 | `.route('/', extRoutes(...))`를 `/health` 뒤에 | `.use('*', ext.middleware)`를 **체인 맨 앞**, `.route('/', ext.routes)`는 아무 데나 | T1 합칠 때 |
+
+### 변경 이력 추가분 (재리뷰 반영)
+| 대상 | 이전 | 이후 | 영향 |
+|---|---|---|---|
+| JSON 본문 해석 | 미들웨어(`Buffer.toString`+`JSON.parse`)와 라우트(`Request.json()`)가 따로 읽음(BOM 본문으로 범위 검사 우회) | 미들웨어가 한 번 파싱(Fetch 표준, BOM 제거)해 모든 라우트가 같은 값 사용. 인증 모드에서 비어 있지 않은 본문의 파싱 실패·비객체 JSON은 400 `invalid_body` | T3·T4: 본문은 UTF-8 JSON 객체여야 한다(BOM은 허용) |
+| 차량 경로 인식 | `/vehicles/:id/(settings\|data)`만, 원본 경로 | `/vehicles/:id/…` 전체, 정규화한 경로(점 구간·`//`·끝 슬래시), 디코드 실패 400 | - |
+| alias 출발점(인증 모드) | 토큰·차주·alias 대상만 거부 | + 트립·인정 도로·시군구 기록이 있는 ID도 409 | T4: `from`은 데이터가 없는 새 UUID만(인증 모드). off는 기존대로 |
+| `off`의 로컬 판정 | 주소를 모르면 로컬, 10.0.2.x 허용, 프록시 헤더가 있으면 비로컬 | 주소를 모르면 **비로컬**, 10.0.2.x 비로컬, 신뢰 프록시 설정 시 오른쪽에서 n번째 주소로 판정 | 공개 배포는 optional 이상 필수 |
+| `off`의 민감 호출 | data 삭제·settings 변경·pair/code | + `POST /guest/code`·`POST /guest/end-all` | T4: 차량 에뮬레이터는 호스트에서 127.0.0.1로 보여 영향 없음 |
+| `NUBI_TRUST_PROXY` | `1`이면 XFF 맨 왼쪽 | `<홉 수>`, XFF 오른쪽에서 n번째 | 배포 설정 절 |
+| 웹 차주의 `/g/:code/join` | 새 익명 게스트 계정 + 쿠키 덮어쓰기 | 차주 계정으로 앉고 쿠키는 그대로 | - |
+| 웹 쿠키 | `nubi_me`, Secure는 공개 주소가 https일 때만 | https면 `__Host-nubi_me`+Secure(공개 주소·신뢰 프록시의 X-Forwarded-Proto), 읽기는 두 이름 | - |
+| `?v=` 링크 | 항상 view 쿠키로 교체 | 기존 web 쿠키가 있으면 덮어쓰지 않음 | - |
+| POST 웹 페이지 | 출처 검사 없음 | Origin/Referer이 다른 호스트면 403 | - |
+| 이전 계정 토큰(`expires_at` NULL) | 만료 없음 | 마이그레이션으로 생성 후 180일 | - |
+| `GET /regions/:code/intro` | 캐시·외부 호출이 (시군구·반올림 좌표) 단위, 출처별 60회/5분 | **시군구 단위**(좌표 무관, 시군구 중심 반올림 좌표로 호출), 출처별 20회/5분 | - |
+| `POST /share/cards` 제한 | 차량 ID 기준 | 토큰(있으면)·출처 기준 | - |
