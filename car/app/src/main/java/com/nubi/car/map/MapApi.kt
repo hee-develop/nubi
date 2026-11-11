@@ -1,5 +1,6 @@
 package com.nubi.car.map
 
+import com.nubi.car.trip.Auth
 import com.nubi.car.trip.HttpFailure
 import com.nubi.car.trip.getText
 import java.net.URLEncoder
@@ -17,8 +18,8 @@ interface MapApi {
     fun getLive(tripId: String, since: Long, nowMs: Long): LiveState?
 }
 
-/** [token]은 인증 토큰 공급자(T4가 채운다, 지금은 항상 null이라 헤더를 붙이지 않는다). */
-class HttpMapApi(private val baseUrl: String, private val token: () -> String? = { null }) : MapApi {
+/** [token]은 인증 토큰 공급자(기본은 [Auth.token], 없으면 헤더를 붙이지 않는다). */
+class HttpMapApi(private val baseUrl: String, private val token: () -> String? = { Auth.token }) : MapApi {
     private fun bbox(b: Bbox) = String.format(Locale.US, "%.5f,%.5f,%.5f,%.5f", b.minLon, b.minLat, b.maxLon, b.maxLat)
 
     override fun getBase(key: CellKey, vehicleId: String): BaseCell {

@@ -35,16 +35,97 @@ class VehicleIdResolver(
     private val executor: Executor,
     private val delay: (Long) -> Unit = { Thread.sleep(it) },
     private val attempts: Int = 3,
+    /** 차량 토큰 저장소(같은 DEK 암호화). 없으면 토큰을 디스크에 두지 않는다. */
+    private val tokenStore: VehicleIdStore? = null,
 ) {
     @Volatile
     var vehicleId: String? = null
         private set
 
+    /** 재등록용 VIN. 메모리에만 두고 저장·로그하지 않는다. */
+    @Volatile
+    private var lastVin: String? = null
+
+    /** 저장된 토큰을 읽어 [Auth]에 올렸는지, 서버에서 토큰을 받아 보려고 한 번 시도했는지(인증이 꺼진 서버는 토큰을 안 주므로 반복하지 않는다). */
+    @Volatile
+    private var tokenAttempted = false
+
+    init {
+        Auth.onUnauthorized = { onUnauthorized() }
+    }
+
     /** VIN을 읽기 전에도 이미 받아 둔 ID가 있으면 쓴다. */
     fun preload() = run { resolve(null) }
 
-    /** VIN 콜백에서 부른다(콜백 스레드를 막지 않는다). 이미 ID가 있으면 아무것도 하지 않는다. */
-    fun onVin(vin: String) = run { resolve(vin) }
+    /** VIN 콜백에서 부른다(콜백 스레드를 막지 않는다). 이미 ID가 있으면 아무것도 하지 않는다(토큰이 없을 때 한 번만 토큰을 받아 본다). */
+    fun onVin(vin: String) {
+        lastVin = vin
+        if (vehicleId != null && tokenStore != null && Auth.token == null && !tokenAttempted) {
+            tokenAttempted = true
+            runAlways { refreshToken() }
+            return
+        }
+        run { resolve(vin) }
+    }
+
+    /**
+     * 서버가 401·403을 줬다: 재등록(`POST /vehicles/register`)으로 새 토큰을 **1회** 받아 본다. 성공하면 다음 요청부터 새 토큰이 붙고,
+     * 실패하거나 이미 한 번 해 본 뒤라면 [Auth.failed]를 켠다(화면이 상태 문구를 보인다). 업로드 큐는 건드리지 않는다.
+     */
+    fun onUnauthorized() {
+        if (Auth.reregistered) {
+            Auth.failed = true
+            return
+        }
+        Auth.reregistered = true
+        runAlways {
+            if (!refreshToken()) Auth.failed = true
+        }
+    }
+
+    /** 저장된 VIN(메모리)으로 등록해 토큰을 받는다. 성공하면 true. */
+    @Synchronized
+    private fun refreshToken(): Boolean {
+        val vin = lastVin ?: return false
+        return try {
+            val r = api.registerWithToken(vin)
+            val t = r.token
+            if (t != null) {
+                Auth.token = t
+                try {
+                    tokenStore?.save(t)
+                } catch (e: Exception) {
+                    Log.w(TAG, "토큰 저장 실패(이번 실행에서만 사용): ${e.javaClass.simpleName}")
+                }
+            }
+            if (vehicleId == null) {
+                vehicleId = r.vehicleId
+                try {
+                    store.save(r.vehicleId)
+                } catch (e: Exception) {
+                    Log.w(TAG, "차량 ID 저장 실패: ${e.javaClass.simpleName}")
+                }
+            }
+            t != null
+        } catch (e: Exception) {
+            Log.w(TAG, "재등록 실패 ${e.javaClass.simpleName}")
+            false
+        }
+    }
+
+    private fun runAlways(block: () -> Unit) {
+        try {
+            executor.execute {
+                try {
+                    block()
+                } catch (t: Throwable) {
+                    Log.w(TAG, "토큰 작업 예외: ${t.javaClass.simpleName}")
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "토큰 작업 등록 실패: ${t.javaClass.simpleName}")
+        }
+    }
 
     private fun run(block: () -> Unit) {
         if (vehicleId != null) return
@@ -63,6 +144,7 @@ class VehicleIdResolver(
 
     @Synchronized
     private fun resolve(vin: String?) {
+        if (Auth.token == null) tokenStore?.load()?.let { Auth.token = it }
         if (vehicleId != null) return
         store.load()?.let {
             vehicleId = it
@@ -72,7 +154,17 @@ class VehicleIdResolver(
         for (i in 1..attempts) {
             var retry = true
             try {
-                val id = api.register(vin)
+                val reg = api.registerWithToken(vin)
+                val id = reg.vehicleId
+                reg.token?.let { t ->
+                    Auth.token = t
+                    try {
+                        tokenStore?.save(t)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "토큰 저장 실패(이번 실행에서만 사용): ${e.javaClass.simpleName}")
+                    }
+                }
+                tokenStore?.let { tokenAttempted = true }
                 try {
                     store.save(id)
                 } catch (e: Exception) {

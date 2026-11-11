@@ -23,6 +23,9 @@ interface TripApi {
     fun aliasVehicle(e: QueueEntry.Alias)
 }
 
+/** 등록 응답: 서버 발급 차량 ID와 (서버 인증이 켜져 있을 때만 오는) 차량 토큰. */
+data class Registration(val vehicleId: String, val token: String?)
+
 class HttpTripApi(private val baseUrl: String) : TripApi {
     override fun createTrip(e: QueueEntry.Start): String {
         val body = JSONObject()
@@ -73,35 +76,68 @@ class HttpTripApi(private val baseUrl: String) : TripApi {
 interface VehicleApi {
     /** VIN을 보내 서버가 발급한 차량 ID(HMAC-SHA256 hex)를 받는다. */
     fun register(vin: String): String
+
+    /** [register]와 같되 차량 토큰도 받는다(서버가 인증을 안 쓰면 null). 기본 구현은 토큰 없이 [register]로 위임한다. */
+    fun registerWithToken(vin: String): Registration = Registration(register(vin), null)
 }
 
 class HttpVehicleApi(private val baseUrl: String) : VehicleApi {
-    override fun register(vin: String): String {
+    override fun register(vin: String): String = registerWithToken(vin).vehicleId
+
+    override fun registerWithToken(vin: String): Registration {
         // VIN은 개인정보에 준하므로 release에서는 TLS(https)가 아니면 보내지 않는다. debug는 에뮬레이터 로컬 서버(평문)를 허용한다.
         if (!BuildConfig.DEBUG && !baseUrl.startsWith("https://")) throw PermanentFailure("TLS 필요")
-        val text = postJson(baseUrl, "/vehicles/register", JSONObject().put("vin", vin))
+        val text = postJson(baseUrl, "/vehicles/register", JSONObject().put("vin", vin), authorize = false)
         return try {
-            JSONObject(text).getString("vehicleId").also { require(it.isNotBlank()) }
+            val o = JSONObject(text)
+            Registration(o.getString("vehicleId").also { require(it.isNotBlank()) }, o.optString("vehicleToken", "").takeIf { it.isNotBlank() })
         } catch (ex: Exception) {
             throw IOException("응답 형식 오류 /vehicles/register")
         }
     }
 }
 
-internal fun postJson(baseUrl: String, path: String, body: JSONObject): String {
+internal fun postJson(baseUrl: String, path: String, body: JSONObject, authorize: Boolean = true): String =
+    sendJson(baseUrl, "POST", path, body, authorize)
+
+internal fun putJson(baseUrl: String, path: String, body: JSONObject): String = sendJson(baseUrl, "PUT", path, body, true)
+
+internal fun deleteRequest(baseUrl: String, path: String): String = sendJson(baseUrl, "DELETE", path, null, true)
+
+/** 본문이 있는 요청(POST·PUT)과 DELETE. 토큰이 있으면 `Authorization: Bearer`를 붙이고 401·403이면 [Auth.onUnauthorized]를 부른다. */
+private fun sendJson(baseUrl: String, method: String, path: String, body: JSONObject?, authorize: Boolean): String {
     val conn = URL(baseUrl + path).openConnection() as HttpURLConnection
     try {
-        conn.requestMethod = "POST"
+        conn.requestMethod = method
         conn.connectTimeout = 5_000
         conn.readTimeout = 10_000
-        conn.doOutput = true
-        conn.setRequestProperty("Content-Type", "application/json")
-        conn.outputStream.use { it.write(body.toString().toByteArray()) }
+        val token = if (authorize) Auth.token else null
+        if (token != null) conn.setRequestProperty("Authorization", "Bearer $token")
+        if (body != null) {
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.outputStream.use { it.write(body.toString().toByteArray()) }
+        }
         val code = conn.responseCode
         val text = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() } ?: ""
-        if (code in 200..299) return text
-        throw HttpFailure(code, "HTTP $code $path")
+        return finishResponse(code, text, path, token != null)
     } finally {
         conn.disconnect()
     }
+}
+
+/** 응답 공통 처리: 2xx면 본문, 아니면 [HttpFailure]. 401·403은 재등록 훅을 부른다. 쿼리스트링(좌표·차량 ID)은 메시지에 남기지 않는다. */
+internal fun finishResponse(code: Int, text: String, path: String, hadToken: Boolean): String {
+    if (code in 200..299) {
+        if (hadToken) Auth.onAuthorized()
+        return text
+    }
+    if (code == 401 || code == 403) {
+        try {
+            Auth.onUnauthorized()
+        } catch (t: Throwable) {
+            // 재등록 훅의 예외가 응답 처리를 막지 않는다
+        }
+    }
+    throw HttpFailure(code, "HTTP $code ${path.substringBefore('?')}")
 }
