@@ -178,7 +178,7 @@ class ParkedMenu(
             }
             MenuTab.SETTINGS -> {
                 add(extras.settings); add(extras.settingsError); add(extras.deleteStep); add(homePicking); add(voiceOn())
-                add(System.identityHashCode(extras.pair)); add(extras.codeError)
+                add(System.identityHashCode(extras.pair)); add(System.identityHashCode(extras.guest)); add(extras.guestCount); add(extras.codeError)
                 add(extras.dex.status)
             }
             MenuTab.MAP -> Unit
@@ -353,6 +353,7 @@ class ParkedMenu(
 
     private var countdownView: TextView? = null
     private var countdownPrefix: String? = null
+    private var countdownState: CodeState? = null
 
     /** QR + 설명(코드가 있으면 6자리 코드와 남은 시간) + 닫기. 남은 시간은 [updateCountdown]이 숫자만 1초마다 바꾼다. */
     private fun qrBlock(state: CodeState, hint: String, tag: String, onClose: () -> Unit) {
@@ -373,6 +374,7 @@ class ParkedMenu(
             val t = text(hint.replace("%1\$s", state.code), 24f)
             countdownView = t
             countdownPrefix = hint
+            countdownState = state
             t.tag = "code_hint"
         } else {
             text(hint, 24f)
@@ -386,7 +388,7 @@ class ParkedMenu(
 
     /** 코드가 있는 QR(차주 연결)의 남은 시간 문구를 갱신한다. */
     private fun updateCountdown() {
-        val st = extras.pair ?: return
+        val st = countdownState ?: return
         val view = countdownView ?: return
         val hint = countdownPrefix ?: return
         view.text = formatHint(hint, st)
@@ -412,6 +414,7 @@ class ParkedMenu(
         button(activity.getString(R.string.settings_voice, onOff(v)), "set_voice", parent = row()) { onVoiceToggle(!v); shownSignature = null; onChange() }
         val homeName = s.homeRegion?.let { code -> extras.dex.value?.firstOrNull { it.code == code }?.displayName } ?: s.homeRegion
         button(activity.getString(R.string.settings_home, homeName ?: activity.getString(R.string.settings_home_none)), "set_home", parent = row()) { homePicking = true; shownSignature = null; onChange() }
+        if (FeatureFlags.guest) buildGuest()
         if (FeatureFlags.guest || FeatureFlags.share) {
             val pair = extras.pair
             if (pair == null) {
@@ -422,6 +425,21 @@ class ParkedMenu(
             }
         }
         buildDelete()
+    }
+
+    /** 같이 탄 사람: 정차 지도 패널의 게스트 카드와 같은 상태(QR·6자리 코드·남은 시간·인원·모두 내리기)를 설정 탭에서도 쓴다. */
+    private fun buildGuest() {
+        val g = extras.guest
+        val n = extras.guestCount ?: 0
+        if (g == null) {
+            val r = row()
+            button(activity.getString(R.string.guest_add), "guest_add_tab", parent = r) { extras.requestGuestCode(); extras.refreshGuestCount(); onChange() }
+            if (n > 0) button(activity.getString(R.string.guest_end_all), "guest_end_all_tab", parent = r) { extras.endAllGuests(); onChange() }
+            codeErrorText(CodeKind.GUEST)
+        } else {
+            qrBlock(g, activity.getString(R.string.guest_code_format, "%1\$s", "%2\$s"), "guest_qr_tab") { extras.closeCode(CodeKind.GUEST); onChange() }
+        }
+        if (n > 0) text(activity.getString(R.string.guest_count, n), 22f, R.color.muted)
     }
 
     private fun buildDelete() {

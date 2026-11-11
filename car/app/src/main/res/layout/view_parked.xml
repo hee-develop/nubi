@@ -607,29 +607,42 @@
                     android:textColor="@color/depop"
                     android:textSize="@dimen/text_sub"
                     android:textStyle="bold" />
+
+                <!-- 이웃 길안내(전체형·축약형 모두 하나): 이웃 시군구 중심점으로 요청한다 -->
+                <TextView
+                    android:id="@+id/navi_compact"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="20dp"
+                    android:background="@drawable/bg_button"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:gravity="center"
+                    android:paddingStart="32dp"
+                    android:paddingTop="12dp"
+                    android:paddingEnd="32dp"
+                    android:paddingBottom="12dp"
+                    android:text="@string/navigate"
+                    android:textColor="@color/on_accent"
+                    android:textSize="@dimen/text_body"
+                    android:textStyle="bold"
+                    android:visibility="gone" />
             </LinearLayout>
 
-            <!-- 축약형(좁은 앱 영역): 이웃 이름 + 태그 + 길안내 1개만 보인다 -->
             <TextView
-                android:id="@+id/navi_compact"
+                android:id="@+id/poi_label"
                 android:layout_width="match_parent"
-                android:layout_height="@dimen/button_height"
-                android:layout_marginTop="20dp"
-                android:background="@drawable/bg_button"
-                android:clickable="true"
-                android:focusable="true"
-                android:gravity="center"
-                android:text="@string/navigate"
-                android:textColor="@color/on_accent"
-                android:textSize="@dimen/text_logo"
-                android:textStyle="bold"
-                android:visibility="gone" />
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="@string/poi_label"
+                android:textColor="@color/muted"
+                android:textSize="@dimen/text_sub" />
 
             <LinearLayout
                 android:id="@+id/poi_row"
                 android:layout_width="match_parent"
                 android:layout_height="0dp"
-                android:layout_marginTop="32dp"
+                android:layout_marginTop="8dp"
                 android:layout_weight="1"
                 android:orientation="horizontal">
 
@@ -642,6 +655,7 @@
                     android:padding="@dimen/poi_pad">
 
                     <TextView
+                        android:id="@+id/poi_sight_kind"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="@string/poi_kind_sight"
@@ -650,6 +664,7 @@
                         android:textStyle="bold" />
 
                     <TextView
+                        android:id="@+id/poi_sight_title"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
@@ -661,6 +676,7 @@
                         android:textStyle="bold" />
 
                     <TextView
+                        android:id="@+id/poi_sight_sub"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
@@ -697,6 +713,7 @@
                     android:padding="@dimen/poi_pad">
 
                     <TextView
+                        android:id="@+id/poi_festival_kind"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="@string/poi_kind_festival"
@@ -705,6 +722,7 @@
                         android:textStyle="bold" />
 
                     <TextView
+                        android:id="@+id/poi_festival_title"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
@@ -716,6 +734,7 @@
                         android:textStyle="bold" />
 
                     <TextView
+                        android:id="@+id/poi_festival_sub"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"

@@ -34,7 +34,7 @@ interface ExtrasApi {
     fun shareNational(vehicleId: String): String
 
     /** 지역 소개. [lat]·[lon]은 그 시군구 안의 현재 위치(길안내 거리 정렬용). */
-    fun intro(code: String, lat: Double, lon: Double): Intro
+    fun intro(code: String, lat: Double?, lon: Double?): Intro
 }
 
 class HttpExtrasApi(private val baseUrl: String) : ExtrasApi {
@@ -81,6 +81,6 @@ class HttpExtrasApi(private val baseUrl: String) : ExtrasApi {
 
     override fun shareNational(vehicleId: String) = parseShareUrl(postJson(baseUrl, "/share/cards", JSONObject().put("vehicleId", vehicleId).put("kind", "national")))
 
-    override fun intro(code: String, lat: Double, lon: Double) =
-        parseIntro(getText(baseUrl, String.format(Locale.US, "/regions/%s/intro?lat=%.5f&lon=%.5f", enc(code), lat, lon)))
+    override fun intro(code: String, lat: Double?, lon: Double?) =
+        parseIntro(getText(baseUrl, if (lat == null || lon == null) "/regions/${enc(code)}/intro" else String.format(Locale.US, "/regions/%s/intro?lat=%.5f&lon=%.5f", enc(code), lat, lon)))
 }

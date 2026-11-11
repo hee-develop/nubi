@@ -41,7 +41,7 @@ class ExtrasControllerTest {
         override fun guestEndAll(vehicleId: String) = 2
         override fun pairCode(vehicleId: String) = CodeInfo("654321", "http://x/p/654321", 0)
         override fun shareNational(vehicleId: String) = "http://x/s/abc"
-        override fun intro(code: String, lat: Double, lon: Double) = Intro(code, true, emptyList())
+        override fun intro(code: String, lat: Double?, lon: Double?) = Intro(code, true, emptyList())
     }
 
     private var parked = true

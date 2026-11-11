@@ -134,6 +134,7 @@
     <string name="state_paused">기록 멈춤</string>
     <string name="auth_failed">서버 인증에 실패했어요</string>
     <!-- 지역 소개(05d) -->
+    <string name="poi_label">지금 있는 곳 소개</string>
     <string name="poi_source_real">자료: 한국관광공사</string>
     <string name="poi_kind_food">맛집</string>
     <!-- 하차 요약 카드 -->

@@ -74,6 +74,11 @@ class Views(val root: View) {
     val naviCompact: TextView = id(R.id.navi_compact)
     val naviSight: TextView = id(R.id.navi_sight)
     val naviFestival: TextView = id(R.id.navi_festival)
+    val poiLabel: TextView = id(R.id.poi_label)
+    val poiSightTitle: TextView = id(R.id.poi_sight_title)
+    val poiSightSub: TextView = id(R.id.poi_sight_sub)
+    val poiFestivalTitle: TextView = id(R.id.poi_festival_title)
+    val poiFestivalSub: TextView = id(R.id.poi_festival_sub)
     val poiSource: TextView = id(R.id.poi_source)
     val naviStatus: TextView = id(R.id.navi_status)
 }

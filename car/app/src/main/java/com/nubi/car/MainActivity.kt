@@ -30,6 +30,8 @@ import com.nubi.car.screens.CodeError
 import com.nubi.car.screens.CodeKind
 import com.nubi.car.screens.CodeState
 import com.nubi.car.screens.ExtrasController
+import com.nubi.car.screens.IntroItem
+import com.nubi.car.screens.IntroTracker
 import com.nubi.car.screens.ParkedMenu
 import com.nubi.car.screens.UxState
 import com.nubi.car.screens.formatRemaining
@@ -79,6 +81,7 @@ class MainActivity : Activity() {
     private lateinit var navi: NaviLauncher
     private lateinit var map: MapScreen
     private lateinit var extras: ExtrasController
+    private lateinit var introTracker: IntroTracker
     private lateinit var menu: ParkedMenu
     private lateinit var v: Views
     private val handler = Handler(Looper.getMainLooper())
@@ -132,6 +135,7 @@ class MainActivity : Activity() {
         place = TripEngineProvider.place(this)
         map = TripEngineProvider.map(this)
         extras = TripEngineProvider.extras(this)
+        introTracker = TripEngineProvider.intro(this)
         navi = NaviLauncher(this)
         setContentView(R.layout.activity_main)
         v = Views(findViewById(R.id.root))
@@ -151,9 +155,9 @@ class MainActivity : Activity() {
         v.restartButton.setOnClickListener { startService() }
         v.permissionConfirm.setOnClickListener { requestPermissions() }
         v.permissionSettings.setOnClickListener { openAppSettings() }
-        v.naviSight.setOnClickListener { navigate() }
-        v.naviFestival.setOnClickListener { navigate() }
-        v.naviCompact.setOnClickListener { navigate() }
+        v.naviSight.setOnClickListener { shownSight?.let { navigateTo(KEY_SIGHT, it.title, it.lat, it.lon) } }
+        v.naviFestival.setOnClickListener { shownFestival?.let { navigateTo(KEY_FESTIVAL, it.title, it.lat, it.lon) } }
+        v.naviCompact.setOnClickListener { shownNeighbor?.let { navigateTo(it.code, it.displayName, it.lat, it.lon) } }
         // 정차 지도 버튼. 주행 규제(DO)·정차 아님이면 버튼이 안 보이지만 한 번 더 막는다(fail-closed).
         v.mapBtnZoomIn.setOnClickListener { if (mapTouchAllowed()) map.zoomIn() }
         v.mapBtnZoomOut.setOnClickListener { if (mapTouchAllowed()) map.zoomOut() }
@@ -590,7 +594,9 @@ class MainActivity : Activity() {
         }
         v.neighborCard.visibility = if (cardLayout == NeighborLayout.HIDDEN) View.GONE else View.VISIBLE
         shownNeighbor = null
-        if (cardLayout != NeighborLayout.HIDDEN) renderNeighbor(info?.neighbor, info?.neighborsAllVisited == true, cardLayout)
+        shownSight = null
+        shownFestival = null
+        if (cardLayout != NeighborLayout.HIDDEN) renderNeighbor(info?.neighbor, info?.neighborsAllVisited == true, cardLayout, here?.code)
         foldToFit()
     }
 
@@ -659,36 +665,71 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun renderNeighbor(n: Neighbor?, allVisited: Boolean, layout: NeighborLayout) {
+    /** 이번 렌더에서 카드에 보인 지역 소개 항목(관광지·축제). 카드가 안 보이면 null. */
+    private var shownSight: IntroItem? = null
+    private var shownFestival: IntroItem? = null
+
+    /**
+     * 이웃 카드(이웃 이름·인구감소 태그·이웃 길안내 1개)와 그 아래 지금 시군구의 지역 소개 카드(관광지·축제, `/regions/:code/intro`).
+     * 소개는 서버 응답이 오면 보이고(응답이 `sample`이면 '예시' 표기), 없으면(받는 중·실패·플래그 꺼짐) 숨긴다. 길안내는 각각 그 항목의 좌표로 보낸다.
+     */
+    private fun renderNeighbor(n: Neighbor?, allVisited: Boolean, layout: NeighborLayout, hereCode: String?) {
         v.neighborName.text = n?.displayName ?: getString(if (allVisited) R.string.neighbor_all_visited else R.string.neighbor_unknown)
         v.depopTag.visibility = if (n?.depop92 == true) View.VISIBLE else View.GONE
-        // 목적지(이웃 중심점)를 모르거나 안 가 본 이웃이 없으면 항목 카드·길안내 버튼은 숨긴다.
         val hasNeighbor = n != null
         val full = layout == NeighborLayout.FULL
-        v.poiRow.visibility = if (hasNeighbor && full) View.VISIBLE else View.GONE
-        v.poiSource.visibility = if (hasNeighbor && full) View.VISIBLE else View.GONE
-        v.naviCompact.visibility = if (hasNeighbor && !full) View.VISIBLE else View.GONE
+        // 이웃 길안내는 전체형·축약형 모두 하나 남긴다
+        v.naviCompact.visibility = if (hasNeighbor) View.VISIBLE else View.GONE
         shownNeighbor = n
-        if (naviMessageFor != n?.code) naviMessage = null
-        v.naviStatus.text = if (hasNeighbor) naviMessage ?: "" else ""
-        v.naviStatus.visibility = if (hasNeighbor && naviMessage != null) View.VISIBLE else View.GONE
+        // 지역 소개: 지금 시군구의 것만(옛 시군구의 소개를 남기지 않는다). 좁은 축약형에서는 접는다
+        if (FeatureFlags.intro) introTracker.ensure(hereCode, engine.status.lastLocation)
+        val intro = if (FeatureFlags.intro && full) introTracker.intro?.takeIf { it.code == hereCode } else null
+        val sight = intro?.first("attraction")
+        val festival = intro?.first("festival")
+        shownSight = sight
+        shownFestival = festival
+        val showPoi = intro != null && (sight != null || festival != null)
+        v.poiRow.visibility = if (showPoi) View.VISIBLE else View.GONE
+        v.poiLabel.visibility = if (showPoi) View.VISIBLE else View.GONE
+        v.poiSource.visibility = if (showPoi) View.VISIBLE else View.GONE
+        if (showPoi && intro != null) {
+            bindPoi(v.poiSightTitle, v.poiSightSub, v.naviSight, sight, intro.sample)
+            bindPoi(v.poiFestivalTitle, v.poiFestivalSub, v.naviFestival, festival, intro.sample)
+            v.poiSource.text = getString(if (intro.sample) R.string.poi_source else R.string.poi_source_real)
+        }
+        val keys = listOfNotNull(n?.code, if (sight != null) KEY_SIGHT else null, if (festival != null) KEY_FESTIVAL else null)
+        if (naviMessageFor !in keys) naviMessage = null
+        val anyTarget = keys.isNotEmpty()
+        v.naviStatus.text = if (anyTarget) naviMessage ?: "" else ""
+        v.naviStatus.visibility = if (anyTarget && naviMessage != null) View.VISIBLE else View.GONE
     }
 
-    /** 길안내 버튼: 화면에 보인 이웃의 시군구 중심점까지 NaviHelper로 경로를 요청한다. 버튼이 안 보이는 상태(DO·기어 P 아님)에서는 한 번 더 막는다. */
-    private fun navigate() {
+    private fun bindPoi(title: TextView, sub: TextView, button: TextView, item: IntroItem?, sample: Boolean) {
+        val shown = item != null
+        title.text = item?.title?.let { limitText(it, distractionOptimized, maxStringLength, statusLine = false) } ?: ""
+        // 샘플이면 '예시 항목', 실데이터면 주소(없으면 비움)
+        sub.text = if (sample) getString(R.string.poi_example) else item?.addr ?: ""
+        sub.visibility = if (shown && sub.text.isNotEmpty()) View.VISIBLE else View.GONE
+        button.visibility = if (shown) View.VISIBLE else View.GONE
+        (title.parent as View).visibility = if (shown) View.VISIBLE else View.INVISIBLE
+    }
+
+    /** 길안내 버튼: 보인 항목(이웃 중심점·관광지·축제)의 좌표로 NaviHelper 경로를 요청한다. 버튼이 안 보이는 상태(DO·기어 P 아님)에서는 한 번 더 막는다. */
+    private fun navigateTo(key: String, name: String, lat: Double, lon: Double) {
         val s = engine.status
         if (!extrasVisible(numbersVisible(s.gear, s.state), distractionOptimized)) return
-        val n = shownNeighbor ?: return
-        naviMessageFor = n.code
-        navi.request(n.displayName, n.lat, n.lon) { ok ->
+        naviMessageFor = key
+        navi.request(name, lat, lon) { ok ->
             naviMessage = getString(if (ok) R.string.navigate_sent else R.string.navigate_failed)
-            naviMessageFor = n.code
+            naviMessageFor = key
             render()
         }
     }
 
     private companion object {
         const val REQUEST_CODE = 1
+        const val KEY_SIGHT = "poi:sight"
+        const val KEY_FESTIVAL = "poi:festival"
         const val FUSED_LOCATION = "pleos.car.permission.FUSED_LOCATION"
         const val COARSE = "android.permission.ACCESS_COARSE_LOCATION"
         val REQUIRED = listOf(FUSED_LOCATION, COARSE)

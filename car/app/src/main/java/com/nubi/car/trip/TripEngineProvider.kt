@@ -12,6 +12,7 @@ import com.nubi.car.map.MapScreen
 import com.nubi.car.FeatureFlags
 import com.nubi.car.screens.ExtrasController
 import com.nubi.car.screens.HttpExtrasApi
+import com.nubi.car.screens.IntroTracker
 import com.nubi.car.screens.UxState
 import com.nubi.car.screens.qrAllowed
 import com.nubi.car.signals.VehicleInfo
@@ -39,6 +40,9 @@ object TripEngineProvider {
 
     @Volatile
     private var extrasController: ExtrasController? = null
+
+    @Volatile
+    private var introTracker: IntroTracker? = null
 
     fun get(context: Context): TripEngine =
         instance ?: synchronized(this) { instance ?: create(context.applicationContext).also { instance = it } }
@@ -71,6 +75,12 @@ object TripEngineProvider {
     fun extras(context: Context): ExtrasController {
         get(context)
         return extrasController!!
+    }
+
+    /** 지금 시군구의 지역 소개(관광지·축제). 엔진과 같은 수명이다. */
+    fun intro(context: Context): IntroTracker {
+        get(context)
+        return introTracker!!
     }
 
     private fun create(context: Context): TripEngine {
@@ -159,12 +169,14 @@ object TripEngineProvider {
             onDataDeleted = {
                 coverage.clear()
                 place.clear()
+                introTracker?.clear()
                 screen.onTripSettled()
                 coverage.refreshNational()
                 coverage.refreshRegions()
             },
         )
         extrasController = extras
+        introTracker = IntroTracker(HttpExtrasApi(BuildConfig.SERVER_URL), Executors.newSingleThreadExecutor { r -> Thread(r, "nubi-intro").apply { isDaemon = true } }, { SystemClock.elapsedRealtime() })
         // 정차(P) 진입 때 서버 설정을 다시 읽는다(폰에서 바꾼 기록 멈춤 등)
         val parkedBefore = engine.onParked
         engine.onParked = {
