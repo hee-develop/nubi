@@ -31,6 +31,16 @@
             android:textSize="@dimen/text_logo"
             android:textStyle="bold" />
 
+        <!-- 상태 문구(기록 중·종료됨 등)는 헤더의 상태 칩 옆에 둔다(제목의 '지금' 줄을 비워 시군구 이름이 한눈에 보이게) -->
+        <TextView
+            android:id="@+id/state_text"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="24dp"
+            android:textColor="@color/accent"
+            android:textSize="@dimen/text_sub"
+            android:textStyle="bold" />
+
         <TextView
             android:id="@+id/chip"
             android:layout_width="wrap_content"
@@ -117,7 +127,10 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_gravity="end|center_vertical"
-                android:layout_margin="20dp"
+                android:layout_marginStart="20dp"
+                android:layout_marginTop="20dp"
+                android:layout_marginEnd="24dp"
+                android:layout_marginBottom="20dp"
                 android:orientation="vertical">
 
             <TextView
@@ -218,15 +231,6 @@
                     android:text="@string/now_label"
                     android:textColor="@color/muted"
                     android:textSize="@dimen/text_sub" />
-
-                <TextView
-                    android:id="@+id/state_text"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="20dp"
-                    android:textColor="@color/accent"
-                    android:textSize="@dimen/text_sub"
-                    android:textStyle="bold" />
             </LinearLayout>
 
             <TextView
@@ -604,6 +608,8 @@
                         android:layout_marginTop="8dp"
                         android:text="@string/poi_sight_title"
                         android:textColor="@color/text"
+                        android:maxLines="2"
+                        android:ellipsize="end"
                         android:textSize="@dimen/text_poi"
                         android:textStyle="bold" />
 
@@ -657,6 +663,8 @@
                         android:layout_marginTop="8dp"
                         android:text="@string/poi_festival_title"
                         android:textColor="@color/text"
+                        android:maxLines="2"
+                        android:ellipsize="end"
                         android:textSize="@dimen/text_poi"
                         android:textStyle="bold" />
 

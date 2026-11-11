@@ -18,12 +18,14 @@ import android.util.Log
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.nubi.car.map.HoldLast
 import com.nubi.car.map.MapMode
 import com.nubi.car.map.MapScreen
 import com.nubi.car.map.currentRegionName
 import com.nubi.car.map.drivingRegionText
 import com.nubi.car.map.mapInteractive
 import com.nubi.car.map.mapMode
+import com.nubi.car.map.uploadIntervalFor
 import com.nubi.car.trip.CoverageTracker
 import com.nubi.car.trip.Gear
 import com.nubi.car.trip.MatchingLine
@@ -145,15 +147,26 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun applyUploadInterval(visible: Boolean) {
+        engine.uploadIntervalMillis = uploadIntervalFor(
+            FeatureFlags.drivingMap, FeatureFlags.liveColoring, visible, TripEngine.UPLOAD_INTERVAL_MILLIS, TripEngine.MAP_UPLOAD_INTERVAL_MILLIS,
+        )
+    }
+
     /** 지도 터치·버튼을 받아도 되는 상태인지(정차 지도 + DO 아님). */
     private fun mapTouchAllowed(): Boolean = lastMapMode == MapMode.PARKED && mapInteractive(lastMapMode, distractionOptimized)
 
     private var lastMapMode = MapMode.OFF
 
+    /** 주행 중 위 한 줄의 시군구 이름은 바뀐 뒤 5초 동안 이전 값을 유지한다(경계에서 깜빡이지 않게). */
+    private val regionHold = HoldLast(5_000L)
+
     override fun onResume() {
         super.onResume()
         registerUxRestrictions()
         map.bind(v.mapDriving, v.mapParked) { engine.nowMillis() }
+        // 지도 화면이 실제로 보이는 동안만 업로드를 20초 간격으로 당긴다(백그라운드에서는 60초)
+        applyUploadInterval(visible = true)
         if (hasLocationPermission()) startService()
         render()
         handler.post(refresh)
@@ -162,6 +175,7 @@ class MainActivity : Activity() {
     override fun onPause() {
         handler.removeCallbacks(refresh)
         map.unbind()
+        applyUploadInterval(visible = false)
         unregisterUxRestrictions()
         navi.release()
         super.onPause()
@@ -358,10 +372,16 @@ class MainActivity : Activity() {
         // 주행 중 지도: 위 한 줄(기록 중 · 지금 시군구)만. 문제가 있을 때만 상태 이상 문구를 덧붙인다. 숫자·버튼·카드·QR 없음
         if (mode == MapMode.DRIVING) {
             v.drivingMapState.text = state
-            val region = drivingRegionText(currentRegionName(map.repository.live, place.info.place?.displayName))
+            val rawRegion = drivingRegionText(regionHold.update(currentRegionName(map.repository.live, place.info.place?.displayName), System.currentTimeMillis()))
+            // 주행 규제 중 문자열 길이 제한: 넘으면 중간에서 자르지 않고 줄을 숨긴다(지역 이름이 잘려 오해를 부르지 않게)
+            val region = rawRegion?.let { limitText(it, distractionOptimized, maxStringLength, statusLine = false) }
             v.drivingMapRegion.visibility = if (region == null) View.GONE else View.VISIBLE
             v.drivingMapRegion.text = region ?: ""
-            setStatus(v.drivingMapHealth, listOfNotNull(health, storage).takeIf { it.isNotEmpty() }?.joinToString(" · "))
+            // 기록 멈춤·저장 경고는 숫자 없이 문구만, 한 줄 폭을 넘으면 숨긴다(상태·지역 이름이 항상 먼저)
+            val warn = listOfNotNull(health, storage).takeIf { it.isNotEmpty() }?.joinToString(" · ")
+            val room = v.root.width - 2 * resources.getDimension(R.dimen.page_pad) - 200f
+            val used = v.drivingMapState.paint.measureText(state) + (region?.let { v.drivingMapRegion.paint.measureText(it) + 16f } ?: 0f) + 72f
+            setStatus(v.drivingMapHealth, warn?.takeIf { v.drivingMapHealth.paint.measureText(it) + 24f + used <= room })
         }
 
         if (parked) renderParked(s, state, health, storage, uploadLine, showNumbers, needsPermission, canAct, mode)
@@ -517,6 +537,8 @@ class MainActivity : Activity() {
             if (view is TextView) {
                 val orig = originalTextSizes.getOrPut(view) { view.textSize }
                 view.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, orig * factor)
+                // 한국어는 단어(어절) 단위로 줄바꿈해 '명 / 소'처럼 단어 중간에서 끊기지 않게 한다(API 33+)
+                if (android.os.Build.VERSION.SDK_INT >= 33) view.lineBreakWordStyle = android.graphics.text.LineBreakConfig.LINE_BREAK_WORD_STYLE_PHRASE
             }
             if (view is android.view.ViewGroup) for (i in 0 until view.childCount) walk(view.getChildAt(i))
         }

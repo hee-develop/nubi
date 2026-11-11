@@ -34,7 +34,7 @@ class LocalTrailTest {
         val t = LocalTrail(minStepM = 1.0, maxPoints = 5)
         for (i in 0 until 8) t.add(p(i))
         assertEquals(5, t.size)
-        val (_, lats) = t.snapshot()
+        val lats = t.snapshot().lats
         assertEquals(37.5 + 3 * 0.0002, lats.first(), 1e-9)
         assertEquals(37.5 + 7 * 0.0002, lats.last(), 1e-9)
     }
@@ -48,5 +48,41 @@ class LocalTrailTest {
         assertEquals(0, t.size)
         assertNull(t.bearing)
         assertTrue(t.add(p(5)))
+    }
+
+    @Test
+    fun 샘플이_오래_비었거나_멀리_튀면_새_선분으로_시작한다() {
+        val t = LocalTrail(minStepM = 8.0, breakGapMs = 30_000, breakDistM = 800.0)
+        t.add(p(0), 0)
+        t.add(p(1), 1_000)
+        t.add(p(2), 2_000)
+        t.add(p(3), 40_000) // 38초 비었음(앱이 뒤에 있던 구간)
+        t.add(p(4), 41_000)
+        t.add(LonLat(127.0, 37.6), 42_000) // 11km 튐
+        val s = t.snapshot()
+        assertEquals(listOf(true, false, false, true, false, true), s.starts.toList())
+        assertNull(t.bearing) // 튄 직후에는 방위를 모른다
+    }
+
+    @Test
+    fun 머물러_있는_동안의_샘플은_끊김으로_치지_않는다() {
+        val t = LocalTrail(minStepM = 8.0, breakGapMs = 30_000)
+        t.add(p(0), 0)
+        for (i in 1..40) t.add(LonLat(127.0, 37.5 + 0.00001), i * 1_000L) // 40초 동안 제자리(샘플은 계속 들어옴)
+        t.add(p(1), 41_000)
+        assertEquals(listOf(true, false), t.snapshot().starts.toList())
+    }
+
+    @Test
+    fun 버전은_쌓거나_비울_때_올라간다() {
+        val t = LocalTrail()
+        val v0 = t.version
+        t.add(p(0), 0)
+        assertTrue(t.version > v0)
+        val v1 = t.version
+        t.add(LonLat(127.0, 37.5), 1_000) // 건너뜀
+        assertEquals(v1, t.version)
+        t.clear()
+        assertTrue(t.version > v1)
     }
 }

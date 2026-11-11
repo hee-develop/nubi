@@ -30,7 +30,10 @@ class MapWay(
 }
 
 /** 한 칸(서버 `/map/base` 응답 하나). [truncated]면 서버가 상한(8,000)에서 잘랐다. */
-class BaseCell(val key: CellKey, val ways: List<MapWay>, val truncated: Boolean)
+class BaseCell(val key: CellKey, val ways: List<MapWay>, val truncated: Boolean) {
+    /** 메모리 상한 계산용 좌표 수. */
+    val pointCount: Int = ways.sumOf { it.mx.size }
+}
 
 class LiveWay(val id: Long, val mx: DoubleArray, val my: DoubleArray, val isNew: Boolean) {
     val minX = mx.min()
@@ -42,7 +45,15 @@ class LiveWay(val id: Long, val mx: DoubleArray, val my: DoubleArray, val isNew:
 data class LiveRegion(val code: String, val displayName: String, val level: Int, val firstTime: Boolean)
 
 /** `GET /trips/:id/live` 응답. [receivedAtMs]는 이 앱이 받은 시각(실시간 반영 지연 측정용). */
-class LiveState(val status: String, val upToSeq: Int, val ways: List<LiveWay>, val region: LiveRegion?, val receivedAtMs: Long) {
+class LiveState(
+    val status: String,
+    val upToSeq: Int,
+    val ways: List<LiveWay>,
+    val region: LiveRegion?,
+    val receivedAtMs: Long,
+    /** 서버가 준 `cursor`: 다음 조회의 `since`. 누적한 way가 어디까지인지 나타낸다. */
+    val cursor: Long = 0L,
+) {
     val newCount: Int get() = ways.count { it.isNew }
 
     companion object {
@@ -67,6 +78,9 @@ class RegionShape(
 }
 
 class RegionCell(val key: RegionCellKey, val regions: List<RegionShape>)
+
+/** 지도 데이터 상태: 정상, 받는 중, 받지 못함(오프라인·서버 오류), 차량 ID를 아직 모름. */
+enum class MapLoad { OK, LOADING, FAILED, NO_VEHICLE }
 
 class MapParseException(message: String) : Exception(message)
 
@@ -137,7 +151,7 @@ fun parseLive(text: String, nowMs: Long): LiveState = parsing("trips/live") {
         }
     }
     val r = o.optJSONObject("region")?.let { LiveRegion(it.getString("code"), it.getString("displayName"), it.optInt("level", 0), it.optBoolean("firstTime", false)) }
-    LiveState(o.getString("status"), o.optInt("upToSeq", -1), ways, r, nowMs)
+    LiveState(o.getString("status"), o.optInt("upToSeq", -1), ways, r, nowMs, o.optLong("cursor", 0L))
 }
 
 /** `GET /map/regions` 응답. */

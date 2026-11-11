@@ -88,5 +88,5 @@ fun neighborLayoutInMap(extrasVisible: Boolean, narrow: Boolean, panelWidthDp: I
     else -> NeighborLayout.FULL
 }
 
-/** 정차 지도 화면에서 패널 글자를 줄이는 비율(패널이 앱 영역의 40%라 03 요소를 다 담으려고). */
-const val PANEL_TEXT_SCALE = 0.75f
+/** 정차 지도 화면에서 패널 글자를 줄이는 비율(패널이 앱 영역의 40%라 03 요소를 다 담으려고. 더 줄이면 글자가 작아 읽기 어렵다). */
+const val PANEL_TEXT_SCALE = 0.85f

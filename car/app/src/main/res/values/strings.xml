@@ -72,4 +72,7 @@
     <string name="map_zoom_out">−</string>
     <string name="map_me">내 위치</string>
     <string name="map_national">전국</string>
+    <string name="map_loading">지도 불러오는 중</string>
+    <string name="map_failed">지도를 받지 못했어요</string>
+    <string name="map_waiting_vehicle">차량 확인 중</string>
 </resources>

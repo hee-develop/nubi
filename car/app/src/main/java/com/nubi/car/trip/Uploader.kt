@@ -93,6 +93,10 @@ class Uploader(
     var lastPointsUploadedAtMs = 0L
         private set
 
+    /** 점 업로드가 성공할 때마다(주행 지도가 그 직후 잠정 색칠을 한 번 묻는다). 예외는 업로드에 영향을 주지 않는다. 워커 스레드에서 불린다. */
+    @Volatile
+    var onPointsUploaded: () -> Unit = {}
+
     /** 서버가 End를 받았을 때(서버 트립 id). 도로 색칠 결과 폴링을 시작하는 데 쓴다. 호출 예외는 업로드에 영향을 주지 않는다. */
     @Volatile
     var onTripEnded: (String) -> Unit = {}
@@ -483,6 +487,11 @@ class Uploader(
                             liveTripId = step.serverId
                             lastPointsUploadedAtMs = System.currentTimeMillis()
                             Log.i(TAG, "점 업로드 성공 ${step.batch.size}개 wall=$lastPointsUploadedAtMs")
+                            try {
+                                onPointsUploaded()
+                            } catch (t: Throwable) {
+                                Log.w(TAG, "점 업로드 알림 예외: ${t.javaClass.simpleName}")
+                            }
                             uploaded += step.batch.size
                             currentBatch = batchSize // 이분할 뒤 성공했으면 원래 크기로 복원
                         }

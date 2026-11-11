@@ -75,6 +75,13 @@ class TripEngine(
     var acceptRealLocation: Boolean = true
         private set
 
+    /**
+     * 채택한 위치 샘플 하나가 처리될 때마다(좌표, 시각 epoch ms, 지금 기록 중인지). 주행 지도의 로컬 궤적이 화면이 아니라 이 위치 콜백에서 쌓이게 한다.
+     * 엔진 스레드에서 불린다. 위치는 로그에 남기지 않는다.
+     */
+    @Volatile
+    var onLocationSample: (lat: Double, lon: Double, tsMillis: Long, recording: Boolean) -> Unit = { _, _, _, _ -> }
+
     /** 새 트립이 시작됐다(상태기계 Started). 이전 트립의 종료 줄을 치우는 데 쓴다. 엔진 스레드에서 불린다. */
     @Volatile
     var onTripStarted: () -> Unit = {}
@@ -210,6 +217,11 @@ class TripEngine(
             val ts = tsMillis?.takeIf { kotlin.math.abs(it - wall()) < 24 * 3_600_000L } ?: wall()
             handle(machine.onLocation(Sample(ts, lat, lon, heading, conf), elapsed()))
             publish()
+            try {
+                onLocationSample(lat, lon, ts, machine.state == TripState.RECORDING)
+            } catch (t: Throwable) {
+                Log.w(TAG, "위치 샘플 알림 예외: ${t.javaClass.simpleName}")
+            }
             if (parkedAwaitingLocation && machine.gear == Gear.P) {
                 parkedAwaitingLocation = false
                 notifyParked()

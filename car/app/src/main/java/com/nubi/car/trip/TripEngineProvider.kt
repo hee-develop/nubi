@@ -5,7 +5,6 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import com.nubi.car.BuildConfig
-import com.nubi.car.FeatureFlags
 import com.nubi.car.map.HttpMapApi
 import com.nubi.car.map.LivePoller
 import com.nubi.car.map.MapRepository
@@ -121,7 +120,13 @@ object TripEngineProvider {
         val livePoller = LivePoller(mapApi, mapWorkers, { uploader.liveTripId }, mapSchedule, repo)
         val screen = MapScreen(repo, livePoller)
         mapScreen = screen
-        if (FeatureFlags.drivingMap && FeatureFlags.liveColoring) engine.uploadIntervalMillis = TripEngine.MAP_UPLOAD_INTERVAL_MILLIS
+        uploader.onPointsUploaded = { livePoller.kick() }
+        engine.onLocationSample = { lat, lon, ts, recording -> screen.onLocationSample(lat, lon, ts, recording) }
+        val coverageStarted = engine.onTripStarted
+        engine.onTripStarted = {
+            coverageStarted()
+            screen.onTripStarted()
+        }
         coverage.onTripSettled = {
             place.refresh()
             screen.onTripSettled()

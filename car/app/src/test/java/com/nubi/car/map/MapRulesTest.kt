@@ -60,7 +60,7 @@ class MapRulesTest {
             14,
         )
         val d = debugSummary(snap, trailPoints = 7, roads = true, regions = false, zoom = 14.0, follow = true)
-        assertEquals("지도 way=2 driven=1 live=2 new=1 trail=7 roads=on regions=off region=0 z=14.0 follow=on", d)
+        assertEquals("지도 way=2 driven=1 live=2 new=1 trail=7 roads=on regions=off region=0 load=ok z=14.0 follow=on", d)
     }
 
     @Test
@@ -72,5 +72,49 @@ class MapRulesTest {
         assertTrue(FeatureFlags.guest)
         assertTrue(FeatureFlags.share)
         assertTrue(FeatureFlags.intro)
+    }
+
+    @Test
+    fun 지역_이름은_바뀐_뒤_5초_동안_이전_값을_유지한다() {
+        val h = HoldLast(5_000)
+        assertEquals("서울 종로구", h.update("서울 종로구", 0))
+        assertEquals("서울 종로구", h.update("서울 중구", 1_000)) // 경계에서 바로 바꾸지 않는다
+        assertEquals("서울 종로구", h.update("서울 중구", 4_999))
+        assertEquals("서울 중구", h.update("서울 중구", 5_000))
+        assertEquals("서울 중구", h.update("서울 종로구", 6_000)) // 다시 바뀌어도 5초는 유지
+        assertEquals("서울 중구", h.update(null, 9_000))
+        assertNull(h.update(null, 11_000)) // 모름도 같은 규칙
+        h.reset()
+        assertEquals("부산 중구", h.update("부산 중구", 20_000))
+    }
+
+    @Test
+    fun 방위_차이는_0에서_180_사이이고_15도_미만은_마커를_안_돌린다() {
+        assertEquals(10.0, bearingDiff(355.0, 5.0), 1e-9)
+        assertEquals(180.0, bearingDiff(0.0, 180.0), 1e-9)
+        assertEquals(0.0, bearingDiff(90.0, 90.0), 1e-9)
+        assertTrue(bearingDiff(100.0, 110.0) < BEARING_STEP_DEG)
+        assertTrue(bearingDiff(100.0, 120.0) >= BEARING_STEP_DEG)
+    }
+
+    @Test
+    fun 업로드_간격은_지도가_켜져_있고_화면이_보일_때만_20초다() {
+        assertEquals(20_000L, uploadIntervalFor(true, true, true, 60_000, 20_000))
+        assertEquals(60_000L, uploadIntervalFor(true, true, false, 60_000, 20_000)) // 백그라운드
+        assertEquals(60_000L, uploadIntervalFor(false, true, true, 60_000, 20_000)) // 03b(지도 끔)
+        assertEquals(60_000L, uploadIntervalFor(true, false, true, 60_000, 20_000)) // 잠정 색칠 끔
+    }
+
+    @Test
+    fun 지도_플래그를_끄면_기존_03b_경로다() {
+        val saved = FeatureFlags.drivingMap
+        try {
+            FeatureFlags.drivingMap = false
+            assertEquals(MapMode.OFF, mapMode(FeatureFlags.drivingMap, parkedLayout = false)) // 주행 중: 기존 로고 화면
+            assertEquals(MapMode.OFF, mapMode(FeatureFlags.drivingMap, parkedLayout = true)) // 정차: 지도 없는 03
+            assertFalse(mapInteractive(mapMode(FeatureFlags.drivingMap, true), distractionOptimized = false))
+        } finally {
+            FeatureFlags.drivingMap = saved
+        }
     }
 }

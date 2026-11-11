@@ -77,6 +77,8 @@ class MapParseTest {
         assertTrue(s.ways[0].isNew)
         assertEquals(LiveRegion("11140", "서울 중구", 0, true), s.region)
         assertEquals(1234L, s.receivedAtMs)
+        assertEquals(0L, s.cursor)
+        assertEquals(42L, parseLive("""{"status":"ready","upToSeq":1,"cursor":42,"ways":[]}""", 1L).cursor)
     }
 
     @Test

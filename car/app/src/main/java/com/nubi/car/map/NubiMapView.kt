@@ -9,6 +9,7 @@ import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
+import com.nubi.car.R
 import kotlin.math.abs
 import kotlin.math.ln
 
@@ -34,6 +35,9 @@ class NubiMapView @JvmOverloads constructor(context: Context, attrs: AttributeSe
             field = value
             viewportChanged()
         }
+
+    /** 이번 주행에서 처음 달린 길을 굵은 밝은 앰버로 강조할지(정차 화면만). 꺼져 있으면 달린 길과 같은 색·굵기다(주행 중 시선을 끌지 않게). */
+    var emphasizeNew = true
 
     /** 터치로 이동·확대를 받을지. */
     var interactive = false
@@ -74,6 +78,16 @@ class NubiMapView @JvmOverloads constructor(context: Context, attrs: AttributeSe
     private val regionPath = Path().apply { fillType = Path.FillType.EVEN_ODD }
     private val roadPaths = Array(3 * 4) { Path() }
     private val extra = Path()
+
+    private val attrAscent = textPaint.fontMetrics.ascent
+    private val attrDescent = textPaint.fontMetrics.descent
+
+    // 스냅샷은 데이터·보기·레이어가 바뀔 때만 다시 뜬다(그릴 때마다 목록을 만들지 않는다)
+    private var cachedSnap: MapSnapshot? = null
+    private var cachedVersion = -1
+    private var cachedViewport: Viewport? = null
+    private var cachedRoads = true
+    private var cachedRegions = true
 
     private var lastDrawAt = 0L
     private var redrawScheduled = false
@@ -197,7 +211,15 @@ class NubiMapView @JvmOverloads constructor(context: Context, attrs: AttributeSe
         canvas.drawColor(MapColors.BG)
         val repo = repository ?: return
         val vp = viewport
-        val snap = repo.snapshot(vp, showRoads, showRegions)
+        var snap = cachedSnap
+        if (snap == null || cachedVersion != repo.version || cachedViewport !== vp || cachedRoads != showRoads || cachedRegions != showRegions) {
+            snap = repo.snapshot(vp, showRoads, showRegions)
+            cachedSnap = snap
+            cachedVersion = repo.version
+            cachedViewport = vp
+            cachedRoads = showRoads
+            cachedRegions = showRegions
+        }
         lastSnapshot = snap
         val b = vp.mercBounds()
 
@@ -207,6 +229,7 @@ class NubiMapView @JvmOverloads constructor(context: Context, attrs: AttributeSe
         drawTrail(canvas, vp)
         drawMarker(canvas, vp)
         drawAttribution(canvas)
+        drawLoadStatus(canvas, snap.load)
     }
 
     private fun drawRegions(canvas: Canvas, vp: Viewport, snap: MapSnapshot, b: DoubleArray) {
@@ -288,7 +311,8 @@ class NubiMapView @JvmOverloads constructor(context: Context, attrs: AttributeSe
                 addLine(extra, w.mx, w.my, vp)
             }
             if (extra.isEmpty) continue
-            val style = liveStyle(wantNew)
+            // 주행 중에는 처음 달린 길도 달린 길과 같은 색·굵기(emphasizeNew=false). 정차 화면에서만 밝은 앰버로 굵게 강조한다.
+            val style = if (wantNew && emphasizeNew) liveStyle(true) else liveStyle(false)
             linePaint.color = colorOf(style)
             linePaint.strokeWidth = strokeDp(CLS_SC, style, vp.zoom) * density
             canvas.drawPath(extra, linePaint)
@@ -298,14 +322,20 @@ class NubiMapView @JvmOverloads constructor(context: Context, attrs: AttributeSe
     private fun drawTrail(canvas: Canvas, vp: Viewport) {
         val t = trail ?: return
         if (t.size < 2) return
-        val (lons, lats) = t.snapshot()
+        val snap = t.snapshot()
         extra.rewind()
         var lastX = Float.NaN
         var lastY = Float.NaN
-        for (i in lons.indices) {
-            val x = vp.sx(mercX(lons[i])).toFloat()
-            val y = vp.sy(mercY(lats[i])).toFloat()
-            if (i == 0) extra.moveTo(x, y) else if (abs(x - lastX) + abs(y - lastY) >= 1.5f) extra.lineTo(x, y) else continue
+        for (i in snap.lons.indices) {
+            val x = vp.sx(mercX(snap.lons[i])).toFloat()
+            val y = vp.sy(mercY(snap.lats[i])).toFloat()
+            if (i == 0 || snap.starts[i]) {
+                extra.moveTo(x, y) // 샘플이 비었던 구간은 잇지 않고 새 선분으로 시작한다
+            } else if (abs(x - lastX) + abs(y - lastY) >= 1.5f) {
+                extra.lineTo(x, y)
+            } else {
+                continue
+            }
             lastX = x
             lastY = y
         }
@@ -348,11 +378,28 @@ class NubiMapView @JvmOverloads constructor(context: Context, attrs: AttributeSe
         val text = ATTRIBUTION
         val pad = 8f * density
         val w = textPaint.measureText(text)
-        val h = textPaint.fontMetrics.let { it.descent - it.ascent }
+        val h = attrDescent - attrAscent
         val right = width - 8f * density
         val bottom = height - 8f * density
         canvas.drawRoundRect(right - w - 2 * pad, bottom - h - pad, right, bottom, 6f * density, 6f * density, pillPaint)
-        canvas.drawText(text, right - w - pad, bottom - pad / 2 - textPaint.fontMetrics.descent, textPaint)
+        canvas.drawText(text, right - w - pad, bottom - pad / 2 - attrDescent, textPaint)
+    }
+
+    /** 지도 왼쪽 아래의 데이터 상태 한 줄: 받는 중·못 받음(오프라인 등)·차량 확인 중. 정상이면 아무것도 그리지 않는다. */
+    private fun drawLoadStatus(canvas: Canvas, load: MapLoad) {
+        val text = when (load) {
+            MapLoad.OK -> return
+            MapLoad.LOADING -> context.getString(R.string.map_loading)
+            MapLoad.FAILED -> context.getString(R.string.map_failed)
+            MapLoad.NO_VEHICLE -> context.getString(R.string.map_waiting_vehicle)
+        }
+        val pad = 8f * density
+        val w = textPaint.measureText(text)
+        val h = attrDescent - attrAscent
+        val left = 8f * density
+        val bottom = height - 8f * density
+        canvas.drawRoundRect(left, bottom - h - pad, left + w + 2 * pad, bottom, 6f * density, 6f * density, pillPaint)
+        canvas.drawText(text, left + pad, bottom - pad / 2 - attrDescent, textPaint)
     }
 
     private fun addLine(path: Path, xs: DoubleArray, ys: DoubleArray, vp: Viewport) {
