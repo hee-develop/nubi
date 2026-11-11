@@ -5,6 +5,7 @@ import { authMiddleware } from '../ext/auth.js';
 import { accountRoutes } from './account.js';
 import { guestRoutes } from './guest.js';
 import { pairRoutes } from './pair.js';
+import { reportsRoutes } from './reports.js';
 
 export type { ExtOptions } from '../ext/util.js';
 
@@ -14,5 +15,5 @@ export type { ExtOptions } from '../ext/util.js';
  */
 export const extRoutes = (deps: ExtDeps) => {
   ensureExtSchema(deps.db);
-  return new Hono().use('*', authMiddleware(deps)).route('/', guestRoutes(deps)).route('/', pairRoutes(deps)).route('/', accountRoutes(deps));
+  return new Hono().use('*', authMiddleware(deps)).route('/', guestRoutes(deps)).route('/', pairRoutes(deps)).route('/', accountRoutes(deps)).route('/', reportsRoutes(deps));
 };

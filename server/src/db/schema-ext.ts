@@ -119,9 +119,24 @@ BEGIN
 END;
 `;
 
+/** 차량 설정(plan 11-2). 키는 정본 차량 ID. consent_withdrawn_at: 위치정보 동의 철회로 데이터를 지운 시각(기록을 다시 켜면 비운다). */
+export const SCHEMA_SETTINGS = `
+CREATE TABLE IF NOT EXISTS vehicle_settings (
+  vehicle_id TEXT PRIMARY KEY,
+  recording_paused INTEGER NOT NULL DEFAULT 0,
+  home_region TEXT,
+  stats_opt_in INTEGER NOT NULL DEFAULT 1,
+  drive_map INTEGER NOT NULL DEFAULT 1,
+  hide_home_in_cards INTEGER NOT NULL DEFAULT 1,
+  consent_withdrawn_at TEXT,
+  updated_at TEXT NOT NULL
+);
+`;
+
 /** 확장 스키마를 만든다. 여러 번 불러도 같다. */
 export const ensureExtSchema = (db: Db) => {
   db.exec(SCHEMA_FADE);
   db.exec(SCHEMA_AUTH);
   db.exec(SCHEMA_GUEST);
+  db.exec(SCHEMA_SETTINGS);
 };

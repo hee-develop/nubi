@@ -60,3 +60,26 @@ export const SQL_SHIFT_DAYS = (col: string) => `strftime('%Y-%m-%dT%H:%M:%fZ', j
 
 export const KST_MS = 9 * 3_600_000;
 export const DAY_MS = 24 * 3_600_000;
+
+/** 'YYYY-MM-DD'(KST) 하루의 UTC 구간 [시작, 끝). 달력에 없는 날짜면 null. */
+export const kstDayRange = (date: string): [number, number] | null => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  const t = Date.UTC(y, mo - 1, d);
+  const back = new Date(t);
+  if (back.getUTCFullYear() !== y || back.getUTCMonth() !== mo - 1 || back.getUTCDate() !== d) return null;
+  return [t - KST_MS, t - KST_MS + DAY_MS];
+};
+
+/** 'YYYY-MM'(KST) 한 달의 UTC 구간 [시작, 끝). 형식이 틀리면 null. */
+export const kstMonthRange = (month: string): [number, number] | null => {
+  const m = /^(\d{4})-(\d{2})$/.exec(month);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  if (mo < 1 || mo > 12 || y < 2000 || y > 2200) return null;
+  return [Date.UTC(y, mo - 1, 1) - KST_MS, Date.UTC(y, mo, 1) - KST_MS];
+};
