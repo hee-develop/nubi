@@ -35,6 +35,7 @@ class Views(val root: View) {
     val mapBtnMe: TextView = id(R.id.map_btn_me)
     val mapBtnNational: TextView = id(R.id.map_btn_national)
     val panel: LinearLayout = id(R.id.panel)
+    val linesBlock: View = id(R.id.lines_block)
     val guestQrImage: View = id(R.id.guest_qr_image)
     val leftColumn: LinearLayout = id(R.id.left_column)
     val nowLabel: TextView = id(R.id.now_label)

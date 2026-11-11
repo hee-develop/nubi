@@ -291,7 +291,7 @@ class NubiMapView @JvmOverloads constructor(context: Context, attrs: AttributeSe
             for (cls in CLS_MN downTo CLS_MW) {
                 val path = roadPaths[si * 4 + cls]
                 if (path.isEmpty) continue
-                linePaint.color = colorOf(styles[si])
+                linePaint.color = colorOf(styles[si], vp.zoom)
                 linePaint.strokeWidth = strokeDp(cls, styles[si], vp.zoom) * density
                 canvas.drawPath(path, linePaint)
             }

@@ -38,6 +38,8 @@ class MapLayersTest {
         assertEquals(0xFFFBBF24.toInt(), colorOf(WayStyle.LIVE_NEW))
         assertEquals(0xFFF59E0B.toInt(), colorOf(WayStyle.DRIVEN))
         assertEquals(0xFF2A3544.toInt(), colorOf(WayStyle.UNDRIVEN))
+        assertEquals(UNDRIVEN_FAR, colorOf(WayStyle.UNDRIVEN, 7.5)) // 전국 보기에서는 안 간 길을 조금 밝게
+        assertEquals(0xFF2A3544.toInt(), colorOf(WayStyle.UNDRIVEN, FAR_ZOOM))
         assertEquals(0xFFC79A4C.toInt(), colorOf(WayStyle.FADED))
     }
 

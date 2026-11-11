@@ -543,6 +543,14 @@ class MainActivity : Activity() {
             if (view is android.view.ViewGroup) for (i in 0 until view.childCount) walk(view.getChildAt(i))
         }
         walk(v.panel)
+        // 이웃 카드의 위아래 여백도 줄여 왼쪽 열(샘플·거리·업로드 줄)이 접히지 않을 높이를 만든다
+        val padH = resources.getDimensionPixelSize(R.dimen.card_pad_h)
+        val padV = if (shrink) (14 * resources.displayMetrics.density).toInt() else resources.getDimensionPixelSize(R.dimen.card_pad_v)
+        v.neighborCard.setPadding(padH, padV, padH, padV)
+        // 숫자 줄 묶음 위 여백과 본문 위 여백도 줄인다(정차 지도에서 03 요소를 한 화면에 담으려고)
+        (v.linesBlock.layoutParams as LinearLayout.LayoutParams).topMargin = if (shrink) (12 * resources.displayMetrics.density).toInt() else (36 * resources.displayMetrics.density).toInt()
+        v.linesBlock.requestLayout()
+        v.body.setPadding(v.body.paddingLeft, if (shrink) 0 else (20 * resources.displayMetrics.density).toInt(), v.body.paddingRight, v.body.paddingBottom)
         val qr = resources.getDimensionPixelSize(R.dimen.qr_size)
         v.guestQrImage.layoutParams = v.guestQrImage.layoutParams.apply {
             width = (qr * factor).toInt()

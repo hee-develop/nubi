@@ -41,8 +41,14 @@ fun maxVisibleCls(z: Int): Int = when {
     else -> CLS_MN
 }
 
-fun colorOf(style: WayStyle): Int = when (style) {
-    WayStyle.UNDRIVEN -> MapColors.UNDRIVEN
+/** 낮은 확대(전국·광역 보기)에서 안 간 길의 색. 선이 가늘어 어두운 바탕에서 안 보이므로 조금 밝게 한다. */
+const val UNDRIVEN_FAR = 0xFF46566B.toInt()
+
+/** 안 간 길 색을 밝게 바꾸는 확대 경계(이 값 미만에서 [UNDRIVEN_FAR]). */
+const val FAR_ZOOM = 11.0
+
+fun colorOf(style: WayStyle, zoom: Double = 14.0): Int = when (style) {
+    WayStyle.UNDRIVEN -> if (zoom < FAR_ZOOM) UNDRIVEN_FAR else MapColors.UNDRIVEN
     WayStyle.DRIVEN -> MapColors.DRIVEN
     WayStyle.FADED -> MapColors.FADED
     WayStyle.LIVE_NEW -> MapColors.LIVE_NEW
@@ -57,8 +63,8 @@ fun strokeDp(cls: Int, style: WayStyle, zoom: Double): Float {
         else -> 1.2f
     }
     val zoomScale = when {
-        zoom < 8 -> 0.55f
-        zoom < 11 -> 0.75f
+        zoom < 8 -> 0.85f
+        zoom < 11 -> 0.9f
         zoom < 14 -> 1.0f
         else -> 1.25f
     }
