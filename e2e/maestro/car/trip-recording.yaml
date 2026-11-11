@@ -105,7 +105,7 @@ env:
 - takeScreenshot: ${SHOT_DIR}/03-map-parked
 - tapOn: '전국'
 - extendedWaitUntil:
-    visible: '지도 .* z=[89]\.[0-9] follow=off'
+    visible: '지도 .* z=[78]\.[0-9] follow=off'
     timeout: 10000
 - takeScreenshot: ${SHOT_DIR}/03-map-national
 - tapOn: '내 위치'
