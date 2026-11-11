@@ -55,7 +55,7 @@ describe('지역 소개', () => {
     expect(urls.map((u) => new URL(u).searchParams.get('contentTypeId'))).toEqual(['12', '15', '39']);
     const u0 = new URL(urls[0]!);
     expect(u0.origin + u0.pathname).toBe('https://apis.data.go.kr/B551011/KorService2/locationBasedList2');
-    expect(u0.searchParams.get('mapX')).toBe('126.98');
+    expect(u0.searchParams.get('mapX')).toBe('126.99'); // 시군구 중심(0.01도 반올림)이지 요청 좌표가 아니다
     expect(u0.searchParams.get('mapY')).toBe('37.56');
     expect(u0.searchParams.get('arrange')).toBe('E');
     // 같은 날 같은 위치(0.01도)는 캐시
@@ -77,9 +77,10 @@ describe('지역 소개', () => {
     const r1 = await call(e, '/regions/11140/intro?lat=37.5649&lon=126.9751');
     expect(r1.status).toBe(200);
     expect(urls[0]!.searchParams.get('mapY')).toBe('37.56');
-    expect(urls[0]!.searchParams.get('mapX')).toBe('126.98');
+    expect(urls[0]!.searchParams.get('mapX')).toBe('126.99');
     expect(urls.every((u) => !u.toString().includes('37.5649') && !u.toString().includes('126.9751'))).toBe(true);
-    // 같은 칸(반올림 좌표가 같음)의 다른 위치: 호출은 캐시, 거리는 다시 계산
+    // 캐시는 시군구 단위(좌표 무관): 요청 위치를 바꿔도 외부 호출은 늘지 않고 거리만 다시 계산
+    await call(e, '/regions/11140/intro?lat=37.5420&lon=127.0200');
     const r2 = await call(e, '/regions/11140/intro?lat=37.5551&lon=126.9840');
     expect(fetchFn).toHaveBeenCalledTimes(3);
     const d = (r: any) => r.body.items.filter((i: any) => i.kind === 'attraction').map((i: any) => i.distanceM);
@@ -92,8 +93,8 @@ describe('지역 소개', () => {
   it('요청 횟수 제한(출처별)과 TourAPI 일일 호출 상한을 넘으면 429(rate_limited), 캐시 적중은 상한에 세지 않는다', async () => {
     const fetchFn = vi.fn(async () => ok([item('a', 126.98, 37.56)]));
     const e = extApp({ ext: { tourApiKey: 'k', fetchFn: fetchFn as unknown as typeof fetch, rateLimit: { max: 1, windowMs: 60_000 } } });
-    // max=1 → 출처별 6회/창
-    for (let i = 0; i < 6; i++) expect((await call(e, '/regions/11140/intro')).status).toBe(200);
+    // max=1 → 출처별 2회/창(좌표를 바꿔 가며 불러도 같은 출처로 센다)
+    for (let i = 0; i < 2; i++) expect((await call(e, `/regions/11140/intro?lat=37.5${50 + i}&lon=126.98${i}`)).status).toBe(200);
     expect((await call(e, '/regions/11140/intro')).body).toEqual({ error: 'rate_limited' });
     expect(fetchFn).toHaveBeenCalledTimes(3); // 캐시: 종류별 1회씩
     const e2 = extApp({ ext: { tourApiKey: 'k', fetchFn: fetchFn as unknown as typeof fetch } });
