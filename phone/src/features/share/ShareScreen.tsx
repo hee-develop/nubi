@@ -98,7 +98,9 @@ export const ShareScreen = () => {
       {card ? (
         <Card>
           <Txt bold>{t('share.preview')}</Txt>
-          <Image testID="share-preview" source={cardImageSource(card)} style={styles.preview} resizeMode="contain" accessibilityLabel={t('share.preview')} />
+          <View style={styles.preview}>
+            <Image testID="share-preview" source={cardImageSource(card)} style={{ width: '100%', height: '100%' }} resizeMode="contain" accessibilityLabel={t('share.preview')} />
+          </View>
           <Txt muted size={12}>© OpenStreetMap contributors</Txt>
           {notice ? <Txt color={colors.danger} testID="share-notice">{t(notice)}</Txt> : null}
           <Button testID="share-send" label={t('share.send')} onPress={() => void share()} disabled={busy} />
@@ -110,5 +112,5 @@ export const ShareScreen = () => {
 
 const styles = StyleSheet.create({
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  preview: { width: '100%', aspectRatio: 1, borderRadius: 12, backgroundColor: colors.panel2 },
+  preview: { width: '100%', aspectRatio: 1, borderRadius: 12, backgroundColor: colors.panel2, overflow: 'hidden' },
 });
