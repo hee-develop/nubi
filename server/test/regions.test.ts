@@ -366,7 +366,7 @@ describe('조회 API', () => {
     const ok = (await getJson(app, '/regions/geo?vehicleId=v&bbox=126.95,37.0,127.15,37.1')).body;
     expect(ok.type).toBe('FeatureCollection');
     const props = Object.fromEntries(ok.features.map((f: any) => [f.properties.code, f.properties]));
-    expect(props['11111']).toEqual({ code: '11111', name: 'A구', displayName: 'A구', level: 1, depop89: false });
+    expect(props['11111']).toEqual({ code: '11111', name: 'A구', displayName: 'A구', level: 1, faded: false, depop89: false });
     expect(props['11115'].depop89).toBe(true);
     expect(ok.features[0].geometry.type).toBe('MultiPolygon');
     expect(ok.attribution).toContain('CC BY 4.0');
