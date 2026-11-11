@@ -274,4 +274,38 @@ class AuthTest {
         }
         assertEquals(1, called)
     }
+
+    @Test
+    fun 트립_생성_paused_응답은_PausedByServer로_올리고_점_응답의_paused와_dropped는_알린다() {
+        OneShotServer(200, "{\"paused\":true,\"pausedAt\":\"2026-11-11T00:00:00.000Z\"}").use { s ->
+            val api = HttpTripApi("http://127.0.0.1:${s.port}")
+            try {
+                api.createTrip(QueueEntry.Start("l", "v", "v", 0L, null))
+                throw AssertionError("PausedByServer가 나야 한다")
+            } catch (e: PausedByServer) {
+                assertEquals(java.time.Instant.parse("2026-11-11T00:00:00Z").toEpochMilli(), e.pausedAtMillis)
+            }
+        }
+        OneShotServer(200, "{\"paused\":true}").use { s ->
+            try {
+                HttpTripApi("http://127.0.0.1:${s.port}").createTrip(QueueEntry.Start("l", "v", "v", 0L, null))
+                throw AssertionError("PausedByServer가 나야 한다")
+            } catch (e: PausedByServer) {
+                assertNull("동의 철회는 시각이 없다", e.pausedAtMillis)
+            }
+        }
+        for (body in listOf("{\"accepted\":0,\"duplicated\":0,\"paused\":true,\"dropped\":5}", "{\"accepted\":3,\"duplicated\":0,\"dropped\":2}")) {
+            var notified = 0
+            OneShotServer(200, body).use { s ->
+                val api = HttpTripApi("http://127.0.0.1:${s.port}").apply { onPointsPaused = { notified++ } }
+                api.postPoints("t", listOf(point(0)))
+            }
+            assertEquals(body, 1, notified)
+        }
+        var none = 0
+        OneShotServer(200, "{\"accepted\":3,\"duplicated\":0}").use { s ->
+            HttpTripApi("http://127.0.0.1:${s.port}").apply { onPointsPaused = { none++ } }.postPoints("t", listOf(point(0)))
+        }
+        assertEquals("정상 응답은 알리지 않는다", 0, none)
+    }
 }

@@ -17,6 +17,7 @@ import com.nubi.car.trip.TripEngineProvider
  * - `park=1`: gpx 재생이 끝나면 기어를 P로 바꾼다(숫자는 기어 P에서만 보이므로 재생 끝을 화면으로 알 수 있게 한다)
  * - `now=<epoch ms>`: 시계를 그 시각으로 옮기고 바로 종료 조건(P 5분)을 확인한다(기어 처리 뒤에 적용)
  * - `flush=1`: 큐를 바로 업로드한다(재시도 대기 무시)
+ * - `queue=1`: 업로드 큐에 남은 항목 수를 로그로 남긴다(`NubiDebug: 큐 pendingEntries=N`, E2E가 삭제 뒤 큐가 비었는지 확인한다)
  *
  * 순서는 reset → vin → real → gear → loc → gpx → now → flush다. 속도는 수집하지 않으므로 주입하지 않는다.
  */
@@ -48,6 +49,7 @@ object DebugSignals {
         }
         value("now")?.let { engine.setClock(it.toLong()) }
         if (value("flush") == "1") engine.flush()
+        if (value("queue") == "1") Log.i(TAG, "큐 pendingEntries=${engine.pendingEntries}")
         Log.i(TAG, "주입 완료")
     }
 

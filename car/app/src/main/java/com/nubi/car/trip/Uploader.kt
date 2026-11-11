@@ -107,7 +107,7 @@ class Uploader(
 
     /** 서버가 기록 멈춤·동의 철회로 트립을 받지 않았다(PausedByServer). 화면 쪽이 서버 설정을 다시 읽어 로컬 멈춤을 맞춘다. 워커 스레드에서 불린다. */
     @Volatile
-    var onPausedByServer: () -> Unit = {}
+    var onPausedByServer: (localId: String?) -> Unit = {}
 
     /** paused로 버린 트립의 localId(상한 [TOMBSTONE_MAX], 오래된 것부터 잊는다). 이후 같은 localId 항목은 dead-letter 없이 조용히 버린다. */
     private val tombstones = object : LinkedHashSet<String>() {
@@ -171,9 +171,10 @@ class Uploader(
             // 삭제 세대보다 오래된 파일(삭제 때 못 지운 큐·server-ids·dead-letter)은 읽지 않고 폐기한다
             epochs?.let { ep ->
                 if (ep.filesEpoch() < ep.purgeEpoch()) {
-                    for (f in listOf(queueFile, idsFile, deadLetterFile)) runCatching { f.delete() }
-                    ep.markFiles(ep.purgeEpoch())
-                    Log.i(TAG, "삭제 전 큐 파일 폐기")
+                    // 모두 지웠을 때만 세대를 맞춘다(하나라도 못 지우면 다음 로드가 다시 폐기한다)
+                    val all = listOf(queueFile, idsFile, deadLetterFile).map { deleteFile(it) }.all { it }
+                    if (all) ep.markFiles(ep.purgeEpoch())
+                    Log.i(TAG, "삭제 전 큐 파일 폐기(전부 지움=$all)")
                 }
             }
             queue = TripQueue(queueFile, setup.cipher)
@@ -357,7 +358,7 @@ class Uploader(
         }
         saveRegistrations()
         try {
-            onPausedByServer()
+            onPausedByServer(localId)
         } catch (t: Throwable) {
             Log.w(TAG, "paused 알림 예외: ${t.javaClass.simpleName}")
         }
@@ -371,13 +372,12 @@ class Uploader(
     fun clearAll() {
         val epoch = epochs?.bump()
         synchronized(lock) { tombstones.clear() }
-        clear()
-        var filesCleared = loaded && !memoryOnly
+        var filesCleared = clear() // 로드 전·임시 키면 false
         synchronized(deadLock) {
             try {
                 if (::deadLetters.isInitialized && !memoryOnly) {
                     deadLetters.rewrite(emptyList())
-                } else if (!deadLetterFile.delete() && deadLetterFile.exists()) {
+                } else {
                     filesCleared = false
                 }
             } catch (t: Exception) {
@@ -385,16 +385,20 @@ class Uploader(
                 Log.w(TAG, "dead-letter 비우기 실패: ${t.javaClass.simpleName}")
             }
         }
-        if (!loaded || memoryOnly) {
-            // 아직 못 읽은(또는 못 읽는) 파일은 지울 수 있으면 지운다. 못 지우면 세대가 뒤처져 다음 로드가 폐기한다
-            for (f in listOf(queueFile, idsFile, deadLetterFile)) runCatching { f.delete() }
-            filesCleared = !queueFile.exists() && !idsFile.exists() && !deadLetterFile.exists()
+        if (!filesCleared) {
+            // 아직 못 읽은(또는 못 읽는) 파일은 지울 수 있으면 지운다. 하나라도 못 지우면 세대를 맞추지 않아 다음 로드가 다시 폐기한다
+            filesCleared = listOf(queueFile, idsFile, deadLetterFile).map { deleteFile(it) }.all { it }
         }
         if (epoch != null && filesCleared) epochs?.markFiles(epoch)
         Log.i(TAG, "큐 비움 pending=${pendingEntries}")
     }
 
-    fun clear() {
+    /** 파일을 지운다. 이미 없거나 지웠으면 true, 못 지웠으면 false. */
+    private fun deleteFile(f: File): Boolean = !f.exists() || (runCatching { f.delete() }.getOrDefault(false) && !f.exists())
+
+    /** 큐·등록을 비운다. 파일까지 비웠으면 true(로드 전이거나 쓰기가 실패하면 false). */
+    fun clear(): Boolean {
+        var ok = true
         synchronized(lock) {
             entries.clear()
             early.clear()
@@ -409,13 +413,15 @@ class Uploader(
                 try {
                     if (!memoryOnly) queue.rewrite(emptyList())
                 } catch (t: Exception) {
+                    ok = false
                     Log.w(TAG, "큐 비우기 실패: ${t.javaClass.simpleName}")
                 }
             } else {
                 clearAfterLoad = true
+                ok = false
             }
         }
-        saveRegistrations()
+        return saveRegistrations() && ok
     }
 
     /**
@@ -627,7 +633,14 @@ class Uploader(
                         removed = 0
                     }
                 } catch (e: PausedByServer) {
-                    // 서버가 기록 멈춤·동의 철회로 받지 않는다: 이 트립의 큐 항목·등록을 재시도 없이 버린다(다른 트립은 계속)
+                    val pausedAt = e.pausedAtMillis
+                    val startedAt = (step as? Step.Create)?.start?.startedAtMillis
+                    if (pausedAt != null && startedAt != null && startedAt < pausedAt) {
+                        // 멈춤 시각보다 앞에 시작한 트립이다(서버 응답이 시계·순서 경쟁으로 어긋난 경우): 버리지 않고 나중에 다시 시도한다
+                        Log.i(TAG, "paused 응답이지만 멈춤 전에 시작한 트립이라 재시도")
+                        return DrainResult(DrainKind.RETRY, uploaded, "RETRY paused-before-start")
+                    }
+                    // 멈춤 뒤에 시작한 트립이거나 동의 철회: 이 트립의 큐 항목·등록을 재시도 없이 버린다(다른 트립은 계속)
                     Log.i(TAG, "서버가 기록을 받지 않아(paused) 트립을 버림")
                     removed += dropTrip(step.firstEntry.localId)
                 } catch (e: HttpFailure) {
@@ -886,8 +899,8 @@ class Uploader(
     }
 
     /** lock 밖에서 부른다. lock 안에서 JSON만 만들고, 암호화·fsync·rename은 [idsLock]으로 순서만 지킨다. */
-    private fun saveRegistrations() {
-        if (memoryOnly) return
+    private fun saveRegistrations(): Boolean {
+        if (memoryOnly) return true
         val lines: List<String>
         val version: Long
         synchronized(lock) {
@@ -905,12 +918,14 @@ class Uploader(
             version = ++idsVersion
         }
         synchronized(idsLock) {
-            if (version < idsWritten) return // 더 새 스냅샷이 이미 저장됐다
-            try {
+            if (version < idsWritten) return true // 더 새 스냅샷이 이미 저장됐다
+            return try {
                 ids.rewrite(lines)
                 idsWritten = version
+                true
             } catch (t: Exception) {
                 Log.w(TAG, "server-ids 저장 실패: ${t.javaClass.simpleName}")
+                false
             }
         }
     }

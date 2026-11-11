@@ -57,50 +57,94 @@ describe('설정', () => {
     expect((await call(e, `/vehicles/${V}/settings`)).body.homeRegion).toBe('11110');
   });
 
-  it('기록 멈춤이면 점 업로드를 저장하지 않고 200으로 응답한다(차량 큐가 쌓이지 않게), 다시 켜면 저장한다', async () => {
+  it('기록 멈춤 구간 안의 점은 저장하지 않고 200으로 응답한다(차량 큐가 쌓이지 않게), 끈 뒤 시각의 점은 저장한다', async () => {
     const e = await setup();
     const pts = eastPoints(80, T0);
     const start = await call(e, '/trips', post('', { localId: crypto.randomUUID(), vehicleId: V, driverId: V, startedAt: pts[0]!.ts }));
     const tripId = start.body.tripId as string;
-    await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: true }));
+    await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: true, intentAt: pts[0]!.ts }));
     const up = await call(e, `/trips/${tripId}/points`, post('', { points: pts }));
-    expect(up.body).toEqual({ accepted: 0, duplicated: 0, paused: true });
+    expect(up.body).toEqual({ accepted: 0, duplicated: 0, paused: true, dropped: 80 });
     expect((e.db.prepare('SELECT COUNT(*) AS n FROM trip_points').get() as any).n).toBe(0);
-    await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: false }));
+    await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: false, intentAt: new Date(T0 + HOUR / 2).toISOString() }));
     const b = await drive(e, V, T0 + HOUR);
     expect(b.up.body.accepted).toBe(80);
   });
 
-  it('기록 멈춤은 이후 기록만 멈춘다: 새 트립은 막고, 멈춤 전에 만든 트립의 재전송(멱등)과 End는 받아 정산한다', async () => {
+  it('멈춤 판정은 기록된 시각 기준: 멈춤 전에 기록됐지만 멈춤 뒤에 도착한 Start·점·End는 모두 받는다', async () => {
     const e = await setup();
-    const pts = eastPoints(80, T0);
-    const body = { localId: 'open-1', vehicleId: V, driverId: V, startedAt: pts[0]!.ts };
-    const open = await call(e, '/trips', post('', body));
-    const openId = open.body.tripId as string;
-    await call(e, `/trips/${openId}/points`, post('', { points: pts }));
-    await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: true }));
-    const before = (e.db.prepare('SELECT COUNT(*) AS n FROM trips').get() as any).n;
-    // 새 트립은 막는다(행 없음)
-    const create = await call(e, '/trips', post('', { localId: 'new-1', vehicleId: V, driverId: V, startedAt: pts[0]!.ts }));
-    expect(create.status).toBe(200);
-    expect(create.body).toEqual({ paused: true });
-    expect((e.db.prepare('SELECT COUNT(*) AS n FROM trips').get() as any).n).toBe(before);
-    // 이미 있는 트립의 재전송은 멱등 응답(기존 tripId)
-    const again = await call(e, '/trips', post('', body));
-    expect(again.body.tripId).toBe(openId);
-    // End는 받고 멈춤 전에 올라온 점만으로 정산(매칭 큐)한다
-    const end = await call(e, `/trips/${openId}/end`, post('', { endedAt: pts.at(-1)!.ts }));
-    expect(end.status).toBe(200);
+    const pts = eastPoints(80, T0); // 2초 간격
+    const pausedAt = new Date(T0 + 10 * 60_000).toISOString(); // 점들보다 한참 뒤에 멈춤
+    await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: true, intentAt: pausedAt }));
+    // 오프라인 백로그: 멈춤 뒤에야 도착했지만 시작·점·종료 시각은 모두 멈춤 전이다
+    const body = { localId: 'late-1', vehicleId: V, driverId: V, startedAt: pts[0]!.ts };
+    const start = await call(e, '/trips', post('', body));
+    expect(start.status).toBe(201);
+    const tripId = start.body.tripId as string;
+    const up = await call(e, `/trips/${tripId}/points`, post('', { points: pts }));
+    expect(up.body).toEqual({ accepted: 80, duplicated: 0 });
+    const end = await call(e, `/trips/${tripId}/end`, post('', { endedAt: pts.at(-1)!.ts }));
     expect(end.body.matching).toBe('queued');
-    expect((e.db.prepare('SELECT ended_at FROM trips WHERE id = ?').get(openId) as any).ended_at).not.toBeNull();
     await e.app.matching.idle();
-    expect((e.db.prepare("SELECT status FROM trip_matching WHERE trip_id = ?").get(openId) as any)?.status).toBeDefined();
-    // 멈춤 중 점 업로드는 저장하지 않는다
-    const up = await call(e, `/trips/${openId}/points`, post('', { points: eastPoints(5, T0 + 3600_000) }));
-    expect(up.body).toEqual({ accepted: 0, duplicated: 0, paused: true });
-    // 다른 차량은 영향이 없다
-    const other = await call(e, '/trips', post('', { localId: 'o-1', vehicleId: 'other-vehicle', driverId: 'x', startedAt: pts[0]!.ts }));
-    expect(typeof other.body.tripId).toBe('string');
+    // 이미 있는 트립의 재전송은 멱등 응답(기존 tripId)이고 행이 늘지 않는다
+    const again = await call(e, '/trips', post('', body));
+    expect(again.body.tripId).toBe(tripId);
+    expect((e.db.prepare('SELECT COUNT(*) AS n FROM trips').get() as any).n).toBe(1);
+  });
+
+  it('멈춤 구간 안에서 시작한 트립은 막는다(pausedAt 포함)', async () => {
+    const e = await setup();
+    const at = new Date(T0).toISOString();
+    await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: true, intentAt: at }));
+    const r = await call(e, '/trips', post('', { localId: 'in-pause', vehicleId: V, driverId: V, startedAt: new Date(T0 + 60_000).toISOString() }));
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ paused: true, pausedAt: at });
+    expect((e.db.prepare('SELECT COUNT(*) AS n FROM trips').get() as any).n).toBe(0);
+    // 멈춤을 끈 뒤에 시작하면 받는다
+    await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: false, intentAt: new Date(T0 + 120_000).toISOString() }));
+    const ok = await call(e, '/trips', post('', { localId: 'after', vehicleId: V, driverId: V, startedAt: new Date(T0 + 180_000).toISOString() }));
+    expect(ok.status).toBe(201);
+  });
+
+  it('멈춤 구간의 점만 버리고 앞뒤 점은 저장한다(폰에서 멈췄다 켠 뒤 올라온 구간 점 제외)', async () => {
+    const e = await setup();
+    const pts = eastPoints(80, T0); // i번째 점 = T0 + 2i초
+    const start = await call(e, '/trips', post('', { localId: 'span-1', vehicleId: V, driverId: V, startedAt: pts[0]!.ts }));
+    const tripId = start.body.tripId as string;
+    // 40번째 점(80초)에 멈췄다가 60번째 점(120초)에 켰다(폰에서). 그 뒤 차량이 모든 점을 올린다
+    await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: true, intentAt: pts[40]!.ts }));
+    await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: false, intentAt: pts[60]!.ts }));
+    const up = await call(e, `/trips/${tripId}/points`, post('', { points: pts }));
+    expect(up.body).toEqual({ accepted: 60, duplicated: 0, dropped: 20 });
+    const stored = (e.db.prepare('SELECT seq FROM trip_points WHERE trip_id = ? ORDER BY seq').all(tripId) as { seq: number }[]).map((r) => r.seq);
+    expect(stored).toEqual([...Array(40).keys(), ...Array.from({ length: 20 }, (_, i) => 60 + i)]);
+    // 전부 구간 안인 배치는 paused로 응답
+    await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: true, intentAt: pts[79]!.ts }));
+    const allIn = await call(e, `/trips/${tripId}/points`, post('', { points: [{ ...pts[79]!, seq: 500, ts: new Date(T0 + 3600_000).toISOString() }] }));
+    expect(allIn.body).toEqual({ accepted: 0, duplicated: 0, paused: true, dropped: 1 });
+  });
+
+  it('오래된 의도는 무시하고 현재 값을 돌려준다(다른 기기가 나중에 바꾼 상태를 되돌리지 않는다)', async () => {
+    const e = await setup();
+    const t = (ms: number) => new Date(T0 + ms).toISOString();
+    await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: true, intentAt: t(10_000) }));
+    const stale = await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: false, intentAt: t(5_000) }));
+    expect(stale.body.recordingPaused).toBe(true);
+    const fresh = await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: false, intentAt: t(20_000) }));
+    expect(fresh.body.recordingPaused).toBe(false);
+    // 구간은 켠 시각~끈 시각
+    const rows = e.db.prepare('SELECT paused_at, resumed_at FROM recording_pauses').all() as any[];
+    expect(rows).toEqual([{ paused_at: t(10_000), resumed_at: t(20_000) }]);
+  });
+
+  it('alias(UUID)로 만든 트립의 같은 localId 재전송은 정본 ID로 와도 같은 tripId(멱등)', async () => {
+    const e = await setup();
+    await call(e, '/vehicles/alias', post('', { fromVehicleId: 'uuid-idem', toVehicleId: V }));
+    const body = { localId: 'idem-1', driverId: V, startedAt: new Date(T0).toISOString() };
+    const first = await call(e, '/trips', post('', { ...body, vehicleId: 'uuid-idem' }));
+    const second = await call(e, '/trips', post('', { ...body, vehicleId: V }));
+    expect(second.body.tripId).toBe(first.body.tripId);
+    expect((e.db.prepare('SELECT COUNT(*) AS n FROM trips').get() as any).n).toBe(1);
   });
 
   it('동의 철회(데이터 삭제) 뒤에는 End도 막고 새 트립도 만들지 않는다', async () => {
@@ -126,9 +170,10 @@ describe('설정', () => {
   it('alias(UUID) 차량 ID로 보낸 트립 생성도 정본 차량의 멈춤에 막힌다', async () => {
     const e = await setup();
     await call(e, '/vehicles/alias', post('', { fromVehicleId: 'uuid-block', toVehicleId: V }));
-    await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: true }));
-    const r = await call(e, '/trips', post('', { localId: 'a-1', vehicleId: 'uuid-block', driverId: 'x', startedAt: '2026-11-09T00:00:00Z' }));
-    expect(r.body).toEqual({ paused: true });
+    const at = new Date(T0).toISOString();
+    await call(e, `/vehicles/${V}/settings`, put({ recordingPaused: true, intentAt: at }));
+    const r = await call(e, '/trips', post('', { localId: 'a-1', vehicleId: 'uuid-block', driverId: 'x', startedAt: new Date(T0 + 1000).toISOString() }));
+    expect(r.body).toEqual({ paused: true, pausedAt: at });
     expect((e.db.prepare('SELECT COUNT(*) AS n FROM trips').get() as any).n).toBe(0);
   });
 

@@ -839,6 +839,62 @@ class UploaderTest {
     }
 
     @Test
+    fun paused_응답은_멈춤_뒤에_시작한_트립만_버리고_멈춤_전에_시작했으면_다시_시도한다() {
+        // 멈춤 시각(1000)보다 앞에 시작한 트립(start 0)이 paused를 받았다: 버리지 않고 재시도
+        val early = FakeServer().apply { onCreate = { throw PausedByServer("paused", pausedAtMillis = 1_000) } }
+        val u1 = uploader(early)
+        u1.enqueue(start("a", startedAt = 0), *points("a", 0..1))
+        assertEquals(DrainKind.RETRY, u1.drain().kind)
+        assertEquals("항목이 남는다", 3, u1.pendingEntries)
+        // 멈춤 뒤(2000)에 시작한 트립은 버린다
+        val late = FakeServer().apply { onCreate = { throw PausedByServer("paused", pausedAtMillis = 1_000) } }
+        val ids = ArrayList<String?>()
+        val u2 = newUploader(tmp.newFolder("late"), late, cipher)
+        u2.onPausedByServer = { ids.add(it) }
+        u2.enqueue(start("b", startedAt = 2_000), *points("b", 0..1))
+        assertEquals(DrainKind.OK, u2.drain().kind)
+        assertEquals(0, u2.pendingEntries)
+        assertEquals("버린 트립의 localId를 알린다", listOf<String?>("b"), ids)
+        // 멈춤 시각을 모르는(동의 철회) paused는 항상 버린다
+        val withdrawn = FakeServer().apply { onCreate = { throw PausedByServer("paused") } }
+        val u3 = newUploader(tmp.newFolder("wd"), withdrawn, cipher)
+        u3.enqueue(start("c", startedAt = 0))
+        u3.drain()
+        assertEquals(0, u3.pendingEntries)
+    }
+
+    @Test
+    fun 파일을_못_지우면_세대를_맞추지_않아_다음_로드에서_다시_폐기한다() {
+        val epochs = MemEpochs()
+        val dir = tmp.newFolder("undeletable")
+        // 큐 파일 자리에 비어 있지 않은 디렉터리: 지울 수 없다
+        val q = java.io.File(dir, "queue.jsonl").apply { mkdir() }
+        java.io.File(q, "x").writeText("x")
+        epochs.purge = 1
+        newUploader(dir, FakeServer(), cipher, epochs = epochs)
+        assertEquals("전부 지우지 못했으니 세대를 맞추지 않는다", 0L, epochs.files)
+        // 막던 것을 치우면 다음 로드가 폐기하고 세대를 맞춘다
+        q.listFiles()!!.forEach { it.delete() }
+        q.delete()
+        newUploader(dir, FakeServer(), cipher, epochs = epochs)
+        assertEquals(1L, epochs.files)
+    }
+
+    @Test
+    fun clearAll은_server_ids를_못_비우면_세대를_맞추지_않는다() {
+        val epochs = MemEpochs()
+        val dir = tmp.newFolder("ids-fail")
+        val ids = java.io.File(dir, "server-ids.jsonl").apply { mkdir() }
+        java.io.File(ids, "x").writeText("x") // 쓸 수도 지울 수도 없다
+        val u = newUploader(dir, FakeServer(), cipher, epochs = epochs)
+        u.enqueue(start("t"), *points("t", 0..1))
+        u.clearAll()
+        assertEquals(0, u.pendingEntries)
+        assertEquals("파일을 다 지우지 못했으니 다음 로드가 다시 폐기한다", 0L, epochs.files)
+        assertEquals(1L, epochs.purge)
+    }
+
+    @Test
     fun tombstone은_상한을_넘으면_오래된_것부터_잊는다() {
         val server = FakeServer().apply { onCreate = { throw PausedByServer("paused") } }
         val u = uploader(server)

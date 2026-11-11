@@ -109,6 +109,45 @@ class TripEngineTest {
     }
 
     @Test
+    fun 멈춤으로_끝난_트립의_End_시각은_마지막_채택_샘플_시각이고_멈춤_뒤_점은_큐에_없다() {
+        vehicle.vehicleId = "hash"
+        val e = engine()
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.drive(8)
+        e.pauseRecording()
+        scheduler.runPosted()
+        scheduler.advance(5_000)
+        val before = server.pointsByTrip.values.flatMap { it.values }.map { it.sample.tsMillis }
+        assertTrue(before.isNotEmpty())
+        assertEquals("End 시각 = 마지막으로 채택한 샘플 시각", before.max(), server.ended.values.single())
+        // 멈춤 뒤 샘플은 큐에도 서버에도 없다
+        e.drive(6, firstIndex = 40)
+        scheduler.advance(120_000)
+        val after = server.pointsByTrip.values.flatMap { it.values }.map { it.sample.tsMillis }
+        assertEquals(before.size, after.size)
+        assertEquals(1, server.ended.size)
+        assertEquals(0, e.status.pendingPoints)
+    }
+
+    @Test
+    fun 서버가_버린_트립이_지금_기록_중이면_엔진이_그_트립을_끝낸다() {
+        vehicle.vehicleId = "hash"
+        val e = engine()
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.drive(8)
+        val id = e.recordingLocalId!!
+        e.endActiveTrip("다른-트립")
+        scheduler.runPosted()
+        assertEquals("다른 localId면 건드리지 않는다", TripState.RECORDING, e.status.state)
+        e.endActiveTrip(id)
+        scheduler.runPosted()
+        assertTrue(e.status.state != TripState.RECORDING)
+        assertNull(e.recordingLocalId)
+    }
+
+    @Test
     fun 데이터_삭제_뒤_지연_콜백이_옛_트립으로_큐를_다시_채우지_않는다() {
         vehicle.vehicleId = null // 차량 ID를 아직 몰라 Start가 재시도 대기 중
         val e = engine()

@@ -335,10 +335,27 @@ class TripEngine(
     fun pauseRecording() {
         recordingPaused = true
         scheduler.post {
-            handle(machine.onStop(), immediate = true)
+            // 오도미터는 최대 2초만 기다리고(실패하면 null) End를 큐에 넣는다. End 시각은 마지막 채택 샘플 시각이다
+            handle(machine.onStop(), immediate = false)
             publish()
         }
     }
+
+    /**
+     * 서버가 그 트립의 Start를 받지 않았다(멈춤 뒤에 시작한 트립이 paused로 버려졌다). 지금 기록 중인 트립이 그 localId면 트립을 끝내서
+     * 멈춤이 풀린 뒤 새 트립이 시작되게 한다(끝낸 트립의 End는 버려진 localId라 업로더가 조용히 버린다).
+     */
+    fun endActiveTrip(localId: String) {
+        scheduler.post {
+            if (active?.localId == localId) {
+                handle(machine.onStop(), immediate = true)
+                publish()
+            }
+        }
+    }
+
+    /** 업로드 큐에 남은 항목 수(진단·debug 신호용). */
+    val pendingEntries: Int get() = uploader.pendingEntries
 
     /**
      * 사용자가 서버 데이터를 지웠다(위치정보 동의 철회): 로컬에서도 **먼저** 기록 멈춤을 켜고 저장한 뒤, 진행 중 트립·상태기계·업로드 큐(dead-letter·서버 등록 포함)를 모두 버린다.

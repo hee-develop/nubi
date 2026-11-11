@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 차량 앱 E2E(Maestro + 서버 검증): debug 앱을 설치하고 서버를 띄운 뒤 flow를 돌리고, 서버에 저장된 트립을 검증한다.
 # 사용: pnpm e2e:car   (Pleos 에뮬레이터 emulator-5554만 쓴다. 꺼져 있으면 실행 전에 띄워 두세요)
-# flow 4개를 순서대로 돈다: 주행 기록(trip-recording, GPX e2e-north) → 도로 색칠(road-coloring, GPX e2e-sejong) → 시군구 색칠(region-coloring, GPX e2e-junggu 2회) → 정차 메뉴(parked-menu: 탭·QR·기록 멈춤·데이터 지우기, 마지막에 서버 삭제와 음성 로그 확인). 도로 색칠은 실제 Valhalla(nubi-valhalla, 포트 8002)를 쓴다.
+# flow를 순서대로 돈다: 주행 기록(trip-recording, GPX e2e-north) → 도로 색칠(road-coloring, GPX e2e-sejong) → 시군구 색칠(region-coloring, GPX e2e-junggu 2회) → 정차 메뉴(parked-menu: 탭·QR·기록 멈춤, 주행 중 멈춤 켜기 뒤 서버에 정산 대상 트립이 남는지 확인) → 정차 메뉴 데이터 지우기(parked-menu-delete, 끝나면 서버 삭제·로컬 큐·음성 로그 확인). 도로 색칠은 실제 Valhalla(nubi-valhalla, 포트 8002)를 쓴다.
 # 환경 변수: E2E_OUT은 산출물 루트(기본 e2e/output/car), PORT는 서버 포트(기본 8787), VALHALLA_PORT는 Valhalla 포트(기본 8002),
 #            NUBI_REGIONS_DB는 지역(시군구) DB(기본 server/data/regions/regions.sqlite, 없으면 테스트 픽스처를 명시해 넘김),
 #            NUBI_ROADS_DB는 도로 DB(기본: server/data/roads-*.sqlite 중 최신, 없으면 server/test/fixtures/roads-test.sqlite를 이 스크립트가 **명시**해 서버에 넘긴다. 서버 자체는 조용히 대체하지 않는다).
@@ -215,12 +215,37 @@ echo "== 서버 검증: 시군구 색칠"
 E2E_BASE_URL="$BASE_URL" node "$ROOT/scripts/verify-trip.mjs" --regions "$ROOT/car/app/src/debug/assets/e2e-sejong.gpx" "$ROOT/car/app/src/debug/assets/e2e-junggu.gpx" | tee "$RUN_DIR/region-coloring-verify.txt"
 echo "== Maestro 실행: 정차 메뉴 (스크린샷: $SHOTS)"
 "${ADB[@]}" logcat -c || true
+MENU_T0="$(node -e 'console.log(new Date().toISOString())')"
 set +e
 "$MAESTRO" test "e2e/maestro/car/parked-menu.yaml" --device "$SERIAL" -e SHOT_DIR="$SHOTS" -e APP_VIN="$APP_VIN" --test-output-dir "$RUN_DIR/maestro/parked-menu"
 MENU_RC=$?
 set -e
 "${ADB[@]}" logcat -d -s "${LOGTAGS[@]}" >"$RUN_DIR/app-logcat-parked-menu-attempt1.txt" 2>&1 || true
 [ "$MENU_RC" -eq 0 ] || { echo "Maestro(정차 메뉴) 실패(재시도 안 함). 출력: $RUN_DIR/maestro/parked-menu" >&2; exit 1; }
+
+echo "== 서버 검증: 주행 중 멈춤 켜기 → 진행 중 트립이 End로 끝나 서버에 남음"
+# parked-menu가 e2e-junggu(점 12개)를 재생하던 중 기록 멈춤을 켰다. 그 트립(이 단계 시작 이후 시작)이 점 12개·종료 시각과 함께 서버에 있어야 한다
+PAUSE_OK=""
+for _ in $(seq 1 30); do
+  curl -fs "$BASE_URL/trips?vehicleId=$E2E_VEHICLE_ID&limit=200" >"$RUN_DIR/trips-after-pause.json" || true
+  if node -e '
+const t = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+const items = Array.isArray(t) ? t : (t.items ?? t.trips ?? []);
+const hit = items.filter((x) => x.startedAt >= process.argv[2] && x.pointCount === 12 && x.endedAt);
+if (hit.length < 1) process.exit(1);
+console.log("멈춤으로 끝난 트립 확인: 점 " + hit[0].pointCount + "개, 종료 " + hit[0].endedAt);
+' "$RUN_DIR/trips-after-pause.json" "$MENU_T0" | tee "$RUN_DIR/pause-verify.txt"; then PAUSE_OK=1; break; fi
+  sleep 1
+done
+[ -n "$PAUSE_OK" ] || { echo "실패: 멈춤 켜기 순간 끝난 트립(점 12개·종료됨)이 서버에 없습니다. $RUN_DIR/trips-after-pause.json" >&2; exit 1; }
+
+echo "== Maestro 실행: 정차 메뉴(데이터 지우기)"
+set +e
+"$MAESTRO" test "e2e/maestro/car/parked-menu-delete.yaml" --device "$SERIAL" -e SHOT_DIR="$SHOTS" -e APP_VIN="$APP_VIN" --test-output-dir "$RUN_DIR/maestro/parked-menu-delete"
+DEL_RC=$?
+set -e
+"${ADB[@]}" logcat -d -s "${LOGTAGS[@]}" >"$RUN_DIR/app-logcat-parked-menu-delete-attempt1.txt" 2>&1 || true
+[ "$DEL_RC" -eq 0 ] || { echo "Maestro(정차 메뉴 데이터 지우기) 실패(재시도 안 함). 출력: $RUN_DIR/maestro/parked-menu-delete" >&2; exit 1; }
 
 echo "== 서버 검증: 데이터 지우기·기록 멈춤 해제"
 # 정차 메뉴 flow가 데이터를 지웠다: 이 차량의 트립이 모두 없어지고 위치정보 동의 철회가 기록돼야 한다
@@ -243,9 +268,14 @@ const items = Array.isArray(t) ? t : (t.items ?? t.trips ?? []);
 if (items.length !== 0) { console.error("실패: 삭제 뒤 기다리는 사이 트립이 " + items.length + "개 다시 생겼습니다"); process.exit(1); }
 console.log("삭제 8초 뒤에도 트립 0개");
 ' "$RUN_DIR/trips-after-delete-wait.json" | tee -a "$RUN_DIR/delete-verify.txt"
-# 차량 로컬 업로드 큐도 비었는지(데이터 삭제 때 Uploader.clearAll이 남기는 로그)
-grep -q "NubiUpload.*큐 비움 pending=0" "$RUN_DIR/app-logcat-parked-menu-attempt1.txt" || { echo "실패: 삭제 뒤 차량 로컬 큐 비움(pending=0) 로그가 없습니다" >&2; exit 1; }
-echo "삭제 뒤 차량 로컬 큐 pending=0 확인" | tee -a "$RUN_DIR/delete-verify.txt"
+# 차량 로컬 업로드 큐도 비었는지: debug 신호로 큐 항목 수를 로그에 남기게 해서 0인지 본다
+"${ADB[@]}" logcat -c || true
+"${ADB[@]}" shell "am start --user $APP_USER -a android.intent.action.VIEW -d 'nubi-debug://signal?queue=1'" >/dev/null
+sleep 2
+QUEUE_LINE="$("${ADB[@]}" logcat -d -s NubiDebug | grep '큐 pendingEntries=' | tail -1 || true)"
+echo "$QUEUE_LINE" >"$RUN_DIR/queue-after-delete.txt"
+case "$QUEUE_LINE" in *"pendingEntries=0"*) ;; *) echo "실패: 삭제 뒤 차량 로컬 큐가 비어 있지 않습니다: $QUEUE_LINE" >&2; exit 1 ;; esac
+echo "삭제 뒤 차량 로컬 큐 pendingEntries=0 확인" | tee -a "$RUN_DIR/delete-verify.txt"
 verify_voice | tee -a "$RUN_DIR/delete-verify.txt"
 write_summary
 echo "== 통과. 산출물: $RUN_DIR"

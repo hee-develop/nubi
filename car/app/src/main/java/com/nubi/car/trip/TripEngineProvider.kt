@@ -135,11 +135,12 @@ object TripEngineProvider {
         val dir = File(context.filesDir, "trips").apply { mkdirs() }
         // Keystore unwrap·파일 읽기는 워커에서 한다. 메인 스레드는 아무것도 기다리지 않는다.
         val setup = lazy { KeystoreCipher.create(dir) }
+        val tripApi = HttpTripApi(BuildConfig.SERVER_URL)
         val uploader = Uploader(
             queueFile = File(dir, "queue.jsonl"),
             idsFile = File(dir, "server-ids.jsonl"),
             deadLetterFile = File(dir, "dead-letter.jsonl"),
-            api = HttpTripApi(BuildConfig.SERVER_URL),
+            api = tripApi,
             cipherSetup = { setup.value },
             epochs = object : PurgeEpochs {
                 override fun purgeEpoch() = store.getString(KEY_PURGE_EPOCH)?.toLongOrNull() ?: 0L
@@ -228,11 +229,19 @@ object TripEngineProvider {
                 store.putString(TripEngine.KEY_PAUSED, if (on) "1" else "0")
             },
             gear = { engine.status.gear },
-            loadPausePending = { store.getString(KEY_PAUSE_PENDING) == "1" },
-            savePausePending = { store.putString(KEY_PAUSE_PENDING, if (it) "1" else "0") },
+            loadPausePending = { store.getString(KEY_PAUSE_PENDING)?.toLongOrNull() },
+            savePausePending = { store.putString(KEY_PAUSE_PENDING, it?.toString() ?: "") },
+            intentClock = { engine.nowMillis() },
         )
         // 서버가 기록 멈춤·동의 철회로 트립을 받지 않았다: 설정을 다시 읽어 로컬 멈춤을 맞춘다
-        uploader.onPausedByServer = { extras.refreshSettings() }
+        val onPaused: (String?) -> Unit = { localId ->
+            // 서버 설정을 다시 읽어 로컬 멈춤을 맞추고, 버려진 트립이 지금 기록 중이면 끝내서 멈춤이 풀린 뒤 새 트립이 시작되게 한다
+            extras.refreshSettings()
+            localId?.let { engine.endActiveTrip(it) }
+        }
+        uploader.onPausedByServer = onPaused
+        tripApi.onPointsPaused = { onPaused(null) } // 점 응답이 paused·dropped > 0: 차량도 즉시 멈춘다
+        Auth.onSuccess = { extras.onConnectivity() } // 연결이 살아나면 멈춤 재전송 백오프를 푼다
         extrasController = extras
         // 기어·QR: 기어가 바뀌면 말하는 중인 음성을 다시 확인하고 QR 요청 세대를 올린다
         engine.addGearListener { _ ->

@@ -39,36 +39,56 @@ class ExtrasController(
     private val applyLocalPause: (Boolean) -> Unit = {},
     /** 지금 기어(서버에 실제 값을 보낸다). */
     private val gear: () -> Gear? = { Gear.P },
-    /** 로컬 멈춤이 서버에 안 닿은 상태를 저장·복원한다(재시작해도 켜기를 다시 보낸다). */
-    private val loadPausePending: () -> Boolean = { false },
-    private val savePausePending: (Boolean) -> Unit = {},
+    /** 로컬 멈춤이 서버에 안 닿은 상태(켜기를 누른 시각, epoch ms)를 저장·복원한다. 재시작해도 같은 의도 시각으로 켜기를 다시 보낸다. 없으면 null. */
+    private val loadPausePending: () -> Long? = { null },
+    private val savePausePending: (Long?) -> Unit = {},
+    /** 사용자 의도의 시각(기기 시계, epoch ms). 서버가 다른 기기의 더 늦은 변경과 순서를 가리는 데 쓴다. */
+    private val intentClock: () -> Long = { System.currentTimeMillis() },
 ) {
     /** 요청마다 올리는 세대 번호. 기어가 바뀌거나 코드를 닫을 때 올라가서 늦게 온 응답이 QR을 되살리지 못한다. */
     private val generation = AtomicInteger()
 
-    /** 로컬에서 멈췄지만(켜기) 서버에는 아직 닿지 않았다. 저장해 두었다가 재시작 뒤에도 서버 동기화를 재시도한다([syncPendingPause]). */
-    @Volatile
-    var pausePending = try {
+    private val loadedPending: Long? = try {
         loadPausePending()
     } catch (t: Throwable) {
-        false
+        null
     }
+
+    /** 로컬에서 멈췄지만(켜기) 서버에는 아직 닿지 않았다. 저장해 두었다가 재시작 뒤에도 서버 동기화를 재시도한다([syncPendingPause]). */
+    @Volatile
+    var pausePending = loadedPending != null
         private set
+
+    /** 켜기를 누른 시각(서버로 보내는 의도 시각). */
+    @Volatile
+    private var pauseIntentMs = loadedPending ?: 0L
 
     /** 멈춤 켜기·끄기를 누를 때마다 올라간다('마지막 의도'만 유효). 늦게 온 옛 의도의 응답은 무시한다. */
     @Volatile
     private var intent = 0
+
+    @Volatile
     private var pauseFailures = 0
+
+    @Volatile
     private var pauseNextTryAt = 0L
+
+    /** 권한 문제(403 forbidden·local_only)로 재전송을 멈췄다. 사용자가 다시 켜기를 누를 때까지. */
+    @Volatile
+    private var pausePermanent = false
+    private val pushInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
 
     private fun setPending(v: Boolean) {
         pausePending = v
         try {
-            savePausePending(v)
+            savePausePending(if (v) pauseIntentMs else null)
         } catch (t: Throwable) {
             Log.w(TAG, "멈춤 대기 저장 실패: ${t.javaClass.simpleName}")
         }
     }
+
+    /** 설정을 아직(또는 못) 불러오지 못했을 때 화면이 쓰는 기본값. 설정 탭의 토글·삭제는 이 값으로도 쓸 수 있다. */
+    val settingsOrDefault: ServerSettings get() = settings ?: ServerSettings(pausePending, null, true, true, false)
 
     /** 대기 중인 멈춤이 있으면 화면에 보이는 설정의 recordingPaused는 항상 로컬 값(켜짐)이다. */
     private fun reconcile(s: ServerSettings): ServerSettings = if (pausePending) s.copy(recordingPaused = true) else s
@@ -112,22 +132,23 @@ class ExtrasController(
     var deleteStep = DeleteStep.NONE
         private set
 
+    private fun resetBackoff() {
+        pauseFailures = 0
+        pauseNextTryAt = 0L
+    }
+
     // 설정 -----------------------------------------------------------------
 
     /**
-     * 시작할 때와 정차 진입 때 부른다. 실패하면 마지막 값을 유지한다.
-     * 로컬 멈춤이 서버에 안 닿았다면(저장돼 재시작 뒤에도 남는다) 서버 값을 쓰지 않고 켜기를 다시 보낸다.
+     * 시작할 때·정차 진입·설정 탭 열기에서 부른다(백오프를 초기화한다). 설정은 항상 읽되, 로컬 멈춤이 서버에 안 닿았다면(저장돼 재시작 뒤에도 남는다)
+     * 서버 값의 recordingPaused 대신 로컬 값을 유지하고 켜기를 다시 보낸다. 읽기가 실패하면 마지막 값을 유지한다.
      */
     fun refreshSettings() {
-        if (pausePending) {
-            syncPendingPause()
-            return
-        }
+        resetBackoff()
         work {
             val id = vehicleId() ?: return@work
             try {
-                val s = api.getSettings(id)
-                if (pausePending) return@work // 읽는 사이 로컬 멈춤이 걸렸다
+                val s = reconcile(api.getSettings(id))
                 settings = s
                 settingsError = false
                 applySettings(s)
@@ -136,6 +157,14 @@ class ExtrasController(
                 Log.w(TAG, "설정 조회 실패: ${e.javaClass.simpleName}")
             }
         }
+        syncPendingPause()
+    }
+
+    /** 연결이 살아났다(어떤 요청이든 성공): 멈춤 재전송 백오프를 풀고 바로 다시 보낸다. */
+    fun onConnectivity() {
+        if (!pausePending || pausePermanent) return
+        pauseNextTryAt = 0L
+        pushPause()
     }
 
     /** 설정 한 항목을 바꾼다(부분 갱신). 서버 응답이 새 값이다. 멈춤이 대기 중이면 응답이 와도 recordingPaused는 로컬 값을 유지한다. 화면을 열어도 되는 상태일 때만. */
@@ -156,54 +185,72 @@ class ExtrasController(
     }
 
     /**
-     * 기록 멈춤("이후 기록만 멈춘다"). **켜기**는 로컬(엔진)에 즉시 적용·저장하고(진행 중 트립은 엔진이 End로 끝낸다) 서버에 보낸다. 못 보내면 대기로 남겨 다시 보낸다.
-     * **끄기**는 대기를 풀고 서버가 확인한 뒤에만 적용한다. 켜기·끄기는 마지막 의도 하나만 유효하다.
+     * 기록 멈춤("이후 기록만 멈춘다"). **켜기**는 로컬(엔진)에 즉시 적용·저장하고(진행 중 트립은 엔진이 End로 끝낸다) 서버에 **의도 시각**과 함께 보낸다.
+     * 못 보내면 대기로 남겨 다시 보낸다. **끄기**는 대기를 풀고 서버가 확인한 뒤에만 적용한다. 켜기·끄기는 마지막 의도 하나만 유효하고,
+     * 서버는 마지막 멈춤 상태 변경보다 오래된 의도를 무시하고 현재 값을 돌려준다(그 응답이 오면 대기를 버리고 서버 값을 따른다).
      */
     fun setPaused(paused: Boolean) {
         if (!allowed()) return
         intent++
-        pauseFailures = 0
-        pauseNextTryAt = 0L
+        resetBackoff()
+        pausePermanent = false
+        val at = intentClock()
         if (!paused) {
             setPending(false)
-            update(JSONObject().put("recordingPaused", false))
+            update(JSONObject().put("recordingPaused", false).put("intentAt", isoOf(at)))
             return
         }
+        pauseIntentMs = at
         applyLocalPause(true)
         setPending(true)
-        settings = settings?.copy(recordingPaused = true)
+        settings = settingsOrDefault.copy(recordingPaused = true)
         settingsError = false
         pushPause()
     }
 
-    /** 로컬 멈춤이 서버에 안 닿았을 때 다시 보낸다(정차 진입·화면 복귀·주기). 영구 실패(권한 등)면 멈추고, 그 밖에는 백오프를 둔다. */
+    /** 로컬 멈춤이 서버에 안 닿았을 때 다시 보낸다(정차 진입·화면 복귀·주기). 백오프 중이거나 권한 문제로 멈췄으면 보내지 않는다. */
     fun syncPendingPause() {
-        if (!pausePending) return
-        if (pauseFailures >= MAX_PAUSE_FAILURES || elapsedMs() < pauseNextTryAt) return
+        if (!pausePending || pausePermanent) return
+        if (elapsedMs() < pauseNextTryAt) return
         pushPause()
     }
 
     private fun pushPause() {
+        if (!pushInFlight.compareAndSet(false, true)) return
         val seq = intent
-        work {
-            val id = vehicleId() ?: return@work
+        val queued = work {
             try {
-                val s = api.putSettings(id, JSONObject().put("recordingPaused", true))
-                if (seq != intent) return@work // 그 사이 끄기를 눌렀다: 옛 켜기 응답은 무시
-                setPending(false)
-                pauseFailures = 0
-                settings = s
-                settingsError = false
-                applySettings(s)
-            } catch (e: Exception) {
-                if (seq != intent) return@work
-                settingsError = true // 로컬 멈춤은 그대로 두고 나중에 다시 보낸다
-                pauseFailures = if (e is HttpFailure && (e.status == 403 && (e.code == "forbidden" || e.code == "local_only"))) MAX_PAUSE_FAILURES else pauseFailures + 1
-                pauseNextTryAt = elapsedMs() + minOf(30_000L shl minOf(pauseFailures, 5), 10 * 60_000L)
-                Log.w(TAG, "기록 멈춤 서버 동기화 실패(로컬은 멈춤, ${pauseFailures}회): ${e.javaClass.simpleName}")
+                val id = vehicleId() ?: return@work
+                try {
+                    val patch = JSONObject().put("recordingPaused", true).put("intentAt", isoOf(pauseIntentMs))
+                    val s = api.putSettings(id, patch)
+                    if (seq != intent) return@work // 그 사이 끄기를 눌렀다: 옛 켜기 응답은 무시
+                    // 서버가 더 늦은 다른 기기의 변경 때문에 이 켜기를 무시했다면 recordingPaused=false가 온다: 대기를 버리고 서버 값을 따른다
+                    setPending(false)
+                    resetBackoff()
+                    settings = s
+                    settingsError = false
+                    applySettings(s)
+                } catch (e: Exception) {
+                    if (seq != intent) return@work
+                    settingsError = true // 로컬 멈춤은 그대로 두고 나중에 다시 보낸다
+                    if (e is HttpFailure && e.status == 403 && (e.code == "forbidden" || e.code == "local_only")) {
+                        pausePermanent = true // 권한 문제는 다시 보내도 같다
+                    } else {
+                        pauseFailures++
+                        pauseNextTryAt = elapsedMs() + minOf(BACKOFF_BASE_MS shl minOf(pauseFailures - 1, 5), BACKOFF_MAX_MS)
+                    }
+                    Log.w(TAG, "기록 멈춤 서버 동기화 실패(로컬은 멈춤, ${pauseFailures}회): ${e.javaClass.simpleName}")
+                }
+            } finally {
+                pushInFlight.set(false)
             }
         }
+        if (!queued) pushInFlight.set(false)
     }
+
+    private fun isoOf(ms: Long): String =
+        java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US).apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }.format(java.util.Date(ms))
 
     fun setDrivingMap(on: Boolean) = update(JSONObject().put("drivingMap", on))
 
@@ -436,7 +483,8 @@ class ExtrasController(
     }
 
     private companion object {
-        const val MAX_PAUSE_FAILURES = 8
+        const val BACKOFF_BASE_MS = 30_000L
+        const val BACKOFF_MAX_MS = 10 * 60_000L
         const val TAG = "NubiExtras"
     }
 }

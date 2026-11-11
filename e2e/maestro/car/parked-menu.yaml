@@ -167,40 +167,26 @@ env:
     timeout: 10000
 - assertNotVisible: '코드 [0-9]{6}.*'
 
-# 10. 데이터 지우기 2단계 확인: 1단계에서 취소 → 2단계에서 취소 → 끝까지 진행
-- tapOn: '설정'
-- tapOn: '데이터 지우기'
+# 9b. 주행 중 멈춤 켜기("이후 기록만 멈춘다"): 진행 중인 트립이 End로 끝나 서버에 남고(스크립트가 서버에서 확인), 멈춤을 끄면 다시 기록할 수 있다
+- openLink: nubi-debug://signal?gear=D
+- openLink: nubi-debug://signal?gpx=e2e-junggu.gpx&park=1
 - extendedWaitUntil:
-    visible: '위치정보 이용 동의를 철회하고.*'
-    timeout: 10000
-- assertVisible: '계속'
-- takeScreenshot: ${SHOT_DIR}/39-delete-confirm1
-- tapOn: '취소'
-- assertNotVisible: '위치정보 이용 동의를 철회하고.*'
-- tapOn: '데이터 지우기'
-- tapOn: '계속'
-- extendedWaitUntil:
-    visible: '정말 지울까요.*'
-    timeout: 10000
-- takeScreenshot: ${SHOT_DIR}/40-delete-confirm2
-- tapOn: '취소'
-- assertNotVisible: '정말 지울까요.*'
-- tapOn: '데이터 지우기'
-- tapOn: '계속'
-- tapOn: '지우기'
-- extendedWaitUntil:
-    visible: '지웠어요. 위치정보 동의가 철회됐어요'
+    visible: '기록 중'
     timeout: 30000
-- takeScreenshot: ${SHOT_DIR}/41-delete-done
-# 삭제 뒤: 로컬 기록 멈춤이 켜졌고(상태 문구), 도감은 0/229로 비었다
-- assertVisible: '기록 멈춤'
-- tapOn: '도감'
 - extendedWaitUntil:
-    visible: '시군구 0/229 · 인구감소지역 0/92'
-    timeout: 20000
-- tapOn: '지도'
+    visible: '샘플 12'
+    timeout: 60000
+- tapOn: '설정'
+- tapOn: '기록 멈춤: 꺼짐'
 - extendedWaitUntil:
-    visible: '시군구 0/229'
+    visible: '기록 멈춤: 켜짐'
     timeout: 20000
-- assertVisible: '기록 멈춤'
-- takeScreenshot: ${SHOT_DIR}/42-after-delete-map
+- extendedWaitUntil:
+    visible: '기록 멈춤'
+    timeout: 20000
+- takeScreenshot: ${SHOT_DIR}/38b-pause-ends-trip
+- tapOn: '기록 멈춤: 켜짐'
+- extendedWaitUntil:
+    visible: '기록 멈춤: 꺼짐'
+    timeout: 20000
+- assertNotVisible: '기록 멈춤'

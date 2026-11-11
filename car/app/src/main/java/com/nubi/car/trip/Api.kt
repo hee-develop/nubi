@@ -14,7 +14,7 @@ class PermanentFailure(message: String) : IOException(message)
 class HttpFailure(val status: Int, message: String, /** 서버 응답의 `{ error: '<code>' }`(없으면 null). 401·403의 의미를 가르는 데 쓴다. */ val code: String? = null) : IOException(message)
 
 /** 서버가 기록 멈춤·동의 철회로 이 요청을 받지 않았다(200 `{ paused: true }`). 다시 보내도 소용없으니 그 트립을 재시도 없이 버린다. */
-class PausedByServer(message: String) : IOException(message)
+class PausedByServer(message: String, /** 서버가 알려 준 멈춤 시작 시각(epoch ms). 동의 철회면 null. */ val pausedAtMillis: Long? = null) : IOException(message)
 
 interface TripApi {
     /** 같은 [QueueEntry.Start.localId]로 다시 부르면 서버는 기존 tripId를 돌려준다(멱등). */
@@ -30,6 +30,10 @@ interface TripApi {
 data class Registration(val vehicleId: String, val token: String?)
 
 class HttpTripApi(private val baseUrl: String) : TripApi {
+    /** 점 업로드 응답이 `paused`이거나 `dropped > 0`이다(서버가 멈춤 구간의 점을 버렸다). 업로드 스레드에서 불린다. */
+    @Volatile
+    var onPointsPaused: () -> Unit = {}
+
     override fun createTrip(e: QueueEntry.Start): String {
         val body = JSONObject()
             .put("localId", e.localId)
@@ -38,7 +42,7 @@ class HttpTripApi(private val baseUrl: String) : TripApi {
             .put("startedAt", isoOf(e.startedAtMillis))
             .put("odometerStartKm", e.odometerStartKm ?: JSONObject.NULL)
         val text = post("/trips", body)
-        if (isPaused(text)) throw PausedByServer("기록 멈춤 /trips")
+        pausedAtOf(text)?.let { (paused, at) -> if (paused) throw PausedByServer("기록 멈춤 /trips", at) }
         // 2xx인데 JSON이 아닌 응답(프록시·캡티브 포털 등)은 성공으로 치지 않는다.
         return try {
             JSONObject(text).getString("tripId")
@@ -62,7 +66,13 @@ class HttpTripApi(private val baseUrl: String) : TripApi {
                     .put("gear", s.gear?.name ?: JSONObject.NULL),
             )
         }
-        post("/trips/$tripId/points", JSONObject().put("points", arr))
+        val text = post("/trips/$tripId/points", JSONObject().put("points", arr))
+        // 서버가 멈춤 구간의 점을 버렸다(paused 또는 dropped > 0): 차량도 즉시 멈추게 알린다
+        try {
+            val o = JSONObject(text)
+            if (o.optBoolean("paused", false) || o.optInt("dropped", 0) > 0) onPointsPaused()
+        } catch (e: Exception) {
+        }
     }
 
     override fun endTrip(tripId: String, e: QueueEntry.End) {
@@ -80,6 +90,20 @@ class HttpTripApi(private val baseUrl: String) : TripApi {
         JSONObject(text).optBoolean("paused", false)
     } catch (e: Exception) {
         false
+    }
+
+    /** `{ paused: true, pausedAt? }` 응답이면 (true, 멈춤 시작 ms)를, 아니면 null. */
+    private fun pausedAtOf(text: String): Pair<Boolean, Long?>? = try {
+        val o = JSONObject(text)
+        if (o.optBoolean("paused", false)) true to o.optString("pausedAt", "").takeIf { it.isNotEmpty() }?.let { parseIso(it) } else null
+    } catch (e: Exception) {
+        null
+    }
+
+    private fun parseIso(s: String): Long? = try {
+        java.time.Instant.parse(s).toEpochMilli()
+    } catch (e: Exception) {
+        null
     }
 }
 

@@ -221,7 +221,7 @@ class ParkedMenu(
                 add(System.identityHashCode(extras.share)); add(extras.codeError)
             }
             MenuTab.SETTINGS -> {
-                add(extras.settings); add(extras.settingsError); add(extras.deleteStep); add(homePicking); add(voiceOn())
+                add(extras.settings); add(extras.settingsError); add(extras.pausePending); add(extras.deleteStep); add(homePicking); add(voiceOn())
                 add(System.identityHashCode(extras.pair)); add(System.identityHashCode(extras.guest)); add(extras.guestCount); add(extras.codeError)
                 add(extras.dex.status)
             }
@@ -443,12 +443,10 @@ class ParkedMenu(
     private fun onOff(b: Boolean) = activity.getString(if (b) R.string.on else R.string.off)
 
     private fun buildSettings() {
-        val s = extras.settings
+        // 설정을 못 불러와도(오프라인 등) 토글·데이터 지우기를 쓸 수 있게 기본값으로 그린다
+        val s = extras.settingsOrDefault
         text(activity.getString(R.string.tab_settings), 30f, bold = true, top = 0f)
-        if (s == null) {
-            status(Slot<Unit>().also { if (extras.settingsError) it.failed() else it.loading() })
-            return
-        }
+        if (extras.settings == null && !extras.settingsError) text(activity.getString(R.string.loading), 22f, R.color.muted)
         if (extras.settingsError) text(activity.getString(R.string.settings_error), 22f, R.color.muted)
         val paused = s.recordingPaused
         button(activity.getString(R.string.settings_pause, onOff(paused)), "set_pause", filled = paused, parent = row()) { extras.setPaused(!paused); onChange() }

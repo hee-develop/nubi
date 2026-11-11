@@ -152,6 +152,19 @@ CREATE TABLE IF NOT EXISTS vehicle_settings (
 );
 `;
 
+/**
+ * 기록 멈춤 구간(정본 차량 기준). 멈춤 판정은 요청이 도착한 시각이 아니라 **기록된 시각**(트립 startedAt·점 ts)이 구간 안인지로 한다.
+ * 멈춤을 켜면 구간을 열고(resumed_at NULL), 끄면 닫는다. 멈춤 전에 기록됐지만 늦게 올라온 데이터는 받는다.
+ */
+export const SCHEMA_PAUSES = `
+CREATE TABLE IF NOT EXISTS recording_pauses (
+  vehicle_id TEXT NOT NULL,
+  paused_at TEXT NOT NULL,
+  resumed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS recording_pauses_vehicle ON recording_pauses (vehicle_id, paused_at);
+`;
+
 /** 공유 카드(plan 10-1). 만들 때 비식별 SVG를 렌더해 PNG로 1회 변환해 저장한다. 공개 경로는 PNG만 내보낸다(svg는 내부 보관). */
 export const SCHEMA_SHARE = `
 CREATE TABLE IF NOT EXISTS share_cards (
@@ -220,6 +233,7 @@ export const ensureExtSchema = (db: Db) => {
   db.exec(SCHEMA_GUEST);
   addColumn(db, 'guest_trip_cache', 'dw_ver', 'TEXT');
   db.exec(SCHEMA_SETTINGS);
+  db.exec(SCHEMA_PAUSES);
   db.exec(SCHEMA_SHARE);
   addColumn(db, 'share_cards', 'png', 'BLOB');
   db.exec(SCHEMA_INTRO);

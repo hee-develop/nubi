@@ -21,10 +21,19 @@ object Auth {
     @Volatile
     var onUnauthorized: () -> Unit = {}
 
+    /** 어떤 요청이든 2xx를 받았다(연결 회복 신호: 멈춤 재전송 백오프를 푸는 데 쓴다). 호출 스레드에서 불리므로 가벼워야 한다. */
+    @Volatile
+    var onSuccess: () -> Unit = {}
+
     /** 요청이 2xx를 받았다(토큰이 없는 모드 포함). 인증 실패 상태와 재등록 기록을 푼다. */
     fun onAuthorized() {
         failed = false
         reregState.set(IDLE)
+        try {
+            onSuccess()
+        } catch (t: Throwable) {
+            // 연결 회복 알림의 예외가 응답 처리를 막지 않는다
+        }
     }
 
     private val reregState = AtomicInteger(IDLE)
