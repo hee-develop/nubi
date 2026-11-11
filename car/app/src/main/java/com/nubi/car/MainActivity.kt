@@ -239,7 +239,7 @@ class MainActivity : Activity() {
         val heights = ordered.map { if (it.visibility == View.VISIBLE && it !== v.distanceText) it.measuredHeight else 0 }
         val fixed = total - heights.sum()
         val show = foldLines(heights, available - fixed, pinned = 3)
-        ordered.forEachIndexed { i, view -> if (!show[i] && view.visibility == View.VISIBLE) view.visibility = View.GONE }
+        ordered.forEachIndexed { i, view -> if (!show[i] && view !== v.distanceText && view.visibility == View.VISIBLE) view.visibility = View.GONE }
         // 거리는 샘플과 함께 접는다
         if (v.samplesText.visibility != View.VISIBLE) v.distanceText.visibility = View.GONE
     }
