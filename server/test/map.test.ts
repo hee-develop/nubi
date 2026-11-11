@@ -227,14 +227,7 @@ describe('지도 API 보강', () => {
     expect(isFaded('2025-01-01T00:00:00Z', now)).toBe(true);
   });
 
-  it('트립을 지우면 잠정 행도 함께 지워진다(ON DELETE CASCADE)', async () => {
-    const app = newApp({ liveMatching: true, valhalla: { fetchFn: fakeValhalla(() => fixture) } });
-    const r = await app.request('/trips', json({ localId: 'x', vehicleId: 'v1', driverId: 'v1', startedAt: '2026-11-09T00:00:00Z' }));
-    const { tripId } = (await r.json()) as { tripId: string };
-    await app.request(`/trips/${tripId}/points`, json({ points: makePoints(30) }));
-    await app.live.idle();
-    const db = (app as unknown as { db?: unknown }).db;
-    expect(db).toBeUndefined(); // 앱은 DB를 노출하지 않으므로 별도 DB로 아래에서 확인한다
+  it('트립을 지우면 잠정 행도 함께 지워진다(ON DELETE CASCADE, 스키마 수준. 앱 경로 삭제는 integration.test.ts)', async () => {
     const raw = openDb(':memory:');
     raw.prepare("INSERT INTO trips (id, vehicle_id, driver_id, started_at, created_at) VALUES ('t','v','v','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')").run();
     raw.prepare("INSERT INTO trip_live VALUES ('t', 3, 'x')").run();
@@ -307,7 +300,7 @@ describe('지도 API 보강', () => {
     let last = 200;
     for (let i = 0; i <= RATE_MAX; i++) last = (await app.request('/map/base?bbox=126.99,37.49,127.03,37.52&z=14&vehicleId=spam')).status;
     expect(last).toBe(429);
-    expect((await app.request('/map/base?bbox=126.99,37.49,127.03,37.52&z=14&vehicleId=other')).status).toBe(200);
+    expect((await app.request('/map/base?bbox=126.99,37.49,127.03,37.52&z=14&vehicleId=spam', { headers: { authorization: 'Bearer other-client-token-0123456789' } })).status).toBe(200); // 키는 토큰(있으면)·출처라 차량 ID를 바꿔도 못 피하고, 다른 토큰은 따로 센다
   });
 
   it('접근 확인 지점이 false면 403(인증 붙일 때 이 함수만 바꾼다)', async () => {
