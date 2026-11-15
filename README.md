@@ -69,10 +69,10 @@ docs/     기능 사양(specs/), SDK·인프라 실측 기록(sdk-check.md)
 
 | 항목 | 값 |
 |---|---|
-| 파일 | [`apk/yona_nubi_release.apk`](apk/yona_nubi_release.apk) (27,175,334 bytes) |
+| 파일 | [`apk/yona_nubi_release.apk`](apk/yona_nubi_release.apk) (27,949,078 bytes) |
 | 패키지·버전 | `com.nubi.car`, versionName 0.1.0(versionCode 1) |
 | 서명 | release 키(APK Signature Scheme v2) |
-| SHA-256 | `177dd72519adf8e725af832cbfb049440bc3bed5baad8bef61a6f418e239bc46` |
+| SHA-256 | `bd7d2a256554a6df00272d20f29e8885e2f42b16b4aca11be7f819607fb2bbdf` |
 | 서버 주소 | **미설정**(자리표시 `https://nubi.invalid`) |
 
 ```bash
