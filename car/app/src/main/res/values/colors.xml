@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 시안 00-brand 팔레트. 앱 영역(어두운 패널)만 그린다 -->
+<resources>
+    <color name="bg">#0F141B</color>
+    <color name="panel">#171E27</color>
+    <color name="panel2">#1D2631</color>
+    <color name="line">#2A3544</color>
+    <color name="text">#EEF2F7</color>
+    <color name="muted">#A9B6C6</color>
+    <color name="accent">#F59E0B</color>
+    <color name="on_accent">#1A1204</color>
+    <color name="depop">#2DD4BF</color>
+    <!-- 3단계 배지(앰버 농도): 통과 / 방문 / 숙박 -->
+    <color name="stage1">#47F59E0B</color>
+    <color name="stage2">#99F59E0B</color>
+    <color name="stage3">#F59E0B</color>
+    <color name="stage_border">#CCF59E0B</color>
+    <color name="stage0">#1A222D</color>
+</resources>

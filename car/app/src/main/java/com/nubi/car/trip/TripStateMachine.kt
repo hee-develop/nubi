@@ -90,6 +90,13 @@ class TripStateMachine(
 
     private var lastAccepted: Sample? = null
     private var lastAcceptedElapsed = 0L
+
+    /**
+     * 마지막으로 받은 원시 위치. 채택 여부·기어와 무관하게(기어 P에서도) 갱신하고 트립에는 넣지 않는다.
+     * 정차 화면의 '지금 있는 곳' 조회에만 쓰고, 메모리에만 두며 [reset]에서 지운다.
+     */
+    var lastRaw: Sample? = null
+        private set
     private val pending = ArrayList<Sample>()
     private var nextSeq = 0
     private var parkedSinceElapsed: Long? = null
@@ -114,6 +121,7 @@ class TripStateMachine(
     }
 
     fun onLocation(raw: Sample, elapsedMillis: Long): List<TripEvent> {
+        lastRaw = raw
         // 기어가 P면 대기 중이든 기록 중이든 샘플을 트립에 넣지 않는다.
         if (gear == Gear.P) return emptyList()
         val sample = raw.copy(gear = gear)
@@ -172,6 +180,7 @@ class TripStateMachine(
         resetToIdle()
         gear = null
         parkedSinceElapsed = null
+        lastRaw = null
     }
 
     private fun end(): List<TripEvent> {

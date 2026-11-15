@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 생성: scripts/make-logo-mark.mjs (시안 00-brand.html 마크). 점선은 호 길이 샘플링으로 만든 하위 경로다 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="120dp"
+    android:height="120dp"
+    android:viewportWidth="120"
+    android:viewportHeight="120">
+    <path
+        android:fillColor="#171E27"
+        android:strokeColor="#2A3544"
+        android:strokeWidth="3"
+        android:pathData="M31,3h58a28,28 0 0 1 28,28v58a28,28 0 0 1 -28,28h-58a28,28 0 0 1 -28,-28v-58a28,28 0 0 1 28,-28z" />
+    <path
+        android:strokeColor="#F59E0B"
+        android:strokeWidth="6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M24,88L23.93,86.5L23.9,85L23.91,83.5L23.97,82L24.08,80.51L24.23,79.01M26.73,68.33L27.26,66.93L27.84,65.54L28.47,64.18L29.15,62.84L29.87,61.53L30.64,60.24M37.73,51.89L38.89,50.94L40.1,50.05L41.35,49.22L42.64,48.46L43.97,47.77L45.35,47.16M56.12,45.73L57.6,46.01L59.04,46.4L60.46,46.9L61.83,47.51L63.15,48.22L64.42,49.02M72.28,56.67L73.23,57.82L74.17,58.99L75.09,60.17L76,61.37L76.9,62.57L77.78,63.78M85.55,70.83L86.76,69.98L87.67,68.79L88.41,67.49L89.06,66.14L89.65,64.75L90.19,63.36M93.61,52.9L94.03,51.46L94.45,50.02L94.87,48.58L95.28,47.14L95.69,45.7L96.09,44.25" />
+    <path
+        android:fillColor="#F59E0B"
+        android:pathData="M97,32a9,9 0 1 0 0.001,0z" />
+</vector>

@@ -18,6 +18,11 @@
          위치 값은 Pleos FusedLocation에서만 받고 이 권한으로 LocationManager를 쓰지 않는다. 정밀 위치(FINE)는 요구하지 않는다 -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
+    <!-- NaviHelper 길안내 요청(requestRoute). 이웃 시군구 중심점까지 경로를 내비에 요청만 하고 앱은 지도를 그리지 않는다 -->
+    <uses-permission android:name="pleos.car.permission.NAVI_ROUTE" />
+    <!-- requestRoute는 이 권한이 있어야 동작한다(NAVI_ROUTE만으로는 SecurityException, 에뮬레이터 실측 2026-11-11, chagok docs/sdk-check.md) -->
+    <uses-permission android:name="pleos.car.permission.NAVI_ROUTE_SEARCH" />
+
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.INTERNET" />
@@ -41,7 +46,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- 화면은 글자만 보이고 조작이 거의 없으므로 주행 중 사용 가능(DO)으로 선언한다 -->
+            <!-- 주행 중에는 상태 문구만 보이고 버튼·카드를 숨기므로(앱이 주행 규제를 직접 처리) 주행 중 사용 가능(DO)으로 선언한다 -->
             <meta-data
                 android:name="distractionOptimized"
                 android:value="true" />

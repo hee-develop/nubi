@@ -79,6 +79,15 @@ class TripEngine(
     @Volatile
     var onTripStarted: () -> Unit = {}
 
+    /**
+     * 정차 조회 시점이다: 기어가 P가 아닌 값에서 P로 바뀌었고 위치를 알 때, 또는 위치를 모른 채 P가 된 뒤 처음 위치가 들어왔을 때(콜드 스타트). 엔진 스레드에서 불린다.
+     */
+    @Volatile
+    var onParked: () -> Unit = {}
+
+    /** P가 됐을 때 위치를 아직 몰라 조회를 미룬 상태. 첫 위치가 오면 [onParked]를 한 번 부른다. */
+    private var parkedAwaitingLocation = false
+
     @Volatile
     var status: TripStatus = TripStatus()
         private set
@@ -135,6 +144,7 @@ class TripEngine(
         scheduler.post {
             serviceStartedElapsed = clock.elapsedMs()
             machine.reset()
+            parkedAwaitingLocation = false
             unsupported = false
             setServiceFailed(false)
             vehicle.start()
@@ -193,13 +203,31 @@ class TripEngine(
             val ts = tsMillis?.takeIf { kotlin.math.abs(it - wall()) < 24 * 3_600_000L } ?: wall()
             handle(machine.onLocation(Sample(ts, lat, lon, heading, conf), elapsed()))
             publish()
+            if (parkedAwaitingLocation && machine.gear == Gear.P) {
+                parkedAwaitingLocation = false
+                notifyParked()
+            }
+        }
+    }
+
+    private fun notifyParked() {
+        try {
+            onParked()
+        } catch (t: Throwable) {
+            Log.w(TAG, "정차 알림 예외: ${t.javaClass.simpleName}")
         }
     }
 
     fun onGear(gear: Gear?) {
         scheduler.post {
+            val before = machine.gear
             handle(machine.onGear(gear, elapsed()))
             publish()
+            if (gear == Gear.P && before != Gear.P) {
+                if (machine.lastRaw == null) parkedAwaitingLocation = true else notifyParked()
+            } else if (gear != Gear.P) {
+                parkedAwaitingLocation = false
+            }
         }
     }
 
@@ -234,6 +262,7 @@ class TripEngine(
         acceptRealLocation = false
         scheduler.post {
             machine.reset()
+            parkedAwaitingLocation = false
             active = null
             clockOffsetMillis = 0
             failures = 0
@@ -454,6 +483,7 @@ class TripEngine(
             corruptLines = uploader.corruptLines,
             discardedLines = uploader.discardedLines,
             storageHeld = uploader.memoryOnly,
+            lastLocation = machine.lastRaw?.let { LatLon(it.lat, it.lon) },
         )
         updateTimers()
     }

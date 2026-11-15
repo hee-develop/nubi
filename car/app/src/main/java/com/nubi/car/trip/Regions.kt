@@ -54,9 +54,11 @@ data class RegionsSummary(
     }
 }
 
-/** 대기·종료 화면 한 줄: `시군구 {colored}/{total} · 인구감소지역 {coloredDepop}/{totalDepop}`. 값이 없으면(조회 실패) null이라 생략한다. */
-fun formatRegionsLine(s: RegionsSummary?, format: String): String? =
-    s?.let { String.format(Locale.US, format, it.colored, it.total, it.coloredDepop, it.totalDepop) }
+/** 도감 줄 `시군구 {colored}/{total}`. 값이 없으면(조회 실패) null이라 생략한다. */
+fun formatRegionsDex(s: RegionsSummary?, format: String): String? = s?.let { String.format(Locale.US, format, it.colored, it.total) }
+
+/** 도감 줄 `인구감소지역 {coloredDepop}/{totalDepop}`. 값이 없으면 null. */
+fun formatRegionsDepop(s: RegionsSummary?, format: String): String? = s?.let { String.format(Locale.US, format, it.coloredDepop, it.totalDepop) }
 
 /** 종료 화면 `처음 지난 곳: {name}(, {name})` 최대 3개. 없으면 null. */
 fun formatNewRegions(names: List<String>, format: String): String? =

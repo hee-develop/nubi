@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- {…} 구간은 화면에서 강조색(앰버)으로 칠한다(parseAccent). 괄호 자체는 보이지 않는다 -->
     <string name="app_name">누비</string>
     <string name="notification_channel">주행 기록</string>
     <string name="notification_title">누비가 주행 위치를 기록하고 있어요</string>
@@ -28,12 +29,40 @@
     <string name="storage_save_failed">저장 실패 %1$d건</string>
     <string name="storage_corrupt">손상 %1$d줄</string>
     <string name="storage_discarded">복호화할 수 없어 폐기 %1$d줄</string>
-    <string name="matching_counted">새 도로 %1$skm · 전국 %2$s%% (+%3$s)</string>
+    <string name="road_new">새 도로 {%1$skm}</string>
+    <string name="national_counted">전국 {%1$s%%} (+%2$s)</string>
     <string name="matching_not_counted">이번 주행은 집계되지 않았어요</string>
     <string name="matching_not_counted_reason">이번 주행은 집계되지 않았어요 (%1$s)</string>
-    <string name="national_percent">전국 %1$s%% 달렸어요</string>
-    <string name="regions_line">시군구 %1$d/%2$d · 인구감소지역 %3$d/%4$d</string>
+    <string name="national_percent">전국 {%1$s%%} 달렸어요</string>
+    <string name="regions_dex">시군구 {%1$d/%2$d}</string>
+    <string name="regions_depop">인구감소지역 {%1$d/%2$d}</string>
     <string name="regions_new">처음 지난 곳: %1$s</string>
     <string name="region_event_visit">%1$s 방문</string>
     <string name="region_event_stay">%1$s에서 하룻밤</string>
+    <string name="driving_hint">숫자와 지역 카드는 정차(P)하면 보여요</string>
+    <string name="chip_parked_p">정차 중 · P</string>
+    <string name="chip_parked">정차 중</string>
+    <string name="chip_driving">주행 중 · %1$s</string>
+    <string name="now_label">지금</string>
+    <string name="stage_none">안 감</string>
+    <string name="stage_pass">통과</string>
+    <string name="stage_visit">방문</string>
+    <string name="stage_stay">숙박</string>
+    <string name="stage_format">%1$s %2$s</string>
+    <string name="guest_qr_title">게스트 QR</string>
+    <string name="guest_qr_desc">동승자가 폰으로 스캔\n정차 중에만</string>
+    <string name="guest_qr_soon">준비 중</string>
+    <string name="neighbor_label">안 가 본 이웃</string>
+    <string name="neighbor_unknown">이웃 정보 없음</string>
+    <string name="neighbor_all_visited">이웃은 모두 가 봤어요</string>
+    <string name="depop_tag">인구감소지역</string>
+    <string name="poi_kind_sight">관광지</string>
+    <string name="poi_kind_festival">축제</string>
+    <string name="poi_sight_title">지역 대표 명소</string>
+    <string name="poi_festival_title">지역 대표 축제</string>
+    <string name="poi_example">예시 항목</string>
+    <string name="poi_source">자료: 한국관광공사(예시)</string>
+    <string name="navigate">길안내</string>
+    <string name="navigate_sent">길안내 요청을 보냈어요</string>
+    <string name="navigate_failed">길안내 연결에 실패했어요</string>
 </resources>

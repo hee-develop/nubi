@@ -27,3 +27,52 @@ fun foldLines(heights: List<Int>, available: Int, pinned: Int = 0): List<Boolean
     }
     return show
 }
+
+/** 줄 안에서 강조색으로 칠할 구간([accentStart] 이상 [accentEnd] 미만). 없으면 둘 다 0. */
+data class AccentText(val text: String, val accentStart: Int = 0, val accentEnd: Int = 0) {
+    val hasAccent: Boolean get() = accentEnd > accentStart
+}
+
+/**
+ * strings.xml 문구의 `{...}` 구간을 강조 구간으로 바꾼다(괄호는 화면 글자에서 빠진다). 짝이 안 맞으면 괄호를 건드리지 않는다.
+ * 예: `새 도로 {12.4km}` → 글자 `새 도로 12.4km`, 강조 `12.4km`.
+ */
+fun parseAccent(marked: String): AccentText {
+    val open = marked.indexOf('{')
+    val close = marked.indexOf('}', open + 1)
+    if (open < 0 || close < 0) return AccentText(marked)
+    val text = marked.substring(0, open) + marked.substring(open + 1, close) + marked.substring(close + 1)
+    return AccentText(text, open, close - 1)
+}
+
+/** 단계 점 표시: 안 감 ○○○ / 통과 ●○○ / 방문 ●●○ / 숙박 ●●●. 범위 밖 값은 0~3으로 맞춘다. */
+fun stageDots(level: Int): String {
+    val n = level.coerceIn(0, 3)
+    return "●".repeat(n) + "○".repeat(3 - n)
+}
+
+/**
+ * 정차 화면(03) 레이아웃을 쓸지. 숫자를 보여도 되는 기어 P(또는 기어 미지원+기록 중 아님)이거나,
+ * 주행 규제가 없는 동안 사용자가 눌러야 하는 것(권한 요청·기록 재시작)이 있을 때다. 그 밖에는 주행 중(03b) 화면이다.
+ */
+fun usesParkedLayout(showNumbers: Boolean, distractionOptimized: Boolean, needsPermission: Boolean, serviceFailed: Boolean): Boolean =
+    showNumbers || (!distractionOptimized && (needsPermission || serviceFailed))
+
+/** 게스트 QR·이웃 카드·길안내 버튼 같은 부가 요소를 보일지: 숫자를 보여도 되고(기어 P) 주행 규제(DO)가 없을 때만. */
+fun extrasVisible(showNumbers: Boolean, distractionOptimized: Boolean): Boolean = showNumbers && !distractionOptimized
+
+/** 이웃 카드의 모습: 숨김 / 전체(예시 항목 카드 2개 + 길안내 2개) / 축약(이웃 이름 + 인구감소 태그 + 길안내 1개). */
+enum class NeighborLayout { HIDDEN, FULL, COMPACT }
+
+/**
+ * 이웃 카드의 모습. 부가 요소가 허용되지 않으면([extrasVisible]=false) 숨기고, 앱 영역이 [fullMinWidthDp]보다 좁으면
+ * (사용자가 두 앱을 나란히 열어 각 앱에 좁은 영역이 주어진 경우 등) 축약형으로 보인다. 너비를 모르면(0 이하) 전체로 본다.
+ */
+fun neighborLayout(extrasVisible: Boolean, widthDp: Int, fullMinWidthDp: Int): NeighborLayout = when {
+    !extrasVisible -> NeighborLayout.HIDDEN
+    widthDp in 1 until fullMinWidthDp -> NeighborLayout.COMPACT
+    else -> NeighborLayout.FULL
+}
+
+/** 앱 영역이 좁아 세로로 쌓는 배치를 쓸지(이웃 카드가 없어도 왼쪽 열을 화면 너비에 맞춘다). 너비를 모르면 쓰지 않는다. */
+fun narrowAppArea(widthDp: Int, fullMinWidthDp: Int): Boolean = widthDp in 1 until fullMinWidthDp

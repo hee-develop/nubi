@@ -6,56 +6,56 @@ import android.car.drivingstate.CarUxRestrictions
 import android.car.drivingstate.CarUxRestrictionsManager
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
 import android.util.Log
-import android.util.TypedValue
 import android.view.View
-import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.nubi.car.trip.CoverageTracker
+import com.nubi.car.trip.Gear
+import com.nubi.car.trip.MatchingLine
+import com.nubi.car.trip.Neighbor
+import com.nubi.car.trip.PlaceTracker
 import com.nubi.car.trip.RecorderHealth
 import com.nubi.car.trip.TripEngine
 import com.nubi.car.trip.TripEngineProvider
 import com.nubi.car.trip.TripState
+import com.nubi.car.trip.TripStatus
 import com.nubi.car.trip.UploadKind
+import com.nubi.car.trip.extrasVisible
 import com.nubi.car.trip.foldLines
-import com.nubi.car.trip.formatMatchingLine
-import com.nubi.car.trip.formatNationalLine
+import com.nubi.car.trip.formatNationalCountedLine
 import com.nubi.car.trip.formatNewRegions
 import com.nubi.car.trip.formatRegionEvent
-import com.nubi.car.trip.formatRegionsLine
+import com.nubi.car.trip.formatRegionsDepop
+import com.nubi.car.trip.formatRegionsDex
+import com.nubi.car.trip.formatRoadLine
 import com.nubi.car.trip.limitText
+import com.nubi.car.trip.NeighborLayout
+import com.nubi.car.trip.narrowAppArea
+import com.nubi.car.trip.neighborLayout
 import com.nubi.car.trip.numbersVisible
+import com.nubi.car.trip.parseAccent
+import com.nubi.car.trip.stageDots
+import com.nubi.car.trip.usesParkedLayout
 
 /**
- * 글자 위주 상태 화면. 1초마다 한 번만 갱신한다.
- * 주행 규제(DO)가 걸리면 권한 카드·버튼을 숨기고 문자열을 규제 길이로 자른다.
+ * 시안 03(정차 P)·03b(주행 중) 화면. 1초마다 한 번만 갱신한다. 뷰는 res/layout(view_driving·view_parked)에 있다.
+ * 숫자와 지역 카드는 기어 P일 때만 보이고(numbersVisible), 주행 규제(DO)가 걸리면 버튼·카드·QR을 숨기고 문자열을 규제 길이로 자른다.
  */
 class MainActivity : Activity() {
     private lateinit var engine: TripEngine
-    private lateinit var stateText: TextView
-    private lateinit var samplesText: TextView
-    private lateinit var distanceText: TextView
-    private lateinit var uploadText: TextView
-    private lateinit var nationalText: TextView
-    private lateinit var matchingText: TextView
-    private lateinit var newRegionsText: TextView
-    private lateinit var regionsText: TextView
-    private lateinit var eventText: TextView
     private lateinit var coverage: CoverageTracker
-    private lateinit var healthText: TextView
-    private lateinit var storageText: TextView
-    private lateinit var restartButton: Button
-    private lateinit var permissionCard: LinearLayout
-    private lateinit var permissionConfirm: Button
-    private lateinit var permissionSettings: Button
-    private var rootLayout: LinearLayout? = null
+    private lateinit var place: PlaceTracker
+    private lateinit var navi: NaviLauncher
+    private lateinit var v: Views
     private val handler = Handler(Looper.getMainLooper())
 
     private var car: Car? = null
@@ -70,6 +70,16 @@ class MainActivity : Activity() {
 
     /** 요청 뒤에도 거부됐고 시스템이 더는 묻지 않는 상태(영구 거부). 이때 '설정 열기'를 보인다. */
     private var permanentlyDenied = false
+
+    /** 길안내 요청 결과 한 줄(팝업·토스트 대신 카드 아래에 보인다). 이웃이 바뀌면 지운다. */
+    private var naviMessage: String? = null
+    private var naviMessageFor: String? = null
+
+    /** 이번 렌더에서 카드에 보인 이웃(길안내 대상). 카드가 안 보이면 null. */
+    private var shownNeighbor: Neighbor? = null
+
+    /** 마지막으로 적용한 앱 영역 모드(좁음 여부). 아직 적용 전이면 null. */
+    private var appliedNarrow: Boolean? = null
 
     private val uxListener = CarUxRestrictionsManager.OnUxRestrictionsChangedListener { restrictions ->
         handler.post {
@@ -89,7 +99,16 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         engine = TripEngineProvider.get(this)
         coverage = TripEngineProvider.coverage(this)
-        setContentView(buildUi())
+        place = TripEngineProvider.place(this)
+        navi = NaviLauncher(this)
+        setContentView(R.layout.activity_main)
+        v = Views(findViewById(R.id.root))
+        v.restartButton.setOnClickListener { startService() }
+        v.permissionConfirm.setOnClickListener { requestPermissions() }
+        v.permissionSettings.setOnClickListener { openAppSettings() }
+        v.naviSight.setOnClickListener { navigate() }
+        v.naviFestival.setOnClickListener { navigate() }
+        v.naviCompact.setOnClickListener { navigate() }
     }
 
     override fun onResume() {
@@ -103,6 +122,7 @@ class MainActivity : Activity() {
     override fun onPause() {
         handler.removeCallbacks(refresh)
         unregisterUxRestrictions()
+        navi.release()
         super.onPause()
     }
 
@@ -191,43 +211,61 @@ class MainActivity : Activity() {
     /** 상태 문구: DO 중 규제 길이를 넘으면 자른다(항상 보여야 한다). */
     private fun limited(text: String): String = limitText(text, distractionOptimized, maxStringLength, statusLine = true)!!
 
-    /** 숫자·이름 줄: 규제 길이를 넘으면 중간에서 자르지 않고 줄을 숨긴다. [text]가 null이어도 숨긴다. */
-    private fun setLine(view: TextView, text: String?) {
-        val t = text?.let { limitText(it, distractionOptimized, maxStringLength, statusLine = false) }
-        view.visibility = if (t == null) View.GONE else View.VISIBLE
-        view.text = t ?: ""
+    /** 숫자·이름 줄: 규제 길이를 넘으면 중간에서 자르지 않고 줄을 숨긴다. [marked]는 `{…}` 강조 표시가 든 문구이고 null이어도 숨긴다. */
+    private fun setLine(view: TextView, marked: String?) {
+        val accent = marked?.let(::parseAccent)
+        val t = accent?.let { limitText(it.text, distractionOptimized, maxStringLength, statusLine = false) }
+        if (accent == null || t == null) {
+            view.visibility = View.GONE
+            view.text = ""
+            return
+        }
+        view.visibility = View.VISIBLE
+        view.text = if (accent.hasAccent) {
+            SpannableString(t).apply {
+                setSpan(ForegroundColorSpan(getColor(R.color.accent)), accent.accentStart, accent.accentEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+        } else {
+            t
+        }
     }
 
     /**
-     * 높이가 모자라면(가로 2-window 등) 낮은 순위 줄부터 접는다. 순위: 상태(상태·건강·저장·업로드) > 집계 > 시군구 > 처음 지난 곳 > 이벤트 > 전국 > 샘플 > 거리.
+     * 높이가 모자라면(두 앱을 나란히 연 좁은 영역 등) 낮은 순위 줄부터 접는다. 순위: 상태(건강·저장·업로드) > 새 도로 > 시군구 > 인구감소지역 > 처음 지난 곳 > 이벤트 > 전국 > 샘플 > (거리) > 게스트 QR.
      * 이미 보이기로 정한 줄만 대상이다. 화면 크기가 아직 정해지지 않았으면(0) 아무것도 접지 않는다.
      */
     private fun foldToFit() {
-        val root = rootLayout ?: return
-        val width = root.width - root.paddingLeft - root.paddingRight
-        val available = root.height - root.paddingTop - root.paddingBottom
+        val column = v.leftColumn
+        val width = column.width
+        val available = column.height
         if (width <= 0 || available <= 0) return
-        val fixed = listOf<View>(restartButton, permissionCard).filter { it.visibility == View.VISIBLE }
-        val ordered = listOf(stateText, healthText, storageText, uploadText, matchingText, regionsText, newRegionsText, eventText, nationalText, samplesText, distanceText)
-        fun h(v: View): Int {
-            if (v.visibility != View.VISIBLE) return 0
-            v.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
-            return v.measuredHeight
+        fun measure(): Int {
+            column.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+            return column.measuredHeight
         }
-        val reserved = fixed.sumOf { h(it) }
-        val show = foldLines(ordered.map { h(it) }, available - reserved, pinned = 4)
-        ordered.forEachIndexed { i, v -> if (!show[i]) v.visibility = View.GONE }
+        // 샘플·거리는 한 줄에 놓이므로 높이는 샘플 쪽에만 센다.
+        val ordered = listOf(v.healthText, v.storageText, v.uploadText, v.roadText, v.regionsText, v.depopText, v.newRegionsText, v.eventText, v.nationalText, v.samplesText, v.distanceText, v.guestCard)
+        val total = measure()
+        val heights = ordered.map { if (it.visibility == View.VISIBLE && it !== v.distanceText) it.measuredHeight else 0 }
+        val fixed = total - heights.sum()
+        val show = foldLines(heights, available - fixed, pinned = 3)
+        ordered.forEachIndexed { i, view -> if (!show[i] && view !== v.distanceText && view.visibility == View.VISIBLE) view.visibility = View.GONE }
+        // 거리는 샘플과 함께 접는다
+        if (v.samplesText.visibility != View.VISIBLE) v.distanceText.visibility = View.GONE
     }
 
     // 그리기 ------------------------------------------------------------------
 
     private fun render() {
         val needsPermission = !hasLocationPermission()
-        permissionCard.visibility = if (needsPermission && !distractionOptimized) View.VISIBLE else View.GONE
-        permissionConfirm.visibility = if (permanentlyDenied) View.GONE else View.VISIBLE
-        permissionSettings.visibility = if (permanentlyDenied) View.VISIBLE else View.GONE
         val s = engine.status
-        stateText.text = limited(
+        // 숫자(완료율·새 도로·샘플·거리)와 지역 카드는 기어가 P일 때만 보인다(사양 02 7장). 기어를 못 읽는 차량은 기록 중이 아닐 때만. 상태 문구와 마지막 업로드 결과는 항상 보인다.
+        val showNumbers = numbersVisible(s.gear, s.state)
+        val parked = usesParkedLayout(showNumbers, distractionOptimized, needsPermission, s.health == RecorderHealth.SERVICE_FAILED)
+        v.drivingView.visibility = if (parked) View.GONE else View.VISIBLE
+        v.parkedView.visibility = if (parked) View.VISIBLE else View.GONE
+
+        val state = limited(
             when {
                 needsPermission -> getString(R.string.state_permission)
                 s.loading -> getString(R.string.state_loading)
@@ -241,48 +279,13 @@ class MainActivity : Activity() {
             RecorderHealth.UNSUPPORTED -> getString(R.string.health_unsupported)
             RecorderHealth.OK -> null
         }
-        healthText.visibility = if (healthMessage == null) View.GONE else View.VISIBLE
-        healthText.text = limited(healthMessage ?: "")
-        restartButton.visibility =
-            if (s.health == RecorderHealth.SERVICE_FAILED && hasLocationPermission() && !distractionOptimized) View.VISIBLE else View.GONE
+        val health = healthMessage?.let(::limited)
         val storage = listOfNotNull(
             if (s.storageHeld) getString(R.string.storage_held_key_error) else null,
             if (s.saveFailures > 0) getString(R.string.storage_save_failed, s.saveFailures) else null,
             if (s.corruptLines > 0) getString(R.string.storage_corrupt, s.corruptLines) else null,
             if (s.discardedLines > 0) getString(R.string.storage_discarded, s.discardedLines) else null,
-        )
-        storageText.visibility = if (storage.isEmpty()) View.GONE else View.VISIBLE
-        storageText.text = limited(storage.joinToString(" · "))
-        // 숫자(완료율·새 도로·샘플·거리)는 기어가 P일 때만 보인다(사양 02 7장). 기어를 못 읽는 차량은 기록 중이 아닐 때만. 상태 문구와 마지막 업로드 결과는 항상 보인다.
-        val showNumbers = numbersVisible(s.gear, s.state)
-        setLine(samplesText, if (showNumbers) getString(R.string.samples_format, s.sampleCount) else null)
-        setLine(distanceText, if (showNumbers) getString(R.string.distance_format, s.distanceM) else null)
-        // 도로 색칠 결과: 전국 완료율은 대기·종료 화면, 이번 주행 결과는 종료 화면. 둘 다 숫자라 기어 규칙을 따른다.
-        val national = if (showNumbers) formatNationalLine(coverage.nationalPercent, getString(R.string.national_percent)) else null
-        setLine(nationalText, national)
-        val matching = if (showNumbers && s.state == TripState.ENDED) {
-            formatMatchingLine(
-                coverage.matching,
-                getString(R.string.matching_counted),
-                getString(R.string.matching_not_counted),
-                getString(R.string.matching_not_counted_reason),
-                BuildConfig.DEBUG,
-            )
-        } else {
-            null
-        }
-        setLine(matchingText, matching)
-        // 시군구 도감(사양 03 6장): 대기·종료 화면 한 줄, 종료 화면 '처음 지난 곳', 마지막 방문·숙박 이벤트(24시간 내). 모두 숫자·문구라 기어 P 규칙을 따른다.
-        val regionsLine = if (showNumbers) formatRegionsLine(coverage.regions, getString(R.string.regions_line)) else null
-        setLine(regionsText, regionsLine)
-        val newRegions = if (showNumbers && s.state == TripState.ENDED) formatNewRegions(coverage.newRegions, getString(R.string.regions_new)) else null
-        setLine(newRegionsText, newRegions)
-        val event = if (showNumbers) {
-            formatRegionEvent(coverage.regions?.lastEvent, engine.nowMillis(), getString(R.string.region_event_visit), getString(R.string.region_event_stay))
-        } else {
-            null
-        }
-        setLine(eventText, event)
+        ).takeIf { it.isNotEmpty() }?.joinToString(" · ")?.let(::limited)
         val upload = when (s.upload.kind) {
             UploadKind.NONE -> getString(R.string.upload_none)
             UploadKind.OK -> getString(R.string.upload_ok, s.upload.points)
@@ -291,74 +294,156 @@ class MainActivity : Activity() {
             UploadKind.HELD -> getString(R.string.upload_held)
         }
         // 보류는 사용자가 알아야 하므로 '마지막 업로드:' 접두 없이 그대로 보인다.
-        uploadText.text = limited(
+        val uploadLine = limited(
             when {
                 // 서버 주소가 빌드 때 지정되지 않았으면 업로드가 어차피 되지 않으므로 그 사실을 먼저 알린다.
                 BuildConfig.SERVER_URL_IS_PLACEHOLDER -> getString(R.string.server_not_configured)
                 s.upload.kind == UploadKind.HELD -> upload
                 else -> getString(R.string.upload_format, upload)
-            }
+            },
         )
+        val canAct = !distractionOptimized
+
+        // 주행 중(03b): 로고 마크, 상태 문구, 보조 문구. 숫자·카드·버튼·QR 없음
+        v.drivingState.text = state
+        setStatus(v.drivingHealth, health)
+        setStatus(v.drivingStorage, storage)
+        v.drivingUpload.text = uploadLine
+
+        if (parked) renderParked(s, state, health, storage, uploadLine, showNumbers, needsPermission, canAct)
+    }
+
+    private fun setStatus(view: TextView, text: String?) {
+        view.visibility = if (text == null) View.GONE else View.VISIBLE
+        view.text = text ?: ""
+    }
+
+    private fun renderParked(
+        s: TripStatus,
+        state: String,
+        health: String?,
+        storage: String?,
+        uploadLine: String,
+        showNumbers: Boolean,
+        needsPermission: Boolean,
+        canAct: Boolean,
+    ) {
+        v.chip.text = when (s.gear) {
+            Gear.P -> getString(R.string.chip_parked_p)
+            null -> getString(R.string.chip_parked)
+            else -> getString(R.string.chip_driving, s.gear.name)
+        }
+        val info = if (showNumbers) place.info else null
+        val here = info?.place
+        val placeName = here?.displayName?.let { limitText(it, distractionOptimized, maxStringLength, statusLine = false) }
+        // 현재 시군구를 모르면 제목 자리에 기존 상태 문구(대기·기록 중·종료됨 등)를 보인다.
+        v.placeTitle.text = placeName ?: state
+        v.nowLabel.visibility = if (placeName != null) View.VISIBLE else View.GONE
+        v.stateText.visibility = if (placeName != null) View.VISIBLE else View.GONE
+        v.stateText.text = state
+        // 단계 배지와 마지막 이벤트(24시간 내 방문·숙박)
+        if (placeName != null && here != null) {
+            val level = here.level.coerceIn(0, 3)
+            v.stageBadge.visibility = View.VISIBLE
+            v.stageBadge.text = getString(R.string.stage_format, getString(STAGE_NAMES[level]), stageDots(level))
+            v.stageBadge.setBackgroundResource(STAGE_BACKGROUNDS[level])
+            v.stageBadge.setTextColor(getColor(if (level == 3) R.color.on_accent else if (level == 0) R.color.muted else R.color.text))
+        } else {
+            v.stageBadge.visibility = View.GONE
+        }
+        val event = if (showNumbers) {
+            formatRegionEvent(coverage.regions?.lastEvent, engine.nowMillis(), getString(R.string.region_event_visit), getString(R.string.region_event_stay))
+        } else {
+            null
+        }
+        setLine(v.eventText, event)
+        v.stageRow.visibility = if (v.stageBadge.visibility == View.VISIBLE || v.eventText.visibility == View.VISIBLE) View.VISIBLE else View.GONE
+
+        // 숫자 줄: 도로 색칠 결과(이번 주행은 종료 화면), 전국, 시군구 도감, 샘플·거리
+        val matching = coverage.matching
+        val road = if (showNumbers && s.state == TripState.ENDED) {
+            formatRoadLine(matching, getString(R.string.road_new), getString(R.string.matching_not_counted), getString(R.string.matching_not_counted_reason), BuildConfig.DEBUG)
+        } else {
+            null
+        }
+        setLine(v.roadText, road)
+        val national = if (showNumbers) {
+            formatNationalCountedLine(if (s.state == TripState.ENDED) matching else MatchingLine.None, coverage.nationalPercent, getString(R.string.national_counted), getString(R.string.national_percent))
+        } else {
+            null
+        }
+        setLine(v.nationalText, national)
+        setLine(v.regionsText, if (showNumbers) formatRegionsDex(coverage.regions, getString(R.string.regions_dex)) else null)
+        setLine(v.depopText, if (showNumbers) formatRegionsDepop(coverage.regions, getString(R.string.regions_depop)) else null)
+        val newRegions = if (showNumbers && s.state == TripState.ENDED) formatNewRegions(coverage.newRegions, getString(R.string.regions_new)) else null
+        setLine(v.newRegionsText, newRegions)
+        setLine(v.samplesText, if (showNumbers) getString(R.string.samples_format, s.sampleCount) else null)
+        setLine(v.distanceText, if (showNumbers) getString(R.string.distance_format, s.distanceM) else null)
+        setStatus(v.healthText, health)
+        setStatus(v.storageText, storage)
+        v.uploadText.text = uploadLine
+
+        v.restartButton.visibility = if (s.health == RecorderHealth.SERVICE_FAILED && hasLocationPermission() && canAct) View.VISIBLE else View.GONE
+        v.permissionCard.visibility = if (needsPermission && canAct) View.VISIBLE else View.GONE
+        v.permissionConfirm.visibility = if (permanentlyDenied) View.GONE else View.VISIBLE
+        v.permissionSettings.visibility = if (permanentlyDenied) View.VISIBLE else View.GONE
+
+        // 부가 요소(게스트 QR·이웃 카드·길안내 버튼): 기어 P이고 DO가 없을 때만. 앱 영역이 좁으면(두 앱을 나란히 연 경우 등) 이웃 카드는 축약형이다.
+        val extras = extrasVisible(showNumbers, distractionOptimized)
+        v.guestCard.visibility = if (extras) View.VISIBLE else View.GONE
+        val widthDp = (v.root.width / resources.displayMetrics.density).toInt()
+        val minWidthDp = resources.getInteger(R.integer.neighbor_card_min_width_dp)
+        applyAreaMode(narrowAppArea(widthDp, minWidthDp))
+        val cardLayout = neighborLayout(extras, widthDp, minWidthDp)
+        v.neighborCard.visibility = if (cardLayout == NeighborLayout.HIDDEN) View.GONE else View.VISIBLE
+        shownNeighbor = null
+        if (cardLayout != NeighborLayout.HIDDEN) renderNeighbor(info?.neighbor, info?.neighborsAllVisited == true, cardLayout)
         foldToFit()
     }
 
-    private fun buildUi(): View {
-        fun text(size: Float, bold: Boolean = false) = TextView(this).apply {
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, size)
-            setTextColor(Color.WHITE)
-            if (bold) setTypeface(typeface, android.graphics.Typeface.BOLD)
-            setPadding(0, 12, 0, 12)
+    /** 좁은 앱 영역이면 본문을 세로로 쌓아(왼쪽 열은 너비 전체, 이웃 카드는 아래) 가로로 잘리지 않게 한다. 바뀔 때만 레이아웃 속성을 고친다. */
+    private fun applyAreaMode(narrow: Boolean) {
+        if (appliedNarrow == narrow) return
+        appliedNarrow = narrow
+        val gap = resources.getDimensionPixelSize(R.dimen.column_gap)
+        v.body.orientation = if (narrow) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+        v.leftColumn.layoutParams = if (narrow) {
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+        } else {
+            LinearLayout.LayoutParams(resources.getDimensionPixelSize(R.dimen.left_column_width), LinearLayout.LayoutParams.MATCH_PARENT)
         }
-        stateText = text(40f, bold = true)
-        samplesText = text(24f)
-        distanceText = text(24f)
-        uploadText = text(18f)
-        nationalText = text(22f)
-        matchingText = text(22f, bold = true)
-        newRegionsText = text(22f, bold = true)
-        regionsText = text(22f)
-        eventText = text(22f)
-        healthText = text(20f, bold = true)
-        storageText = text(18f)
-        restartButton = Button(this).apply {
-            text = getString(R.string.restart_recording)
-            setOnClickListener { startService() }
+        v.neighborCard.layoutParams = if (narrow) {
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = gap / 2 }
+        } else {
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply { marginStart = gap }
         }
-        permissionConfirm = Button(this).apply {
-            text = getString(R.string.permission_confirm)
-            setOnClickListener { requestPermissions() }
-        }
-        permissionSettings = Button(this).apply {
-            text = getString(R.string.permission_open_settings)
-            setOnClickListener { openAppSettings() }
-        }
-        permissionCard = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#33FFFFFF"))
-            setPadding(32, 24, 32, 24)
-            addView(text(20f, bold = true).apply { text = getString(R.string.permission_title) })
-            addView(text(18f).apply { text = getString(R.string.permission_body) })
-            addView(permissionConfirm)
-            addView(permissionSettings)
-        }
-        return LinearLayout(this).apply {
-            rootLayout = this
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#14181F"))
-            setPadding(48, 48, 48, 48)
-            addView(stateText)
-            addView(samplesText)
-            addView(distanceText)
-            addView(uploadText)
-            addView(matchingText)
-            addView(nationalText)
-            addView(newRegionsText)
-            addView(regionsText)
-            addView(eventText)
-            addView(storageText)
-            addView(healthText)
-            addView(restartButton)
-            addView(permissionCard, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 32 })
+    }
+
+    private fun renderNeighbor(n: Neighbor?, allVisited: Boolean, layout: NeighborLayout) {
+        v.neighborName.text = n?.displayName ?: getString(if (allVisited) R.string.neighbor_all_visited else R.string.neighbor_unknown)
+        v.depopTag.visibility = if (n?.depop92 == true) View.VISIBLE else View.GONE
+        // 목적지(이웃 중심점)를 모르거나 안 가 본 이웃이 없으면 항목 카드·길안내 버튼은 숨긴다.
+        val hasNeighbor = n != null
+        val full = layout == NeighborLayout.FULL
+        v.poiRow.visibility = if (hasNeighbor && full) View.VISIBLE else View.GONE
+        v.poiSource.visibility = if (hasNeighbor && full) View.VISIBLE else View.GONE
+        v.naviCompact.visibility = if (hasNeighbor && !full) View.VISIBLE else View.GONE
+        shownNeighbor = n
+        if (naviMessageFor != n?.code) naviMessage = null
+        v.naviStatus.text = if (hasNeighbor) naviMessage ?: "" else ""
+        v.naviStatus.visibility = if (hasNeighbor && naviMessage != null) View.VISIBLE else View.GONE
+    }
+
+    /** 길안내 버튼: 화면에 보인 이웃의 시군구 중심점까지 NaviHelper로 경로를 요청한다. 버튼이 안 보이는 상태(DO·기어 P 아님)에서는 한 번 더 막는다. */
+    private fun navigate() {
+        val s = engine.status
+        if (!extrasVisible(numbersVisible(s.gear, s.state), distractionOptimized)) return
+        val n = shownNeighbor ?: return
+        naviMessageFor = n.code
+        navi.request(n.displayName, n.lat, n.lon) { ok ->
+            naviMessage = getString(if (ok) R.string.navigate_sent else R.string.navigate_failed)
+            naviMessageFor = n.code
+            render()
         }
     }
 
@@ -367,5 +452,7 @@ class MainActivity : Activity() {
         const val FUSED_LOCATION = "pleos.car.permission.FUSED_LOCATION"
         const val COARSE = "android.permission.ACCESS_COARSE_LOCATION"
         val REQUIRED = listOf(FUSED_LOCATION, COARSE)
+        val STAGE_NAMES = intArrayOf(R.string.stage_none, R.string.stage_pass, R.string.stage_visit, R.string.stage_stay)
+        val STAGE_BACKGROUNDS = intArrayOf(R.drawable.bg_stage0, R.drawable.bg_stage1, R.drawable.bg_stage2, R.drawable.bg_stage3)
     }
 }

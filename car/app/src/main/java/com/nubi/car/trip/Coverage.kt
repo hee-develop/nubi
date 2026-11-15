@@ -90,13 +90,13 @@ internal fun getText(baseUrl: String, path: String): String {
         val code = conn.responseCode
         val text = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() } ?: ""
         if (code in 200..299) return text
-        throw HttpFailure(code, "HTTP $code $path")
+        throw HttpFailure(code, "HTTP $code ${path.substringBefore('?')}") // 쿼리스트링(좌표·차량 ID)은 메시지에 남기지 않는다
     } finally {
         conn.disconnect()
     }
 }
 
-/** 종료 화면에 보일 한 줄의 의미. 문구는 [formatMatchingLine]이 strings.xml 형식으로 만든다. */
+/** 종료 화면에 보일 줄의 의미. 문구는 [formatRoadLine]·[formatNationalCountedLine]이 strings.xml 형식으로 만든다. */
 sealed interface MatchingLine {
     /** 아직 없음(트립 전, 폴링 중, 시간 초과). 화면에 아무것도 보이지 않는다. */
     data object None : MatchingLine
@@ -168,16 +168,25 @@ fun formatPercent(v: Double): String {
 fun formatKm(km: Double): String = String.format(Locale.US, "%.1f", km)
 
 /**
- * 종료 화면 한 줄. 형식 문자열은 strings.xml에서 받는다.
- * [countedFormat]: `새 도로 %1$skm · 전국 %2$s%% (+%3$s)`, [notCounted]·[notCountedWithReason]: `이번 주행은 집계되지 않았어요`·그 뒤에 ` (%1$s)`를 붙인 형식.
- * 사유는 [debug]일 때만 보인다. 보일 줄이 없으면 null.
+ * 종료 화면의 '새 도로' 줄. [roadFormat]: `새 도로 {%1$skm}`. 집계되지 않았으면 [notCounted]
+ * (사유는 [debug]일 때만 [notCountedWithReason]의 `%1$s`로 보인다). 보일 줄이 없으면 null.
  */
-fun formatMatchingLine(line: MatchingLine, countedFormat: String, notCounted: String, notCountedWithReason: String, debug: Boolean): String? = when (line) {
+fun formatRoadLine(line: MatchingLine, roadFormat: String, notCounted: String, notCountedWithReason: String, debug: Boolean): String? = when (line) {
     MatchingLine.None -> null
-    is MatchingLine.Counted ->
-        String.format(Locale.US, countedFormat, formatKm(line.newKm), formatPercent(line.percentAfter), formatPercent(line.delta.coerceAtLeast(0.0)))
+    is MatchingLine.Counted -> String.format(Locale.US, roadFormat, formatKm(line.newKm))
     is MatchingLine.NotCounted -> if (debug) String.format(Locale.US, notCountedWithReason, line.reason) else notCounted
 }
+
+/**
+ * 전국 줄. 이번 주행이 집계됐으면 `전국 {x%} (+y)`([countedFormat]), 아니면 전국 완료율 [percent]를 `전국 {x%} 달렸어요`([idleFormat])로.
+ * 둘 다 없으면 null.
+ */
+fun formatNationalCountedLine(line: MatchingLine, percent: Double?, countedFormat: String, idleFormat: String): String? =
+    if (line is MatchingLine.Counted) {
+        String.format(Locale.US, countedFormat, formatPercent(line.percentAfter), formatPercent(line.delta.coerceAtLeast(0.0)))
+    } else {
+        formatNationalLine(percent, idleFormat)
+    }
 
 /** 대기 화면 한 줄: `전국 {percent}% 달렸어요`. 값이 없으면(조회 실패) null이라 생략한다. */
 fun formatNationalLine(percent: Double?, format: String): String? = percent?.let { String.format(Locale.US, format, formatPercent(it)) }
@@ -231,6 +240,10 @@ class CoverageTracker(
     @Volatile
     private var generation = 0
 
+    /** 트립 종료 뒤 매칭 폴링이 끝났다(결과가 없어도). 정차 화면의 '지금 있는 곳' 단계를 다시 받는 데 쓴다. 워커 스레드에서 불린다. */
+    @Volatile
+    var onTripSettled: () -> Unit = {}
+
     /** 서버가 트립 종료를 받았다. 가장 최근 트립의 결과만 반영한다. */
     fun onTripEnded(serverTripId: String) {
         val gen = ++generation
@@ -242,6 +255,11 @@ class CoverageTracker(
                 if (line is MatchingLine.Counted) setNational(line.percentAfter)
                 // 방문·숙박은 이 트립의 Start 때 확정됐을 수 있으니(사양 03 4장) 매칭이 끝난 뒤 도감을 다시 받는다.
                 if (line != MatchingLine.None) vehicleId()?.let { fetchRegions(it) }
+                try {
+                    onTripSettled()
+                } catch (t: Throwable) {
+                    Log.w("NubiCoverage", "트립 종료 알림 예외: ${t.javaClass.simpleName}")
+                }
             }
         }
     }

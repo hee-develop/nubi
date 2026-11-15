@@ -18,6 +18,9 @@ object TripEngineProvider {
     private var tracker: CoverageTracker? = null
 
     @Volatile
+    private var placeTracker: PlaceTracker? = null
+
+    @Volatile
     private var resolver: VehicleIdResolver? = null
 
     fun get(context: Context): TripEngine =
@@ -33,6 +36,12 @@ object TripEngineProvider {
     fun coverage(context: Context): CoverageTracker {
         get(context)
         return tracker!!
+    }
+
+    /** 정차 화면의 현재 시군구·이웃 상태. 엔진과 같은 수명이다. */
+    fun place(context: Context): PlaceTracker {
+        get(context)
+        return placeTracker!!
     }
 
     private fun create(context: Context): TripEngine {
@@ -79,6 +88,12 @@ object TripEngineProvider {
         val coverage = CoverageTracker(HttpCoverageApi(BuildConfig.SERVER_URL), Executors.newCachedThreadPool(), { vehicle.vehicleId }, cache = store)
         uploader.onTripEnded = coverage::onTripEnded
         tracker = coverage
-        return TripEngine(clock, scheduler, Executors.newSingleThreadExecutor(), vehicle, store, uploader).also { it.onTripStarted = coverage::onTripStarted }
+        val engine = TripEngine(clock, scheduler, Executors.newSingleThreadExecutor(), vehicle, store, uploader).also { it.onTripStarted = coverage::onTripStarted }
+        // 정차(P) 진입 때와 트립 종료(매칭 폴링이 끝난 뒤) 때 마지막 채택 위치로 현재 시군구·이웃을 한 번 조회한다
+        val place = PlaceTracker(HttpPlaceApi(BuildConfig.SERVER_URL), Executors.newSingleThreadExecutor(), { vehicle.vehicleId }, { engine.status.lastLocation })
+        placeTracker = place
+        engine.onParked = place::refresh
+        coverage.onTripSettled = place::refresh
+        return engine
     }
 }

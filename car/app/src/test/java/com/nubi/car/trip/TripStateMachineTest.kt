@@ -267,4 +267,33 @@ class TripStateMachineTest {
     fun 하버사인은_위도_0_001도를_약_111m로_계산한다() {
         assertEquals(111.2, haversineM(37.5, 127.0, 37.501, 127.0), 0.5)
     }
+
+    // 마지막 원시 위치 -------------------------------------------------------
+
+    @Test
+    fun 기어_P에서도_마지막_위치를_보관하지만_트립에는_넣지_않는다() {
+        val m = machine()
+        m.onGear(Gear.P, 0)
+        assertNull(m.lastRaw)
+        assertTrue(m.onLocation(at(10.0), 1_000).isEmpty())
+        assertEquals(10.0, m.lastRaw!!.lat, 0.0)
+        assertTrue(m.onLocation(at(500.0), 2_000).isEmpty())
+        assertEquals(500.0, m.lastRaw!!.lat, 0.0)
+        assertEquals(0, m.sampleCount)
+        assertEquals(TripState.IDLE, m.state)
+    }
+
+    @Test
+    fun 채택하지_않은_위치와_트립_종료_뒤에도_마지막_위치가_남고_reset에서만_지워진다() {
+        val m = machine()
+        recording(m)
+        m.onLocation(at(51.0), 3_000) // 5m 미만 이동이라 채택되지 않는다
+        assertEquals(51.0, m.lastRaw!!.lat, 0.0)
+        m.onGear(Gear.P, 3_500)
+        m.onTick(3_500 + 5 * minute)
+        assertEquals(TripState.ENDED, m.state)
+        assertEquals(51.0, m.lastRaw!!.lat, 0.0)
+        m.reset()
+        assertNull(m.lastRaw)
+    }
 }

@@ -198,6 +198,29 @@ export const regionsRoutes = (db: Db, getRegions: () => Regions | null) => {
         200,
       );
     })
+    .get('/at', (c) => {
+      const regions = getRegions();
+      if (!regions) return c.json(unavailable(), 503);
+      // 빈 값·16진·공백·지수 표기는 거부한다(Number()가 받아 주는 이상한 입력 차단). 소수점 십진수만 받는다.
+      const DECIMAL = /^-?\d{1,3}(\.\d{1,10})?$/;
+      const latRaw = c.req.query('lat') ?? '';
+      const lonRaw = c.req.query('lon') ?? '';
+      const lat = Number(latRaw);
+      const lon = Number(lonRaw);
+      if (!DECIMAL.test(latRaw) || !DECIMAL.test(lonRaw) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return c.json({ error: 'invalid_point' as const, ...base(regions) }, 400);
+      const found = regions.locate(lon, lat);
+      const code = found ? regions.canonical(found) : null;
+      const info = code ? regions.names().get(code) : undefined;
+      if (!code || !info) return c.json({ error: 'not_found' as const, ...base(regions) }, 404);
+      const vehicleId = canonicalVehicleId(db, c.req.query('vehicleId') ?? '');
+      const row = db
+        .prepare(`WITH ${VISITED_CTE} SELECT COALESCE(v.level, 0) AS level, r.depop_92 FROM ${RG}.regions r LEFT JOIN v ON v.code = r.code WHERE r.code = ?`)
+        .get(vehicleId, vehicleId, code) as { level: number; depop_92: number } | undefined;
+      return c.json(
+        { ...base(regions), code, name: info.name, displayName: info.displayName, sidoName: info.sidoName, level: row?.level ?? 0, depop92: row?.depop_92 === 1 },
+        200,
+      );
+    })
     .get('/neighbors', (c) => {
       const regions = getRegions();
       if (!regions) return c.json(unavailable(), 503);
@@ -210,9 +233,9 @@ export const regionsRoutes = (db: Db, getRegions: () => Regions | null) => {
       const names = regions.names();
       const info = db
         .prepare(
-          `WITH ${VISITED_CTE} SELECT r.code, COALESCE(v.level, 0) AS level, r.depop_89, r.depop_92 FROM ${RG}.regions r LEFT JOIN v ON v.code = r.code`,
+          `WITH ${VISITED_CTE} SELECT r.code, COALESCE(v.level, 0) AS level, r.depop_89, r.depop_92, r.minlon, r.minlat, r.maxlon, r.maxlat FROM ${RG}.regions r LEFT JOIN v ON v.code = r.code`,
         )
-        .all(vehicleId, vehicleId) as { code: string; level: number; depop_89: number; depop_92: number }[];
+        .all(vehicleId, vehicleId) as { code: string; level: number; depop_89: number; depop_92: number; minlon: number; minlat: number; maxlon: number; maxlat: number }[];
       const byCode = new Map(info.map((r) => [r.code, r]));
       const nearest = found.length === 0; // 이웃이 없는 섬 등: 중심점 거리순 가까운 3곳으로 대신한다
       const list = nearest ? nearestRegions(db, code2, 3) : found;
@@ -228,6 +251,8 @@ export const regionsRoutes = (db: Db, getRegions: () => Regions | null) => {
             depop89: r.depop_89 === 1,
             depop92: r.depop_92 === 1,
             distanceM: f.distanceM,
+            // 길안내 목적지: bbox 중심(nearestRegions의 중심점과 같은 정의)
+            center: { lat: (r.minlat + r.maxlat) / 2, lon: (r.minlon + r.maxlon) / 2 },
             ...(nearest ? { nearest: true as const } : {}),
           };
         })

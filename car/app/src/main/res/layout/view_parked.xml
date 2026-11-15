@@ -1,0 +1,565 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 정차 P: 헤더 + 왼쪽 열(지금·단계·숫자·게스트 QR) + 오른쪽 이웃 카드 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/parked_view"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="@dimen/page_pad"
+        android:paddingTop="36dp"
+        android:paddingEnd="@dimen/page_pad">
+
+        <ImageView
+            android:layout_width="@dimen/logo_header"
+            android:layout_height="@dimen/logo_header"
+            android:importantForAccessibility="no"
+            android:src="@drawable/logo_mark" />
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="20dp"
+            android:layout_weight="1"
+            android:text="@string/app_name"
+            android:textColor="@color/text"
+            android:textSize="@dimen/text_logo"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/chip"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_chip"
+            android:paddingStart="30dp"
+            android:paddingTop="6dp"
+            android:paddingEnd="30dp"
+            android:paddingBottom="6dp"
+            android:textColor="@color/text"
+            android:textSize="36sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/body"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="horizontal"
+        android:paddingStart="@dimen/page_pad"
+        android:paddingTop="20dp"
+        android:paddingEnd="@dimen/page_pad"
+        android:paddingBottom="@dimen/page_pad">
+
+        <!-- 왼쪽 열 -->
+        <LinearLayout
+            android:id="@+id/left_column"
+            android:layout_width="@dimen/left_column_width"
+            android:layout_height="match_parent"
+            android:orientation="vertical">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/now_label"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/now_label"
+                    android:textColor="@color/muted"
+                    android:textSize="@dimen/text_sub" />
+
+                <TextView
+                    android:id="@+id/state_text"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="20dp"
+                    android:textColor="@color/accent"
+                    android:textSize="@dimen/text_sub"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/place_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:maxLines="1"
+                android:ellipsize="end"
+                android:textColor="@color/text"
+                android:textSize="@dimen/text_title"
+                android:textStyle="bold" />
+
+            <LinearLayout
+                android:id="@+id/stage_row"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/stage_badge"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="24dp"
+                    android:paddingStart="32dp"
+                    android:paddingTop="6dp"
+                    android:paddingEnd="32dp"
+                    android:paddingBottom="6dp"
+                    android:textColor="@color/text"
+                    android:textSize="44sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/event_text"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/muted"
+                    android:textSize="@dimen/text_sub" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="36dp"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/road_text"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:fontFeatureSettings="tnum"
+                    android:textColor="@color/text"
+                    android:textSize="@dimen/text_body"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/national_text"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:fontFeatureSettings="tnum"
+                    android:textColor="@color/text"
+                    android:textSize="@dimen/text_body"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/regions_text"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:fontFeatureSettings="tnum"
+                    android:textColor="@color/text"
+                    android:textSize="@dimen/text_body"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/depop_text"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:fontFeatureSettings="tnum"
+                    android:textColor="@color/text"
+                    android:textSize="@dimen/text_body"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/new_regions_text"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:textColor="@color/muted"
+                    android:textSize="@dimen/text_sub" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:id="@+id/samples_text"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:fontFeatureSettings="tnum"
+                        android:textColor="@color/muted"
+                        android:textSize="@dimen/text_sub" />
+
+                    <TextView
+                        android:id="@+id/distance_text"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="28dp"
+                        android:fontFeatureSettings="tnum"
+                        android:textColor="@color/muted"
+                        android:textSize="@dimen/text_sub" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/upload_text"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:fontFeatureSettings="tnum"
+                    android:textColor="@color/muted"
+                    android:textSize="@dimen/text_small" />
+
+                <TextView
+                    android:id="@+id/health_text"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:textColor="@color/accent"
+                    android:textSize="@dimen/text_sub"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/storage_text"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/muted"
+                    android:textSize="@dimen/text_small" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/restart_button"
+                android:layout_width="match_parent"
+                android:layout_height="@dimen/button_height"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/bg_button"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:text="@string/restart_recording"
+                android:textColor="@color/on_accent"
+                android:textSize="@dimen/text_logo"
+                android:textStyle="bold" />
+
+            <LinearLayout
+                android:id="@+id/permission_card"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/bg_permission"
+                android:orientation="vertical"
+                android:padding="28dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/permission_title"
+                    android:textColor="@color/text"
+                    android:textSize="@dimen/text_body"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/permission_body"
+                    android:textColor="@color/muted"
+                    android:textSize="@dimen/text_small" />
+
+                <TextView
+                    android:id="@+id/permission_confirm"
+                    android:layout_width="match_parent"
+                    android:layout_height="@dimen/button_height"
+                    android:layout_marginTop="16dp"
+                    android:background="@drawable/bg_button"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:gravity="center"
+                    android:text="@string/permission_confirm"
+                    android:textColor="@color/on_accent"
+                    android:textSize="@dimen/text_logo"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/permission_settings"
+                    android:layout_width="match_parent"
+                    android:layout_height="@dimen/button_height"
+                    android:layout_marginTop="16dp"
+                    android:background="@drawable/bg_button"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:gravity="center"
+                    android:text="@string/permission_open_settings"
+                    android:textColor="@color/on_accent"
+                    android:textSize="@dimen/text_logo"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <Space
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1" />
+
+            <!-- 게스트 QR: 자리표시(준비 중). 터치 동작 없음 -->
+            <LinearLayout
+                android:id="@+id/guest_card"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="@drawable/bg_card2"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:padding="28dp">
+
+                <ImageView
+                    android:layout_width="@dimen/qr_size"
+                    android:layout_height="@dimen/qr_size"
+                    android:contentDescription="@string/guest_qr_desc"
+                    android:src="@drawable/guest_qr" />
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="32dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/guest_qr_title"
+                        android:textColor="@color/text"
+                        android:textSize="@dimen/text_body"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:text="@string/guest_qr_desc"
+                        android:textColor="@color/muted"
+                        android:textSize="@dimen/text_sub" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:background="@drawable/bg_chip"
+                        android:paddingStart="24dp"
+                        android:paddingTop="2dp"
+                        android:paddingEnd="24dp"
+                        android:paddingBottom="2dp"
+                        android:text="@string/guest_qr_soon"
+                        android:textColor="@color/muted"
+                        android:textSize="@dimen/text_small" />
+                </LinearLayout>
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- 오른쪽 이웃 카드 -->
+        <LinearLayout
+            android:id="@+id/neighbor_card"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_marginStart="@dimen/column_gap"
+            android:layout_weight="1"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical"
+            android:paddingStart="@dimen/card_pad_h"
+            android:paddingTop="@dimen/card_pad_v"
+            android:paddingEnd="@dimen/card_pad_h"
+            android:paddingBottom="@dimen/card_pad_v">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/neighbor_label"
+                        android:textColor="@color/muted"
+                        android:textSize="@dimen/text_sub" />
+
+                    <TextView
+                        android:id="@+id/neighbor_name"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:maxLines="1"
+                        android:ellipsize="end"
+                        android:textColor="@color/text"
+                        android:textSize="@dimen/text_big"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/depop_tag"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="20dp"
+                    android:background="@drawable/bg_depop_tag"
+                    android:paddingStart="24dp"
+                    android:paddingTop="4dp"
+                    android:paddingEnd="24dp"
+                    android:paddingBottom="4dp"
+                    android:text="@string/depop_tag"
+                    android:textColor="@color/depop"
+                    android:textSize="@dimen/text_sub"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <!-- 축약형(좁은 앱 영역): 이웃 이름 + 태그 + 길안내 1개만 보인다 -->
+            <TextView
+                android:id="@+id/navi_compact"
+                android:layout_width="match_parent"
+                android:layout_height="@dimen/button_height"
+                android:layout_marginTop="20dp"
+                android:background="@drawable/bg_button"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:text="@string/navigate"
+                android:textColor="@color/on_accent"
+                android:textSize="@dimen/text_logo"
+                android:textStyle="bold"
+                android:visibility="gone" />
+
+            <LinearLayout
+                android:id="@+id/poi_row"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_marginTop="32dp"
+                android:layout_weight="1"
+                android:orientation="horizontal">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_poi"
+                    android:orientation="vertical"
+                    android:padding="@dimen/poi_pad">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/poi_kind_sight"
+                        android:textColor="@color/accent"
+                        android:textSize="@dimen/text_sub"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="@string/poi_sight_title"
+                        android:textColor="@color/text"
+                        android:textSize="@dimen/text_poi"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="@string/poi_example"
+                        android:textColor="@color/muted"
+                        android:textSize="@dimen/text_sub" />
+
+                    <Space
+                        android:layout_width="match_parent"
+                        android:layout_height="0dp"
+                        android:layout_weight="1" />
+
+                    <TextView
+                        android:id="@+id/navi_sight"
+                        android:layout_width="match_parent"
+                        android:layout_height="@dimen/button_height"
+                        android:background="@drawable/bg_button"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:gravity="center"
+                        android:text="@string/navigate"
+                        android:textColor="@color/on_accent"
+                        android:textSize="@dimen/text_logo"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_marginStart="28dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_poi"
+                    android:orientation="vertical"
+                    android:padding="@dimen/poi_pad">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/poi_kind_festival"
+                        android:textColor="@color/accent"
+                        android:textSize="@dimen/text_sub"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="@string/poi_festival_title"
+                        android:textColor="@color/text"
+                        android:textSize="@dimen/text_poi"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="@string/poi_example"
+                        android:textColor="@color/muted"
+                        android:textSize="@dimen/text_sub" />
+
+                    <Space
+                        android:layout_width="match_parent"
+                        android:layout_height="0dp"
+                        android:layout_weight="1" />
+
+                    <TextView
+                        android:id="@+id/navi_festival"
+                        android:layout_width="match_parent"
+                        android:layout_height="@dimen/button_height"
+                        android:background="@drawable/bg_button"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:gravity="center"
+                        android:text="@string/navigate"
+                        android:textColor="@color/on_accent"
+                        android:textSize="@dimen/text_logo"
+                        android:textStyle="bold" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/poi_source"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:text="@string/poi_source"
+                android:textColor="@color/muted"
+                android:textSize="@dimen/text_sub" />
+
+            <TextView
+                android:id="@+id/navi_status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="@color/accent"
+                android:textSize="@dimen/text_sub" />
+        </LinearLayout>
+    </LinearLayout>
+</LinearLayout>

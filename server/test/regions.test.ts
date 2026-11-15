@@ -407,6 +407,7 @@ describe('지역 DB 없음(사양 03 S2: 매칭과 분리)', () => {
       '/regions/list?vehicleId=v',
       '/regions/geo?bbox=1,1,2,2',
       '/regions/neighbors?code=11110',
+      '/regions/at?lat=37.05&lon=127.05',
     ]) {
       const r = await getJson(app as unknown as TestApp, path);
       expect(r.status).toBe(503);
@@ -761,6 +762,63 @@ describe('S5: 이웃 없는 섬', () => {
     // 이웃이 있는 곳에는 nearest 표시가 없다
     const a = (await getJson(app, '/regions/neighbors?code=11111')).body;
     expect(a.items.some((i: any) => 'nearest' in i)).toBe(false);
+  });
+});
+
+describe('GET /regions/at, neighbors center (사양 04)', () => {
+  const stop = (app: unknown) => (app as { matching: { stop: () => void } }).matching.stop();
+  it('at: 점이 속한 시군구와 차량 단계(0~3)·인구감소 여부, 못 찾으면 404', async () => {
+    const app = regionsApp() as unknown as TestApp;
+    const at = async () => (await getJson(app, '/regions/at?lat=37.05&lon=127.05&vehicleId=v')).body;
+    expect(await at()).toMatchObject({ code: '11111', name: 'A구', displayName: 'A구', sidoName: '가시', level: 0, depop92: false });
+    expect((await at()).attribution).toBeTruthy();
+    // F구(인구감소 92)
+    expect((await getJson(app, '/regions/at?lat=37.05&lon=127.25&vehicleId=v')).body).toMatchObject({ code: '11116', depop92: true });
+    await trip(app, 'v', '2026-11-09T01:00:00Z', [IN.A, IN.A]);
+    expect((await at()).level).toBe(1);
+    expect((await getJson(app, '/regions/at?lat=10&lon=100&vehicleId=v')).status).toBe(404);
+    stop(app);
+  });
+
+  it('at: level 2(방문)·3(숙박)도 그대로 돌려주고, alias(UUID)로 조회해도 정본 기록을 합산한다', async () => {
+    const db = openDb(':memory:');
+    db.prepare('INSERT INTO vehicle_alias VALUES (?, ?)').run('a-uuid', 'm-srv');
+    const app = regionsApp({ db }) as unknown as TestApp;
+    const at = async (v: string) => (await getJson(app, `/regions/at?lat=37.05&lon=127.05&vehicleId=${v}`)).body.level;
+    const a = await trip(app, 'm-srv', '2026-11-09T01:00:00Z', [IN.A, IN.A]);
+    expect(await at('m-srv')).toBe(1);
+    await trip(app, 'm-srv', iso(a.endedAt, 10), [IN.A, IN.A]); // 간격 10분 → 방문
+    expect(await at('m-srv')).toBe(2);
+    expect(await at('a-uuid')).toBe(2); // alias로 조회해도 같다
+    expect(await at('other')).toBe(0);
+    const b = await trip(app, 'night', '2026-11-09T12:00:00Z', [IN.A, IN.A]);
+    const startAt = iso(b.endedAt, 9 * 60);
+    await app.request('/trips', json({ localId: 'n', vehicleId: 'night', driverId: 'night', startedAt: startAt }));
+    const tripId = ((await getJson(app, '/trips?vehicleId=night')).body.trips as { tripId: string; localId: string }[]).find((x) => x.localId === 'n')!.tripId;
+    await app.request(`/trips/${tripId}/points`, json({ points: [{ seq: 0, ts: startAt, lat: IN.A[1], lon: IN.A[0] }] }));
+    expect(await at('night')).toBe(3);
+    stop(app);
+  });
+
+  it('at: 빈 값·16진·공백·범위 밖은 400', async () => {
+    const app = regionsApp() as unknown as TestApp;
+    for (const q of ['', 'lat=37', 'lon=127', 'lat=&lon=127', 'lat=0x25&lon=127', 'lat=%2037&lon=127', 'lat=37&lon=1e2', 'lat=x&lon=127', 'lat=91&lon=127', 'lat=37&lon=181', 'lat=-91&lon=0']) {
+      const r = await getJson(app, `/regions/at?${q}`);
+      expect(r.status, q).toBe(400);
+      expect(r.body.error).toBe('invalid_point');
+    }
+    stop(app);
+  });
+
+  it('neighbors: 항목마다 bbox 중심 center를 싣는다(nearest 포함)', async () => {
+    const app = regionsApp() as unknown as TestApp;
+    const body = (await getJson(app, '/regions/neighbors?code=11111&vehicleId=v')).body;
+    const e = body.items.find((i: any) => i.code === '11115');
+    expect(e.center.lat).toBeCloseTo(37.05, 6);
+    expect(e.center.lon).toBeCloseTo(126.95, 6);
+    const island = (await getJson(app, '/regions/neighbors?code=11113&vehicleId=v')).body;
+    expect(island.items.every((i: any) => i.nearest && Number.isFinite(i.center.lat) && Number.isFinite(i.center.lon))).toBe(true);
+    stop(app);
   });
 });
 
