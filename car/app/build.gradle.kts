@@ -1,8 +1,29 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+// release 서명 정보: NUBI_KEYSTORE_PROPS 환경변수 → ~/.nubi/keystore.properties 순. 없으면 서명 없이 빌드한다.
+val releaseSigningProps: Properties? = run {
+    val file = System.getenv("NUBI_KEYSTORE_PROPS")?.takeIf { it.isNotBlank() }?.let { File(it) }
+        ?: File(System.getProperty("user.home"), ".nubi/keystore.properties")
+    if (!file.isFile) return@run null
+    Properties().apply { file.inputStream().use { load(it) } }
+        .takeIf { p -> listOf("storeFile", "storePassword", "keyAlias", "keyPassword").all { !p.getProperty(it).isNullOrBlank() } }
+}
+if (releaseSigningProps == null) {
+    logger.warn("경고: release 서명 속성 파일을 찾지 못했거나 불완전합니다. 서명 없는 APK(app-release-unsigned.apk)가 만들어지며 설치할 수 없습니다. NUBI_KEYSTORE_PROPS 또는 ~/.nubi/keystore.properties를 설정하세요.")
+}
+
+// release 서버 주소: -Pnubi.releaseServerUrl=https://... (기본은 자리표시 주소). release는 TLS 필수.
+val placeholderServerUrl = "https://nubi.invalid"
+val releaseServerUrl = ((project.findProperty("nubi.releaseServerUrl") as String?) ?: placeholderServerUrl).trim()
+if (!releaseServerUrl.startsWith("https://")) {
+    throw GradleException("nubi.releaseServerUrl은 https:// 로 시작해야 합니다(release는 TLS 필수): $releaseServerUrl")
 }
 
 android {
@@ -30,6 +51,17 @@ android {
         buildConfig = true
     }
 
+    signingConfigs {
+        releaseSigningProps?.let { p ->
+            create("release") {
+                storeFile = file(p.getProperty("storeFile"))
+                storePassword = p.getProperty("storePassword")
+                keyAlias = p.getProperty("keyAlias")
+                keyPassword = p.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         debug {
             // 에뮬레이터에서 PC의 서버(tsx src/index.ts)에 붙는 주소. 포트는 -Pnubi.serverPort=<포트>로 바꾼다(기본 8787).
@@ -37,10 +69,13 @@ android {
             val serverPort = serverPortValue.toIntOrNull()?.takeIf { it in 1..65535 }
                 ?: throw GradleException("nubi.serverPort는 1~65535 사이 숫자여야 합니다: $serverPortValue")
             buildConfigField("String", "SERVER_URL", "\"http://10.0.2.2:$serverPort\"")
+            buildConfigField("boolean", "SERVER_URL_IS_PLACEHOLDER", "false")
         }
         release {
             isMinifyEnabled = false
-            buildConfigField("String", "SERVER_URL", "\"https://nubi.invalid\"")
+            buildConfigField("String", "SERVER_URL", "\"$releaseServerUrl\"")
+            buildConfigField("boolean", "SERVER_URL_IS_PLACEHOLDER", (releaseServerUrl == placeholderServerUrl).toString())
+            signingConfigs.findByName("release")?.let { signingConfig = it }
         }
     }
 

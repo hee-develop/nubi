@@ -235,3 +235,35 @@ SecurityException: Starting FGS with type location ... requires permissions:
 | road_key | 88,839 → 88,814(경계 틈 보정으로 `nm:00:` 키가 일부 해당 시군구 키에 합쳐짐), `nm:` 87,679. 동명이로 대각선 > 50km 옛 키 3,668개는 전부 쪼개져 새 키 11,220개. 분모 122,263.24 km 불변 |
 | 표시 이름 예 | `nm:11140:세종대로` → "서울 중구 세종대로", `lr:41:43` → "경기 지방도 43호선" |
 | 테스트 픽스처 | `regions-test.sqlite`(7곳, display_name 포함) 재빌드. `roads-test.sqlite` 재빌드(bbox 126.9611,37.5405,127.0024,37.5870, 월 209901): way 2,359, 642 roads, 1,028,096 B |
+
+## 10. release 서명·패키징
+
+### 10-1. 키와 설정
+
+| 항목 | 값 |
+|---|---|
+| 키스토어(저장소 밖) | `~/.nubi/release.keystore` (PKCS12, RSA 2048, 유효 10,000일, alias `nubi`, DN `CN=nubi, O=nubi`) |
+| 비밀번호 파일 | `~/.nubi/keystore.properties` (권한 600, 저장소·문서에 내용 없음) |
+| 속성 파일 탐색 순서 | `NUBI_KEYSTORE_PROPS` 환경변수 → `~/.nubi/keystore.properties` → 둘 다 없으면 서명 없이 빌드하고 경고 출력 |
+| 서버 주소 | `-Pnubi.releaseServerUrl=https://…` (기본 `https://nubi.invalid`). `http://`면 빌드 실패. 기본값이면 `BuildConfig.SERVER_URL_IS_PLACEHOLDER=true`, 차량 앱 업로드 줄에 `서버 미설정` 표시 |
+| 무시 규칙 | `car/.gitignore`에 `keystore.properties`, `*.keystore`, `*.jks` |
+
+### 10-2. 명령
+
+```
+cd car && ./gradlew :app:assembleRelease [-Pnubi.releaseServerUrl=https://서버]
+scripts/package-apk.sh <팀명> [앱이름=누비] [--server https://…]   # → apk/<팀명>_<앱이름>_release.apk, apk/README.md에 SHA-256·버전 기록
+```
+
+### 10-3. 검증 결과
+
+| 항목 | 결과 |
+|---|---|
+| `apksigner verify --verbose` | Verifies (v2 서명 true) |
+| `aapt dump badging` | package `com.nubi.car`, versionCode 1, versionName 0.1.0 |
+| `-Pnubi.releaseServerUrl=http://x` | `https:// 로 시작해야 합니다` 오류로 빌드 실패 |
+| 속성 파일 없음 | 경고만 출력하고 빌드 진행(unsigned) |
+| `:app:testDebugUnitTest` | 통과 |
+| 에뮬레이터(emulator-5554, 사용자 10) 설치·실행 | debug와 서명이 달라 `pm uninstall` 뒤 `install --user 10`. 앱 실행, 크래시 없음. 화면: `권한 필요` / `샘플 0` / `거리 0m` / `서버 미설정` / 위치 권한 카드 |
+| 스크린샷 | `docs/screenshots/release-install.png` |
+| 복구 | release 제거 후 `./gradlew :app:installDebug`로 debug 재설치 |

@@ -291,7 +291,14 @@ class MainActivity : Activity() {
             UploadKind.HELD -> getString(R.string.upload_held)
         }
         // 보류는 사용자가 알아야 하므로 '마지막 업로드:' 접두 없이 그대로 보인다.
-        uploadText.text = limited(if (s.upload.kind == UploadKind.HELD) upload else getString(R.string.upload_format, upload))
+        uploadText.text = limited(
+            when {
+                // 서버 주소가 빌드 때 지정되지 않았으면 업로드가 어차피 되지 않으므로 그 사실을 먼저 알린다.
+                BuildConfig.SERVER_URL_IS_PLACEHOLDER -> getString(R.string.server_not_configured)
+                s.upload.kind == UploadKind.HELD -> upload
+                else -> getString(R.string.upload_format, upload)
+            }
+        )
         foldToFit()
     }
 

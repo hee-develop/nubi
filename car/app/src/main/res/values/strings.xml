@@ -16,6 +16,7 @@
     <string name="upload_end_sent">종료 전송 완료</string>
     <string name="upload_failed">실패, 다시 시도 대기</string>
     <string name="upload_held">업로드 보류</string>
+    <string name="server_not_configured">서버 미설정</string>
     <string name="permission_title">위치 권한이 필요해요</string>
     <string name="permission_body">운전한 경로를 자동으로 기록하려면 차량 위치를 읽어야 해요. 기록은 이 차량의 주행 이력으로만 저장돼요. 속도는 수집하지 않아요.</string>
     <string name="permission_confirm">허용하고 시작</string>
