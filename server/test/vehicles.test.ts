@@ -14,7 +14,7 @@ const VIN = 'KMHABCDEF12345678';
 
 describe('vehicles', () => {
   it('vehicleId는 HMAC-SHA256(서버 키, VIN) hex이고 같은 VIN은 항상 같다', async () => {
-    const app = createApp(openDb(':memory:'), { vehicleHmacKey: KEY });
+    const app = createApp(openDb(':memory:'), { vehicleHmacKey: KEY, roadsPath: null });
     const a = await app.request('/vehicles/register', json({ vin: VIN }));
     const b = await app.request('/vehicles/register', json({ vin: VIN }));
     const other = await app.request('/vehicles/register', json({ vin: 'OTHERVIN' }));
@@ -24,13 +24,13 @@ describe('vehicles', () => {
     expect(await b.json()).toEqual({ vehicleId: expected });
     expect(((await other.json()) as { vehicleId: string }).vehicleId).not.toBe(expected);
     // 서버 키가 다르면 같은 VIN도 다른 ID(키 없이는 VIN 사전 공격으로 되돌릴 수 없다)
-    const app2 = createApp(openDb(':memory:'), { vehicleHmacKey: 'other-key' });
+    const app2 = createApp(openDb(':memory:'), { vehicleHmacKey: 'other-key', roadsPath: null });
     const c = (await (await app2.request('/vehicles/register', json({ vin: VIN }))).json()) as { vehicleId: string };
     expect(c.vehicleId).not.toBe(expected);
   });
 
   it('잘못된 요청은 400이고 입력 값을 응답에 되돌려 주지 않는다', async () => {
-    const app = createApp(openDb(':memory:'), { vehicleHmacKey: KEY });
+    const app = createApp(openDb(':memory:'), { vehicleHmacKey: KEY, roadsPath: null });
     for (const body of [
       {},
       { vin: '' },
@@ -51,7 +51,7 @@ describe('vehicles', () => {
   it('VIN을 DB에도 로그에도 남기지 않는다(스키마에 vin 열 없음, 모든 테이블 값에도 없음)', async () => {
     const spies = [vi.spyOn(console, 'log'), vi.spyOn(console, 'info'), vi.spyOn(console, 'warn'), vi.spyOn(console, 'error')];
     const db = openDb(':memory:');
-    const app = createApp(db, { vehicleHmacKey: KEY });
+    const app = createApp(db, { vehicleHmacKey: KEY, roadsPath: null });
     const reg = (await (await app.request('/vehicles/register', json({ vin: VIN }))).json()) as { vehicleId: string };
     const start = await app.request(
       '/trips',
@@ -76,7 +76,7 @@ describe('vehicles', () => {
 
 describe('VIN 정규화·형식', () => {
   it('trim·대문자로 정규화한 값으로 HMAC하고, 표준 17자가 아니면 vinFormat만 표시한다', async () => {
-    const app = createApp(openDb(':memory:'), { vehicleHmacKey: KEY });
+    const app = createApp(openDb(':memory:'), { vehicleHmacKey: KEY, roadsPath: null });
     const post = async (vin: string) => app.request('/vehicles/register', json({ vin }));
     const expected = createHmac('sha256', KEY).update(VIN).digest('hex');
     const messy = await post(`  ${VIN.toLowerCase()} \n`);
@@ -118,7 +118,7 @@ describe('vehicle alias', () => {
     ((await (await app.request(`/trips?vehicleId=${vehicleId}`)).json()) as { trips: { localId: string }[] }).trips.map((t) => t.localId);
 
   it('alias로 이어진 트립을 서버 ID 조회에 함께 돌려주고, 같은 요청은 멱등이다', async () => {
-    const app = createApp(openDb(':memory:'), { vehicleHmacKey: KEY });
+    const app = createApp(openDb(':memory:'), { vehicleHmacKey: KEY, roadsPath: null });
     await startAs(app, 'uuid-1', 'a');
     await startAs(app, 'server-1', 'b');
     await startAs(app, 'other', 'c');
@@ -133,7 +133,7 @@ describe('vehicle alias', () => {
   });
 
   it('이미 다른 차량에 이어진 alias는 409, 잘못된 입력은 400이며 입력을 되돌려 주지 않는다', async () => {
-    const app = createApp(openDb(':memory:'), { vehicleHmacKey: KEY });
+    const app = createApp(openDb(':memory:'), { vehicleHmacKey: KEY, roadsPath: null });
     await app.request('/vehicles/alias', json({ fromVehicleId: 'uuid-1', toVehicleId: 'server-1' }));
     const conflict = await app.request('/vehicles/alias', json({ fromVehicleId: 'uuid-1', toVehicleId: 'server-2' }));
     expect(conflict.status).toBe(409);
@@ -160,7 +160,7 @@ describe('vehicle alias', () => {
 
 describe('local_id 복합 UNIQUE', () => {
   it('다른 차량이 같은 localId를 써도 서로 다른 트립이고, 같은 차량은 멱등', async () => {
-    const app = createApp(openDb(':memory:'), { vehicleHmacKey: KEY });
+    const app = createApp(openDb(':memory:'), { vehicleHmacKey: KEY, roadsPath: null });
     const start = (vehicleId: string) =>
       app.request('/trips', json({ localId: 'same', vehicleId, driverId: vehicleId, startedAt: '2026-11-08T00:00:00Z' }));
     const a1 = await start('va');
@@ -208,7 +208,7 @@ describe('local_id 복합 UNIQUE', () => {
 
 describe('End 멱등과 오도미터 보충', () => {
   it('처음 End의 오도미터가 null이었고 나중 End에 값이 있으면 채우되 종료 시각은 그대로 둔다', async () => {
-    const app = createApp(openDb(':memory:'), { vehicleHmacKey: KEY });
+    const app = createApp(openDb(':memory:'), { vehicleHmacKey: KEY, roadsPath: null });
     const res = await app.request('/trips', json({ localId: 'e1', vehicleId: 'v', driverId: 'v', startedAt: '2026-11-08T00:00:00Z' }));
     const tripId = ((await res.json()) as { tripId: string }).tripId;
     await app.request(`/trips/${tripId}/end`, json({ endedAt: '2026-11-08T00:01:00Z', odometerEndKm: null }));

@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>누비 도로 색칠 뷰어</title>
+    <!-- 시연·검증용(debug). MapLibre GL JS는 버전을 고정하고 SRI(integrity)로 내용을 검증해 CDN에서 받는다(해시는 4.7.1 파일 실측, jsdelivr 사본과도 일치). -->
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
+      integrity="sha384-MinO0mNliZ3vwppuPOUnGa+iq619pfMhLVUXfC4LHwSCvF9H+6P/KO4Q7qBOYV5V"
+      crossorigin="anonymous"
+    />
+    <script
+      src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"
+      integrity="sha384-SYKAG6cglRMN0RVvhNeBY0r3FYKNOJtznwA0v7B5Vp9tr31xAHsZC0DqkQ/pZDmj"
+      crossorigin="anonymous"
+    ></script>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        font-family: system-ui, sans-serif;
+      }
+      #map {
+        position: absolute;
+        inset: 0;
+      }
+      #panel {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        width: 280px;
+        max-height: calc(100% - 24px);
+        overflow: auto;
+        background: rgba(255, 255, 255, 0.95);
+        border-radius: 8px;
+        padding: 12px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+        font-size: 13px;
+      }
+      #panel h1 {
+        font-size: 15px;
+        margin: 0 0 6px;
+      }
+      #percent {
+        font-size: 28px;
+        font-weight: 700;
+      }
+      ol {
+        padding-left: 18px;
+        margin: 6px 0;
+      }
+      li {
+        margin-bottom: 4px;
+      }
+      .muted {
+        color: #666;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+    <div id="panel">
+      <h1>전국 완료율</h1>
+      <div id="percent">-</div>
+      <div id="detail" class="muted"></div>
+      <h1 style="margin-top: 12px">달린 도로 상위 10</h1>
+      <ol id="roads"></ol>
+      <div id="notice" class="muted"></div>
+      <div class="muted" id="attribution"></div>
+    </div>
+    <script>
+      const vehicleId = new URLSearchParams(location.search).get('vehicleId') || '';
+      const $ = (id) => document.getElementById(id);
+      const q = (path, params) => fetch(path + '?' + new URLSearchParams({ vehicleId, ...params })).then((r) => r.json());
+
+      const map = new maplibregl.Map({
+        container: 'map',
+        center: [126.9769, 37.5724],
+        zoom: 13,
+        style: {
+          version: 8,
+          sources: {
+            // OSM 래스터 타일은 개발용에 한한다(OSMF 타일 정책). 배포 때는 자체 타일 또는 유료 타일로 바꾼다.
+            osm: {
+              type: 'raster',
+              tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+              tileSize: 256,
+              maxzoom: 19,
+              attribution: '© OpenStreetMap contributors (ODbL)',
+            },
+          },
+          layers: [{ id: 'osm', type: 'raster', source: 'osm' }],
+        },
+      });
+      map.addControl(new maplibregl.NavigationControl(), 'bottom-right');
+
+      map.on('load', () => {
+        map.addSource('segments', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+        map.addLayer({
+          id: 'segments',
+          type: 'line',
+          source: 'segments',
+          layout: { 'line-cap': 'round', 'line-join': 'round' },
+          paint: {
+            'line-width': 5,
+            // 커버리지가 높을수록 진한 주황 → 빨강
+            'line-color': ['interpolate', ['linear'], ['get', 'coverage'], 0.7, '#ffb703', 1, '#d00000'],
+          },
+        });
+        loadSegments();
+        loadSummary();
+      });
+      map.on('moveend', () => map.isStyleLoaded() && map.getSource('segments') && loadSegments());
+
+      async function loadSummary() {
+        const [s, r] = await Promise.all([q('/coverage/summary'), q('/coverage/roads', { sort: 'length', limit: '10' })]);
+        if (s.error) {
+          $('notice').textContent = '요약을 불러오지 못했어요: ' + s.error;
+          return;
+        }
+        $('percent').textContent = s.nationalPercent + '%';
+        $('detail').textContent =
+          s.drivenKm +
+          ' / ' +
+          s.totalKm +
+          ' km · 시작한 도로 ' +
+          s.roadsStarted +
+          ' · 완주 ' +
+          s.roadsCompleted +
+          ' · 스냅샷 ' +
+          s.snapshotMonth;
+        $('attribution').textContent = s.attribution;
+        const ol = $('roads');
+        ol.replaceChildren();
+        for (const it of r.items || []) {
+          const li = document.createElement('li');
+          const extra =
+            it.names && it.names.length > 0 && it.roadKey.indexOf('nm:') !== 0
+              ? ' · ' + it.names[0] + (it.namesTotal > 1 ? ' 외 ' + (it.namesTotal - 1) : '')
+              : '';
+          li.textContent = it.displayName + extra + ' — ' + it.percent + '% (' + (it.drivenM / 1000).toFixed(1) + 'km)';
+          ol.appendChild(li);
+        }
+      }
+
+      async function loadSegments() {
+        const b = map.getBounds();
+        const bbox = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
+        if (bbox[2] - bbox[0] > 1 || bbox[3] - bbox[1] > 1) {
+          $('notice').textContent = '지도를 더 확대하면 칠한 도로가 보여요.';
+          return;
+        }
+        const fc = await q('/coverage/segments', { bbox: bbox.join(',') });
+        if (fc.error) {
+          $('notice').textContent = '도로를 불러오지 못했어요: ' + fc.error;
+          return;
+        }
+        $('notice').textContent = fc.truncated ? '도로가 많아 일부만 표시해요.' : '';
+        map.getSource('segments').setData(fc);
+      }
+    </script>
+  </body>
+</html>

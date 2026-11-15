@@ -4,7 +4,7 @@ import { openDb } from '../src/db/index.js';
 
 const json = (body: unknown) => ({ method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 
-const newApp = () => createApp(openDb(':memory:'), { vehicleHmacKey: 'test-key' });
+const newApp = () => createApp(openDb(':memory:'), { vehicleHmacKey: 'test-key', roadsPath: null });
 
 const point = (seq: number, lat = 37.5 + seq * 0.0001) => ({
   seq,
@@ -167,7 +167,7 @@ describe('trips', () => {
 
   it('목록은 트립 수와 상관없이 쿼리 1회로 요약까지 계산한다(N+1 없음)', async () => {
     const db = openDb(':memory:');
-    const counted = createApp(db, { vehicleHmacKey: 'test-key' });
+    const counted = createApp(db, { vehicleHmacKey: 'test-key', roadsPath: null });
     const prepare = vi.spyOn(db, 'prepare');
     const queriesFor = async (n: number) => {
       for (let i = 0; i < n; i++) {

@@ -100,4 +100,71 @@ SecurityException: Starting FGS with type location ... requires permissions:
 
 ## 6. 주입 도구 (debug 전용)
 
-`nubi-debug://signal?reset=1&real=1&gear=P|R|N|D&loc=<lat>,<lon>[,<heading>]&gpx=<파일명>&now=<epoch ms>&flush=1` (`android.permission.DUMP` 호출자만, 속도 주입은 제거됨). `reset=1`은 상태·큐를 비우고 **실제 위치 수신을 끈다**(이후 `loc`·`gpx`만 받는다. 다시 켜려면 `real=1`). 끄는 일은 즉시, 비우는 일은 엔진 큐로 처리하므로 reset 뒤에 시작한 gpx 샘플이 비우기보다 먼저 처리되지 않는다(이전에는 reset이 실제 위치를 다시 켜 `gpx`와 순서가 엇갈릴 수 있었다). `now`는 기어 처리 뒤에 시계를 옮기며(`gear=P&now=+6분`으로 P 5분 종료를 건너뜀) 상태기계에 넘기는 elapsedRealtime·벽시계에만 더해지고 서버 재시도 간격·VIN 대기에는 쓰이지 않는다. 엔진의 `setClock`·`reset`·`flush`는 `BuildConfig.DEBUG`일 때만 동작한다.
+`nubi-debug://signal?reset=1&vin=<VIN>&real=1&gear=P|R|N|D&loc=<lat>,<lon>[,<heading>]&gpx=<파일명>&park=1&now=<epoch ms>&flush=1` (`android.permission.DUMP` 호출자만, 속도 주입은 제거됨). `reset=1`은 상태·큐를 비우고 **실제 위치 수신을 끈다**(이후 `loc`·`gpx`만 받는다. 다시 켜려면 `real=1`). 끄는 일은 즉시, 비우는 일은 엔진 큐로 처리하므로 reset 뒤에 시작한 gpx 샘플이 비우기보다 먼저 처리되지 않는다(이전에는 reset이 실제 위치를 다시 켜 `gpx`와 순서가 엇갈릴 수 있었다). `vin`은 차량 SDK 대신 그 VIN으로 서버 차량 ID를 받게 한다(E2E가 `pm clear` 뒤에도 서버 발급 ID를 쓰려고). `park=1`은 gpx 재생이 끝나면 기어를 P로 바꾼다(숫자는 기어 P에서만 보이므로 재생 끝을 화면으로 알 수 있다). `now`는 기어 처리 뒤에 시계를 옮기며(`gear=P&now=+6분`으로 P 5분 종료를 건너뜀) 상태기계에 넘기는 elapsedRealtime·벽시계에만 더해지고 서버 재시도 간격·VIN 대기에는 쓰이지 않는다. 엔진의 `setClock`·`reset`·`flush`는 `BuildConfig.DEBUG`일 때만 동작한다.
+
+## 7. 맵매칭 인프라 실측 (feat/02, 2026-11-09, Apple Silicon arm64)
+
+설치: Colima 0.10.3(`--cpu 4 --memory 6 --disk 40`, aarch64 VM, Docker 서버 29.5.2), docker CLI 29.9.3, osmium-tool 1.19.1(도로 DB 빌드용, brew로 추가 설치). 모두 brew.
+
+| 항목 | 값 |
+|---|---|
+| Valhalla 이미지 | `ghcr.io/gis-ops/docker-valhalla/valhalla:3.5.1`(멀티아크, arm64 매니페스트 확인. 태그 목록에 3.5.1이 가장 새 버전 번호라 고정, `latest` 미사용) |
+| pbf | `south-korea-latest.osm.pbf` 291,304,615 B(278 MB), OSM 타임스탬프 2026-11-08T21:21:00Z, way 3,859,299개. 다운로드 약 2분 40초 |
+| 타일 빌드 | 약 3분(컨테이너 생성부터 `/status` 200까지 183초). `server/data/valhalla` 1.7 GB = `valhalla_tiles/` 746 MB + `valhalla_tiles.tar` 669 MB + admin 8 MB(디렉터리는 빌드 중간 산출물이지만 이미지가 둘 다 남김). 타일 595개 |
+| 컨테이너 메모리 | 빌드 중 최대 약 4.3 GiB(VM 5.77 GiB 중), 서빙 대기 약 110~155 MiB |
+| 도로 DB | `roads-202611.sqlite` 361 MB(361,291,776 B, 재빌드 뒤 `roads.split_length_m` 열 포함), 빌드 12.9초(osmium 필터·export 포함, 2026-11-10 재빌드), 최대 RSS 2.1 GB(최초 빌드) |
+| 멱등성 | `setup-valhalla.sh` 재실행 0.3초(기존 컨테이너 재사용), `valhalla-up.sh` 정지 상태에서 2.2초 |
+
+도로 DB 통계(전국, 사양 3-2 등급, **2026-11-10 oneway 규칙 정정 후 재빌드**): way 734,533개, road_key 79,478개(`nm:` 78,811), 총 길이 227,980 km, 이름·번호 있는 길이 140,444 km(분리 차로 1/2 적용 전) → **122,263.24 km(적용 후, 분모)**. 재빌드 전 분모는 122,421.73 km였고 **−158.49 km** 줄었다: oneway를 `yes`뿐 아니라 `-1`(이름 있는 주요 4등급 way 129개, 58.4 km → 유효 −29.2 km)과 motorway(_link)의 암묵 oneway(태그 없는 610개, 258.5 km → −129.3 km)까지 분리 구간으로 봤기 때문이다. way·road 개수와 등급별 길이는 그대로. 분리 구간으로 센 way(`eff_length_m < length_m`)는 138,508개 → 139,575개, `roads.split_length_m` 합계 18,180.9 km. 이름·번호 없는 way 377,897개(51.4%), 길이로 38.4%(87,536 km).
+
+| highway | km | way |
+|---|---|---|
+| residential | 76,048 | 351,321 |
+| tertiary | 41,363 | 82,061 |
+| unclassified | 37,927 | 109,413 |
+| secondary | 25,538 | 49,911 |
+| primary | 15,622 | 33,399 |
+| trunk | 11,046 | 25,207 |
+| motorway | 10,656 | 20,414 |
+| trunk_link | 3,368 | 17,096 |
+| motorway_link | 2,997 | 11,604 |
+| primary_link | 1,584 | 13,309 |
+| secondary_link | 1,093 | 11,155 |
+| tertiary_link | 740 | 9,643 |
+
+동명이로: `nm:` 키 78,811개 중 way 중심점 범위의 대각선이 50 km를 넘는 키가 3,668개(4.7%, 해당 way 50,574개). 사양 6-1의 '알려진 한계' 규모.
+
+스모크(E2E GPX 30점, `POST /trace_attributes`, 사양 3-1 파라미터): 응답 `server/test/fixtures/valhalla-e2e-north.json`. edge 17개·합계 851 m(GPS 725 m), unmatched 1점(첫 점), matched 29점. 문제·주의:
+- GPX 궤적(경도 126.978 고정)이 세종대로 차로 위가 아니라 인접 골목(세종대로20·22길, 청계천로, 종로1길 등)으로 붙었다. 세종대로 이름이 붙은 edge는 way 378453707 하나(23 m)뿐이고 이 way는 `ref=31`이 있어 6-1 규칙으로 road_key가 `nr:31`('국도 31호선')이 된다. 종로 way(474532059)도 `nr:6`. 따라서 **사양 8장 E2E 단언 'coverage/roads에 displayName이 세종대로를 포함'은 이 궤적으로는 성립하지 않는다**(`nm:세종대로` road는 DB에 있으나 궤적이 지나지 않음). 궤적 좌표를 세종대로 차로 중심선으로 옮기거나 단언을 바꿔야 한다.
+- edge 중 way 221974030·1551642275(`service_other`)는 도로 DB(service 제외)에 없어 `ignored_ways`로 센다. 이름 없는 way(`unnamed:*`) 5개(primary_link 2·residential 3)는 분자·분모에서 빠진다.
+- Valhalla `edge.length` 단위는 km(응답 `units: kilometers`)다. 미터 환산 필요.
+- 타일 빌드 중 북한 행정구역 relation 경고(`missing way member`)가 나오나 무시해도 된다.
+
+### 7-1. 도로 색칠 E2E 실측 (feat/02, 2026-11-10 리뷰 반영 뒤, `pnpm e2e:car` 두 flow)
+
+전국 도로 DB(`roads-202611.sqlite`, 재빌드 뒤 분모 122,263.24 km)와 실제 Valhalla 3.5.1 컨테이너. GPX `e2e-sejong`(광화문 → 숭례문 방향 60점, GPS 거리 1,481 m). 설치 뒤 `pm clear`로 앱 데이터를 비우고, 검증 대상 트립은 GPX의 점 수·첫/끝 좌표로 골랐다.
+
+| 항목 | 실측 |
+|---|---|
+| newKm(세종대로 트립, 전국 달린 길이 증가분) | 1.245 km (기대 1.12~1.37, ±10%) |
+| newKm(e2e-north 트립) | 0.163 km (골목 매칭, `done`) |
+| 완료율 전후(세종대로 트립) | before 0.0001% → after 0.0012%(소수 4자리) |
+| `(after − before)/100` vs `newKm / totalKm` | 1.100e-5 vs 1.018e-5, 차 8.2e-7 ≤ 1e-6(반올림 오차 상한, 테스트 허용 1.01e-6) |
+| 누적 drivenKm / nationalPercent | 1.41 km / 0.0012 % |
+| 매칭 소요(서버 `finishedAt - startedAt`) | 9 ms(Valhalla 로컬 호출 포함) |
+| segments(GPX bbox) / 시작한 도로 | 11개 / 5개 |
+| 차량 화면(기어 P, 종료됨) | `새 도로 1.2km · 전국 0.0012% (+0.0011)` + 대기 줄 `전국 0.0012% 달렸어요`. 기어 D로 바꾸면 두 줄 모두 숨음 |
+| 차량 화면(기어 D, 기록 중) | `샘플`·`거리`·`전국` 숫자 줄 없음. 재생이 끝나 기어 P가 되면(`park=1`) `샘플 30`/`샘플 60`·`거리 …m` |
+| 사정 | `PORT=8788`로 실행(8787은 차곡). 에뮬레이터 VIN(9자)은 서버 VIN 형식 검사에 걸려 `POST /vehicles/register`가 400이라, 이전에는 앱에 저장돼 있던 옛 차량 ID가 쓰였다. `pm clear` 뒤에는 그 ID가 없어 UUID로 대체되므로 debug 신호 `vin=`으로 주입한 VIN(`E2EAPPVIN0000001`)으로 서버 발급 ID를 받고, `verify-trip`이 `HMAC(키, 주입 VIN)`과 트립의 vehicleId가 같은지 본다 |
+
+### 7-2. 묶음별 상한 수동 확인: 국도 48호선 `nr:48` (feat/02, 2026-11-10)
+
+전국 도로 DB(`roads-202611.sqlite`, 재빌드 뒤)의 `nr:48` = way 305개: 분리 구간 273개(Σ length 100.126 km → 상한 `split_length_m` 50.063 km) + 양방향 32개(10.246 km) = 총길이 `total_length_m` 60.308 km. 서버 `createApp`에 이 DB를 붙이고 `driven_ways`에 way별 커버리지 1.0을 직접 넣어 `/coverage/roads`·`/coverage/summary`로 확인했다.
+
+| 넣은 way | Σ 커버리지×length | 도로 달린 길이 / 총길이 | 완주 | 전국 달린 길이(summary) |
+|---|---|---|---|---|
+| 분리 구간 상·하행 273개 전부 | 100.126 km | 50.063 / 60.308 km = **83.01%** | 아니오 | 50.06 km |
+| 양방향 구간 32개만 | 10.246 km | 10.246 / 60.308 km = 16.99% | 아니오 | 10.25 km |
+| 전부(305개) | 110.371 km | 60.308 / 60.308 km = 100% | 예 | 60.31 km |
+
+도로 단위 상한만 두던 이전 정의(`min(Σ, 총길이)`)는 첫 줄을 min(100.126, 60.308) = 60.308 km, 즉 **100% 완주**로 셌다. 묶음별 상한에서는 상·하행을 모두 달려도 양방향 구간의 몫(10.2 km)을 채우지 못해 83.01%에 그친다. 같은 정의는 단위 테스트(`server/test/matching.test.ts` 묶음별 상한: 분리 구간 2개 + 양방향 구간 1개 혼합 도로)로 고정했다.

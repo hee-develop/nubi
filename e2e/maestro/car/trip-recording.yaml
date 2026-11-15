@@ -1,6 +1,7 @@
 # 주행 기록 E2E. 서버가 떠 있고 debug 앱이 설치된 emulator-5554에서 돈다(scripts/e2e-car.sh가 서버·설치·권한 부여를 맡는다).
 # 신호·위치는 debug 빌드의 nubi-debug://signal 주소로 넣는다(reset, real, gear, gpx, now, flush). 속도는 수집하지 않는다.
 # 스크린샷은 ${SHOT_DIR} 아래에 남긴다. CLOCK_PLUS_6MIN(env 기본값을 두면 -e보다 우선해 0이 되므로 두지 않는다)은 스크립트가 넘기는 "지금 + 6분"(epoch ms)이다.
+# APP_VIN(스크립트가 -e로 넘김)은 vin= 주입으로 서버 차량 ID를 받게 하는 값이다(앱 데이터를 pm clear 한 뒤에도 서버 발급 ID를 쓰려고. 에뮬레이터 VIN은 서버 형식 검사에 걸린다).
 # 글자 검증은 정규식(전체 일치)이다. clearState는 쓰지 않는다(앱이 사용자 10에서 돌아 데이터가 지워지지 않는다). 초기화는 reset=1로 한다.
 appId: com.nubi.car
 name: 주행 기록
@@ -9,40 +10,41 @@ env:
 ---
 # 1. 앱을 켜고(권한은 스크립트가 pm grant로 미리 줌) 상태를 비운다 → 대기
 - launchApp
-- openLink: nubi-debug://signal?reset=1
+- openLink: nubi-debug://signal?reset=1&vin=${APP_VIN}
 - extendedWaitUntil:
     visible: '대기'
     timeout: 20000
 - assertNotVisible: '권한 필요'
 - takeScreenshot: ${SHOT_DIR}/01-idle
 
-# 2. 기어 D → 위치 30점(약 725m)을 1초 간격으로 재생. reset이 실제 위치 스트림을 끈 뒤(앞 단계)에 gpx를 시작하므로 섞이지 않는다
+# 2. 기어 D → 위치 30점(약 725m)을 1초 간격으로 재생. reset이 실제 위치 스트림을 끈 뒤(앞 단계)에 gpx를 시작하므로 섞이지 않는다.
+#    park=1: 재생이 끝나면 기어가 P로 바뀐다(숫자는 기어 P에서만 보이므로 이걸로 재생 끝을 안다)
 - openLink: nubi-debug://signal?gear=D
-- openLink: nubi-debug://signal?gpx=e2e-north.gpx
+- openLink: nubi-debug://signal?gpx=e2e-north.gpx&park=1
 - extendedWaitUntil:
     visible: '기록 중'
     timeout: 30000
+# 기어 D인 동안 숫자(샘플·거리·전국 완료율)는 보이지 않는다(사양 02 7장)
+- assertNotVisible: '샘플.*'
+- assertNotVisible: '거리.*'
+- assertNotVisible: '전국 .*'
 - takeScreenshot: ${SHOT_DIR}/02-recording
 
-# 3. 샘플이 20 이상으로 늘고 거리가 500m 이상이 된다
+# 3. 재생이 끝나 기어 P가 되면 숫자가 보인다: 샘플 30, 거리 500m 이상
 - extendedWaitUntil:
-    visible: '샘플 (2[0-9]|[3-9][0-9]|[0-9]{3,})'
-    timeout: 45000
+    visible: '샘플 30'
+    timeout: 60000
 - extendedWaitUntil:
     visible: '거리 (5[0-9][0-9]|[6-9][0-9][0-9]|[0-9]{4,})m'
     timeout: 20000
-# 재생이 끝날 때까지(30점) 기다린다
-- extendedWaitUntil:
-    visible: '샘플 30'
-    timeout: 30000
 - takeScreenshot: ${SHOT_DIR}/03-samples
 
-# 4. 기어 P 뒤 시계를 6분 뒤로 옮긴다 → 종료됨. flush로 서버에 전량 올린다
+# 4. 기어 P 뒤 시계를 6분 뒤로 옮긴다 → 종료됨. flush로 서버에 전량 올린다(점이 이미 올라갔으면 End만 보내 '종료 전송 완료')
 - openLink: nubi-debug://signal?gear=P&now=${CLOCK_PLUS_6MIN}&flush=1
 - extendedWaitUntil:
     visible: '종료됨'
     timeout: 20000
 - extendedWaitUntil:
-    visible: '마지막 업로드: 성공.*'
+    visible: '마지막 업로드: (성공.*|종료 전송 완료)'
     timeout: 30000
 - takeScreenshot: ${SHOT_DIR}/04-ended

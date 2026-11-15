@@ -8,7 +8,7 @@ import java.util.concurrent.atomic.AtomicInteger
 enum class DrainKind { OK, RETRY, HELD }
 
 /** [HELD]는 서버가 요청 자체를 거절해(Start 4xx 등) 항목을 버리지 않고 보류한 트립이 남은 경우다. */
-data class DrainResult(val kind: DrainKind, val uploadedPoints: Int, val message: String) {
+data class DrainResult(val kind: DrainKind, val uploadedPoints: Int, val message: String, val endedTrips: Int = 0) {
     val ok: Boolean get() = kind == DrainKind.OK
 }
 
@@ -80,6 +80,10 @@ class Uploader(
     @Volatile
     var loaded = false
         private set
+
+    /** 서버가 End를 받았을 때(서버 트립 id). 도로 색칠 결과 폴링을 시작하는 데 쓴다. 호출 예외는 업로드에 영향을 주지 않는다. */
+    @Volatile
+    var onTripEnded: (String) -> Unit = {}
 
     /**
      * 암호화 키를 쓸 수 없어(일시 오류로 unwrap 실패, DEK 저장 실패) 이번 실행은 디스크를 읽지도 쓰지도 않고 메모리 큐로만 동작한다.
@@ -403,7 +407,7 @@ class Uploader(
                     return if (heldTrips > 0) {
                         DrainResult(DrainKind.HELD, uploaded, "HELD ${heldTrips}건")
                     } else {
-                        DrainResult(DrainKind.OK, uploaded, summary(uploaded, ended))
+                        DrainResult(DrainKind.OK, uploaded, summary(uploaded, ended), ended)
                     }
                 }
                 try {
@@ -478,6 +482,11 @@ class Uploader(
                             }
                             if (save) saveRegistrations()
                             ended++
+                            try {
+                                onTripEnded(step.serverId)
+                            } catch (t: Throwable) {
+                                Log.w(TAG, "종료 알림 예외: ${t.javaClass.simpleName}")
+                            }
                         }
                         is Step.Orphan -> {
                             if (step.entry is QueueEntry.Point) deadLetter(step.entry, "트립 정보 없음")

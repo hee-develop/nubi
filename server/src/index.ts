@@ -6,7 +6,7 @@ const hostname = process.env.HOST ?? '127.0.0.1';
 
 let app: ReturnType<typeof createApp>;
 try {
-  app = createApp();
+  app = createApp(undefined, { resumeMatching: true });
 } catch (e) {
   // 필수 설정 누락 같은 시작 오류는 스택 없이 메시지만 보이고 종료한다.
   console.error(`서버를 시작할 수 없습니다: ${e instanceof Error ? e.message : String(e)}`);

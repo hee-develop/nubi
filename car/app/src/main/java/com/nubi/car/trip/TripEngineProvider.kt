@@ -14,8 +14,26 @@ object TripEngineProvider {
     @Volatile
     private var instance: TripEngine? = null
 
+    @Volatile
+    private var tracker: CoverageTracker? = null
+
+    @Volatile
+    private var resolver: VehicleIdResolver? = null
+
     fun get(context: Context): TripEngine =
         instance ?: synchronized(this) { instance ?: create(context.applicationContext).also { instance = it } }
+
+    /** 차량 ID 해석기. VIN 주입 같은 debug 전용 호출은 debug 소스셋(DebugSignals)에서만 이 객체를 쓴다. */
+    fun vehicleIdResolver(context: Context): VehicleIdResolver {
+        get(context)
+        return resolver!!
+    }
+
+    /** 도로 색칠 결과(종료 한 줄)·전국 완료율 상태. 엔진과 같은 수명이다. */
+    fun coverage(context: Context): CoverageTracker {
+        get(context)
+        return tracker!!
+    }
 
     private fun create(context: Context): TripEngine {
         val main = Handler(Looper.getMainLooper())
@@ -56,6 +74,11 @@ object TripEngineProvider {
             api = HttpVehicleApi(BuildConfig.SERVER_URL),
             executor = Executors.newSingleThreadExecutor(),
         )
-        return TripEngine(clock, scheduler, Executors.newSingleThreadExecutor(), VehicleInfo(context, resolver), store, uploader)
+        this.resolver = resolver
+        val vehicle = VehicleInfo(context, resolver)
+        val coverage = CoverageTracker(HttpCoverageApi(BuildConfig.SERVER_URL), Executors.newCachedThreadPool(), { vehicle.vehicleId }, cache = store)
+        uploader.onTripEnded = coverage::onTripEnded
+        tracker = coverage
+        return TripEngine(clock, scheduler, Executors.newSingleThreadExecutor(), vehicle, store, uploader).also { it.onTripStarted = coverage::onTripStarted }
     }
 }

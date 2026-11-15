@@ -3,7 +3,7 @@ import { createApp } from '../src/app.js';
 
 describe('GET /health', () => {
   it('200과 { ok: true }를 돌려준다', async () => {
-    const res = await createApp(undefined, { vehicleHmacKey: 'test-key' }).request('/health');
+    const res = await createApp(undefined, { vehicleHmacKey: 'test-key', roadsPath: null }).request('/health');
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
   });
