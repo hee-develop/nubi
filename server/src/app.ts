@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { openDb, type Db } from './db/index.js';
-import { createLiveMatcher } from './matching/live.js';
+import { createLiveMatcher, type LiveMatcher } from './matching/live.js';
 import { createMatchingWorker, type MatchingWorker } from './matching/worker.js';
 import type { TraceDeps } from './matching/valhalla.js';
 import { attachRoads, resolveRoadsPath, VEHICLE_SET_SQL, type Roads } from './roads/index.js';
@@ -8,7 +8,9 @@ import { attachRegions, resolveRegionsPath, type Regions } from './regions/index
 import { inTx, mergeRegionAliases, resolvePending, runBatch } from './regions/judge.js';
 import { canonicalVehicleId } from './matching/pipeline.js';
 import { coverageRoutes } from './routes/coverage.js';
-import { mapRoutes } from './routes/map.js';
+import type { ExtDeps } from './ext/util.js';
+import { createExt, type ExtOptions } from './routes/ext.js';
+import { mapAccess, mapRoutes } from './routes/map.js';
 import { regionsRoutes } from './routes/regions.js';
 import { tripsRoutes } from './routes/trips.js';
 import { resolveVehicleHmacKey, vehiclesRoutes } from './routes/vehicles.js';
@@ -34,9 +36,54 @@ export type AppOptions = {
   liveIntervalMs?: number;
   /** 시작 때 끝나지 않은 매칭 작업을 이어서 처리한다(서버 프로세스에서만 켠다). */
   resumeMatching?: boolean;
+  /** 05 야간 계약서 T2 확장 설정(토큰 인증·공개 주소·B2B 키·TourAPI 키 등). 생략한 값은 환경변수에서 읽는다. */
+  ext?: ExtOptions;
 };
 
-// RPC 타입 추론을 위해 라우트는 반드시 체이닝으로 정의한다.
+type Chain = {
+  db: Db;
+  worker: MatchingWorker;
+  live: LiveMatcher;
+  ext: ReturnType<typeof createExt>;
+  extDeps: ExtDeps;
+  options: AppOptions;
+  now: () => number;
+  getRoads: () => Roads | null;
+  getRegions: () => Regions | null;
+  tick: (vehicleId: string, onlyIfPending: boolean) => void;
+};
+
+/**
+ * 라우트 체인. `createApp`에서 떼어낸 이유: `createApp`은 `Object.assign(app, { matching, live, … })`로 교차 타입을 돌려주는데, 라우트가 많으면
+ * `hc<ReturnType<typeof createApp>>`가 `Hono & {…}`에서 스키마를 일부(`/health`·`/coverage`·`/map`…) 잃는다. `AppType`은 이 함수의 반환형이다.
+ * RPC 타입 추론을 위해 라우트는 반드시 체이닝으로 정의한다.
+ */
+const buildRoutes = ({ db, worker, live, ext, extDeps, options, now, getRoads, getRegions, tick }: Chain) =>
+  new Hono()
+    .use('*', ext.middleware) // 체인 맨 앞: 뒤에 붙는 모든 라우트(T1 /map·/trips/:id/live 포함)에 인증·본문 한도 적용
+    .get('/health', (c) => c.json({ ok: true as const }))
+    .route('/', ext.routes) // T2: /trips/:id/points·/live 기록 멈춤 차단이 /trips 라우트보다 먼저 와야 한다(멈춘 차량은 onPoints(잠정 매칭 포함)에 닿지 않는다)
+    .route('/trips', tripsRoutes(db, worker.enqueue, {
+      onStarted: (v) => tick(v, false),
+      onPoints: (v, t) => {
+        tick(v, true);
+        if (options.liveMatching !== false) live.schedule(t);
+      },
+    }))
+    .route(
+      '/regions',
+      regionsRoutes(db, getRegions, now),
+    )
+    .route('/vehicles', vehiclesRoutes(options.vehicleHmacKey ?? resolveVehicleHmacKey(), db))
+    .route(
+      '/',
+      coverageRoutes(db, getRoads, now),
+    )
+    .route(
+      '/',
+      mapRoutes(db, getRoads, getRegions, live, now, mapAccess(extDeps)),
+    );
+
 export const createApp = (db: Db = openDb(), options: AppOptions = {}) => {
   const now = options.now ?? Date.now;
   const roads: Roads | null = attachRoads(db, options.roadsPath === undefined ? resolveRoadsPath() : options.roadsPath);
@@ -96,7 +143,7 @@ export const createApp = (db: Db = openDb(), options: AppOptions = {}) => {
     } catch (e) {
       console.warn(`시군구 첫 배치 실패: ${e instanceof Error ? e.message : String(e)}`);
     }
-    setInterval(
+    const hourly = setInterval(
       () => {
         try {
           live.purge();
@@ -110,35 +157,14 @@ export const createApp = (db: Db = openDb(), options: AppOptions = {}) => {
         }
       },
       60 * 60 * 1000,
-    ).unref();
-  }
-  const app = new Hono()
-    .get('/health', (c) => c.json({ ok: true as const }))
-    .route(
-      '/trips',
-      tripsRoutes(db, worker.enqueue, {
-        onStarted: (v) => tick(v, false),
-        onPoints: (v, t) => {
-          tick(v, true);
-          if (options.liveMatching !== false) live.schedule(t);
-        },
-      }),
-    )
-    .route(
-      '/regions',
-      regionsRoutes(db, () => regions),
-    )
-    .route('/vehicles', vehiclesRoutes(options.vehicleHmacKey ?? resolveVehicleHmacKey(), db))
-    .route(
-      '/',
-      coverageRoutes(db, () => roads),
-    )
-    .route(
-      '/',
-      mapRoutes(db, () => roads, () => regions, live, now),
     );
+    (hourly as { unref?: () => void }).unref?.(); // 폰 앱 tsc(DOM lib)에서 setInterval이 number로 보여도 컴파일되게
+  }
+  const extDeps = { db, getRoads: () => roads, getRegions: () => regions, now, options: options.ext ?? {} };
+  const ext = createExt(extDeps);
+  const app = buildRoutes({ db, worker, live, ext, extDeps, options, now, getRoads: () => roads, getRegions: () => regions, tick });
   if (options.viewer ?? (process.env.NUBI_VIEWER === '1' || process.env.NODE_ENV !== 'production')) app.route('/viewer', viewerRoutes());
   return Object.assign(app, { matching: worker, live, regionsBatch });
 };
 
-export type AppType = ReturnType<typeof createApp>;
+export type AppType = ReturnType<typeof buildRoutes>;

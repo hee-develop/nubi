@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { initMapSchema } from './schema-map.js';
 import { LEGACY_LOCAL_ID_INDEX, LOCAL_ID_INDEX, SCHEMA } from './schema.js';
+import { ensureExtSchema } from './schema-ext.js';
 
 export type Db = DatabaseSync;
 
@@ -22,5 +23,6 @@ export const openDb = (path: string = process.env.NUBI_DB ?? defaultPath): Db =>
   // local_id 단독 UNIQUE였던 기존 DB는 복합 UNIQUE로 옮긴다(복합이 더 느슨하므로 기존 행은 충돌하지 않는다).
   db.exec(`DROP INDEX IF EXISTS ${LEGACY_LOCAL_ID_INDEX}`);
   db.exec(LOCAL_ID_INDEX);
+  ensureExtSchema(db);
   return db;
 };

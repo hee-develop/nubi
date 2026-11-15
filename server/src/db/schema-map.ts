@@ -36,11 +36,18 @@ export const initMapSchema = (db: Db) => {
     db.exec(MAP_SCHEMA);
     return;
   }
-  db.exec('BEGIN');
+  // 다른 연결이 먼저 옮겼을 수 있으니 쓰기 잠금을 잡은 뒤(BEGIN IMMEDIATE) 상태를 다시 확인한다.
+  db.exec('BEGIN IMMEDIATE');
   try {
-    for (const t of stale) db.exec(`ALTER TABLE ${t} RENAME TO ${t}_old`);
+    const still = stale.filter((t) => db.prepare("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = ?").get(t) && needsCascade(db, t));
+    if (still.length === 0) {
+      db.exec(MAP_SCHEMA);
+      db.exec('COMMIT');
+      return;
+    }
+    for (const t of still) db.exec(`ALTER TABLE ${t} RENAME TO ${t}_old`);
     db.exec(MAP_SCHEMA);
-    for (const t of stale) {
+    for (const t of still) {
       db.exec(`INSERT OR IGNORE INTO ${t} SELECT * FROM ${t}_old WHERE trip_id IN (SELECT id FROM trips)`);
       db.exec(`DROP TABLE ${t}_old`);
     }

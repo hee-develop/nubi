@@ -55,12 +55,14 @@ class MapScreen(
             it.showRegions = regionsOn
             it.onUserMoved = { parkedFollow = false }
         }
+        repository.bind() // unbind 동안 멈춘 요청·재시도를 마지막 뷰포트로 다시 건다
     }
 
     fun unbind() {
         driving = null
         parked = null
         live.stop()
+        repository.unbind() // 백그라운드에서 재시도 타이머가 계속 돌지 않게
     }
 
     /** 엔진이 위치 샘플을 처리할 때마다(화면과 무관). 기록 중일 때만 궤적에 쌓는다. */
@@ -161,10 +163,15 @@ class MapScreen(
         return regionsOn
     }
 
-    /** 트립 종료 매칭이 끝났다: 궤적·잠정 결과를 치우고 확정된 달린 길·시군구 단계를 다시 받는다. */
-    fun onTripSettled() {
-        trail.clear()
-        live.clear()
+    /**
+     * 트립 종료 매칭이 끝났다: 확정된 달린 길·시군구 단계를 다시 받는다. 궤적·잠정 결과는 **정산된 트립이 지금 기록 중인 트립일 때만** 치운다
+     * (오프라인 백로그의 지난 트립이 정산될 때 지금 달리는 궤적이 지워지지 않게). [settledLocalId]를 모르면(null) 예전처럼 치운다.
+     */
+    fun onTripSettled(settledLocalId: String? = null, recordingLocalId: String? = null) {
+        if (shouldClearOnSettle(settledLocalId, recordingLocalId)) {
+            trail.clear()
+            live.clear()
+        }
         repository.invalidate()
     }
 

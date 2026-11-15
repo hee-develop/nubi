@@ -5,7 +5,7 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.nubi.phone"
@@ -23,8 +23,21 @@
     "plugins": [
       "expo-router",
       "expo-status-bar",
-      "expo-splash-screen"
+      "expo-splash-screen",
+      "expo-secure-store",
+      "expo-sharing",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "차 화면의 QR 코드를 읽어 연결하기 위해 카메라를 사용합니다.",
+          "recordAudioAndroidPermission": false,
+          "microphonePermission": false
+        }
+      ],
+      "expo-asset"
     ],
-    "scheme": "nubi"
+    "scheme": "nubi",
+    "backgroundColor": "#0f141b",
+    "extra": {}
   }
 }

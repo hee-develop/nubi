@@ -117,4 +117,12 @@ class MapRulesTest {
             FeatureFlags.drivingMap = saved
         }
     }
+
+    @Test
+    fun 정산된_트립이_지금_기록_중인_트립과_다르면_궤적을_지우지_않는다() {
+        assertTrue(shouldClearOnSettle("a", "a"))
+        assertFalse(shouldClearOnSettle("old", "now")) // 오프라인 백로그의 지난 트립
+        assertTrue(shouldClearOnSettle("a", null)) // 기록 중인 트립이 없다
+        assertTrue(shouldClearOnSettle(null, "now")) // 모름
+    }
 }

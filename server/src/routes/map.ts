@@ -4,6 +4,9 @@ import { canonicalVehicleId } from '../matching/pipeline.js';
 import type { LiveMatcher } from '../matching/live.js';
 import { RG, REGIONS_ATTRIBUTION, type Regions } from '../regions/index.js';
 import { ATTRIBUTION, DRIVEN_CTE, RD, VEHICLE_SET_SQL, type Roads } from '../roads/index.js';
+import { authenticate, bearerOf, canAccessVehicle, clientKey, hashToken } from '../ext/auth.js';
+import { parseAuthMode, type ExtDeps } from '../ext/util.js';
+import { isFaded } from '../shared/fade.js';
 import { VISITED_CTE } from './regions.js';
 
 /** `/map/base` 한 응답의 way 상한. 넘으면 중요한 등급부터 남기고 `truncated: true`. */
@@ -13,23 +16,36 @@ export const MAP_MAX_LIVE_WAYS = 3_000;
 export const SHAPE_CACHE_MAX = 64;
 /** `/map/regions` bbox 한 변 상한(도). 전국(약 8°)이 한 칸에 들어간다. */
 export const MAX_REGION_SPAN_DEG = 20;
-/** 바램 기준일. T2의 shared/fade.ts `isFaded(lastAt, now, days=365)`와 같은 규칙이다(`now - lastAt > days`). 합칠 때 그 함수로 바꾼다. */
-export const FADE_DAYS = 365;
-export const isFaded = (lastAt: string | number, now: number, days: number = FADE_DAYS) =>
-  now - (typeof lastAt === 'number' ? lastAt : Date.parse(lastAt)) > days * 86_400_000;
-
 /** 소유 확인에 필요한 값. 차량 ID(쿼리)나 트립 ID(경로) 중 있는 것만 채운다. */
 export type MapAccessRequest = { vehicleId?: string; tripId?: string };
 
 /**
- * 지도 API의 접근 확인 지점(한 곳). **이 브랜치에는 인증이 없어 항상 허용한다.** 공개 배포 전에는 `NUBI_AUTH=required`(T2의 ext/auth.ts)로
- * '이 토큰의 차량이 그 vehicleId·트립의 소유자인가'를 여기서 검사해야 한다(사양 05a 공개 배포 조건). false를 돌려주면 403이다.
+ * 지도 API의 접근 확인 지점(한 곳). T2 인증 규칙(ext/auth.ts)에 연결한다: `off`면 항상 허용, `optional`·`required`면 유효한 토큰이 있고
+ * 요청이 가리키는 차량(쿼리 vehicleId·트립 소유 차량)이 모두 토큰 범위 안일 때만 허용(`optional`은 토큰이 아예 없으면 기존처럼 허용). false면 403이다.
+ * 전역 미들웨어(ext.middleware)가 같은 검사를 앞에서 하므로 이중 방어이고, 라우트가 미들웨어 없이 마운트돼도 열리지 않게 한다.
  */
-export const checkMapAccess = (_c: Context, _req: MapAccessRequest): boolean => true;
+export const mapAccess =
+  (deps: Pick<ExtDeps, 'db' | 'now' | 'options'>) =>
+  (c: Context, req: MapAccessRequest): boolean => {
+    const mode = deps.options.auth ?? parseAuthMode(process.env.NUBI_AUTH);
+    if (mode === 'off') return true;
+    if (!bearerOf(c)) return mode === 'optional';
+    const info = authenticate(deps, c);
+    if (!info) return false;
+    return [req.vehicleId, req.tripId === undefined ? undefined : tripVehicle(deps.db, req.tripId)].every((v) => v === undefined || v === null || canAccessVehicle(deps.db, info, v));
+  };
 
-/** `/map/*` 요청 제한: 키(차량 ID, 없으면 `anon`)마다 [RATE_WINDOW_MS] 동안 [RATE_MAX]번. 전국 보기 한 화면이 칸 10여 개를 한꺼번에 묻는 것을 감안한 값이다. */
+const tripVehicle = (db: Db, tripId: string): string | null => (db.prepare('SELECT vehicle_id FROM trips WHERE id = ?').get(tripId) as { vehicle_id: string } | undefined)?.vehicle_id ?? null;
+
+/** 요청 제한 키: 토큰(있으면)·출처 기준(T2 share와 같은 규칙). */
+const limitKey = (c: Context) => (bearerOf(c) ? `t:${hashToken(bearerOf(c)!)}` : `ip:${clientKey(c)}`);
+
+/** `/map/*` 요청 제한: 키(인증 토큰이 있으면 그 해시, 없으면 출처 주소)마다 [RATE_WINDOW_MS] 동안 [RATE_MAX]번. 차량 ID는 호출자가 바꿔 쓸 수 있어 키로 쓰지 않는다. 전국 보기 한 화면이 칸 10여 개를 묻고 확대 단계를 연달아 바꿔도 걸리지 않을 값이다. */
 export const RATE_WINDOW_MS = 10_000;
-export const RATE_MAX = 80;
+export const RATE_MAX = 200;
+/** [hits] 정리는 이 개수를 넘었을 때 [SWEEP_EVERY_MS]에 한 번만 한다(요청마다 전체를 훑지 않는다). */
+const HITS_SWEEP_AT = 2_000;
+const SWEEP_EVERY_MS = 10_000;
 
 type Cls = 'mw' | 'pr' | 'sc' | 'mn';
 
@@ -138,18 +154,23 @@ export const mapRoutes = (
   getRegions: () => Regions | null,
   live?: LiveMatcher,
   now: () => number = Date.now,
-  access: (c: Context, req: MapAccessRequest) => boolean = checkMapAccess,
+  /** 접근 확인. 생략하면 전부 거부한다(fail-closed): app.ts가 [mapAccess]를 넘긴다. */
+  access: (c: Context, req: MapAccessRequest) => boolean = () => false,
 ) => {
   const unavailable = () => ({ error: 'roads_db_unavailable' as const });
   const shapeCache = new Map<string, { ways: { id: number; cls: Cls; rk: string; c: Pt[] }[]; truncated: boolean }>();
   const hits = new Map<string, number[]>();
   /** 요청 제한(슬라이딩 창). 넘으면 true. */
+  let lastSweep = 0;
   const limited = (key: string) => {
     const t = now();
     const list = (hits.get(key) ?? []).filter((x) => t - x < RATE_WINDOW_MS);
     list.push(t);
     hits.set(key, list);
-    if (hits.size > 2_000) for (const [k, v] of hits) if (t - v.at(-1)! >= RATE_WINDOW_MS) hits.delete(k);
+    if (hits.size > HITS_SWEEP_AT && t - lastSweep >= SWEEP_EVERY_MS) {
+      lastSweep = t;
+      for (const [k, v] of hits) if (t - v.at(-1)! >= RATE_WINDOW_MS) hits.delete(k);
+    }
     return list.length > RATE_MAX;
   };
 
@@ -164,7 +185,7 @@ export const mapRoutes = (
       if (!bbox || bbox.maxlon - bbox.minlon > span || bbox.maxlat - bbox.minlat > span) return c.json({ error: 'invalid_bbox' as const }, 400);
       const rawVehicle = c.req.query('vehicleId');
       if (!access(c, { vehicleId: rawVehicle })) return c.json({ error: 'forbidden' as const }, 403);
-      if (limited(rawVehicle ?? 'anon')) return c.json({ error: 'rate_limited' as const }, 429);
+      if (limited(limitKey(c))) return c.json({ error: 'rate_limited' as const }, 429);
       const vehicleId = rawVehicle ? canonicalVehicleId(db, rawVehicle) : null;
       const highways = classesForZ(z).flatMap((k) => CLS_HIGHWAYS[k]);
       // 도형은 차량과 무관하니 (스냅샷 월·z·bbox) 단위로 캐시하고, 그 차량의 달린 길 정보(d)만 매번 합친다.
@@ -219,7 +240,7 @@ export const mapRoutes = (
       if (!bbox || bbox.maxlon - bbox.minlon > MAX_REGION_SPAN_DEG || bbox.maxlat - bbox.minlat > MAX_REGION_SPAN_DEG) return c.json({ error: 'invalid_bbox' as const }, 400);
       const rawVehicle = c.req.query('vehicleId');
       if (!access(c, { vehicleId: rawVehicle })) return c.json({ error: 'forbidden' as const }, 403);
-      if (limited(rawVehicle ?? 'anon')) return c.json({ error: 'rate_limited' as const }, 429);
+      if (limited(limitKey(c))) return c.json({ error: 'rate_limited' as const }, 429);
       const vehicleId = canonicalVehicleId(db, rawVehicle ?? '');
       const rows = db
         .prepare(

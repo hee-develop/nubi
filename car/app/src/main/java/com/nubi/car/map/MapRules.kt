@@ -32,6 +32,10 @@ fun debugSummary(snapshot: MapSnapshot, trailPoints: Int, roads: Boolean, region
         "trail=$trailPoints roads=${if (roads) "on" else "off"} regions=${if (regions) "on" else "off"} " +
         "region=${snapshot.regions.size} load=${snapshot.load.name.lowercase()} z=${"%.1f".format(java.util.Locale.US, zoom)} follow=${if (follow) "on" else "off"}"
 
+/** 정산된 트립이 지금 기록 중인 트립과 다르면(오프라인 백로그 정산) 현재 궤적·잠정 결과를 지우지 않는다. 지금 기록 중인 트립이 없거나 id를 모르면 지운다. */
+fun shouldClearOnSettle(settledLocalId: String?, recordingLocalId: String?): Boolean =
+    settledLocalId == null || recordingLocalId == null || settledLocalId == recordingLocalId
+
 /**
  * 값이 바뀌어도 [holdMs] 동안은 보이던 값을 유지한다(시군구 경계에서 이름이 깜빡이지 않게, Pleos 가이드의 갱신 최소화).
  * 처음 값은 바로 보이고, 그 뒤 값이 달라지면 마지막으로 바꾼 지 [holdMs]가 지난 뒤에야 바꾼다. null(모름)도 같은 규칙이다.

@@ -64,3 +64,22 @@
 - 서버 포트: 8787은 사용자 수동 시연 서버(건드리지 않음). T1 E2E 8790, T2 8791, T3 8792, T4 8793. 8788은 손대지 않는다.
 - 데이터: 각 worktree의 `server/data/`는 메인 트리 파일로 심볼릭 링크(도로 DB·시군구 DB). Valhalla 컨테이너는 이미 8002에서 동작.
 - 커밋: 기존 스타일 한국어, 끝에 `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`. 작성자 설정은 저장소 로컬 그대로. `git stash`·reset --hard·rebase 등 파괴적 조작 금지.
+
+## 6. 통합 결과 (night/integration)
+
+**합친 순서**: `night/base` → T1(`feat/05-car-map`) → T3(`feat/08-phone`) → T2(`feat/06-server-ext`) → 연결 작업(서버·폰·차량 minor·문서).
+
+**충돌 해결**(`server/src/app.ts`, `server/src/routes/trips.ts` 두 곳, reset·stash 없이 수동 해소):
+- `app.ts` 체인 순서: `.use('*', ext.middleware)`(맨 앞) → `/health` → `.route('/', ext.routes)` → `/trips` → `/regions` → `/vehicles` → coverage → T1 `mapRoutes`(`ext.routes` 뒤). T2의 순서 검증 테스트(`poc-regression.test.ts`)가 실제 `app.ts` 소스를 읽으므로 `.route('/trips'`는 한 줄 시작을 유지했다.
+- `onPoints`는 T1 시그니처 `(vehicleId, tripId)`. 기록 멈춤은 T2의 `POST /trips/:id/points` 차단 라우트가 `/trips`보다 앞이라 훅에 닿기 전에 200 `paused`로 끝나므로 잠정 매칭도 돌지 않는다(`integration.test.ts`로 확인).
+- `trips.ts`는 T2의 `bodyOf(c)`(단일 파싱)를 유지하고 T1의 훅 인자 변경을 살렸다. 서식은 기존 그대로.
+
+**연결 지점**:
+- `checkMapAccess` → `mapAccess(deps)`(`routes/map.ts`): `off` 허용, `optional`·`required`에서 토큰 범위 밖 차량의 `/map/base`·`/map/regions`·`/trips/:id/live`는 403(미들웨어와 이중 방어, 라우트 기본값은 거부).
+- 바램 판정은 `shared/fade.ts` `isFaded` 하나(T1 자체 함수 제거).
+- `trip_live*`는 `DELETE /vehicles/:id/data`로 함께 삭제(통합 테스트), `/trips/:id/live`에도 `isRecordingBlocked` 적용(`paused: true`).
+- `AppType`을 `buildRoutes`의 반환형으로 분리: `createApp`의 `Object.assign` 교차 타입이 `hc<AppType>`에서 라우트(`/health`·`/coverage`·`/map`)를 잃어 폰 RPC 추론이 깨졌다. 같은 이유로 `parseBody` 실패 응답에 타입을 달았다(없으면 성공 응답이 `{}`로 추론).
+- 폰: 응답 타입 전부 RPC 추론(`phone/src/api/types.ts`), `consent: true` 고정, `POST /me/link`·`DELETE /me`·`/courses`·`POST /courses/:id/certificate` API 추가, 공유는 `.png`만·503 `png_unavailable`·409 `trip_not_eligible`·`local_only`·`rate_limited` 문구, 차주 토큰 401이면 연결을 풀고 연결 화면에서 안내. 기본 모드(URL만 주면 hybrid)는 그대로이고 새 API를 실서버로 붙이려면 `EXPO_PUBLIC_NUBI_API_MODE=live`.
+- T1 재리뷰 minor 9건은 서버(요청 제한 키·마이그레이션·테스트)와 차량(`fix(car): 지도 재리뷰 minor 반영`)으로 반영.
+
+**남은 차이**: 폰 화면에는 `/me/link`·게스트 탈퇴·인증서·지역 소개 UI가 없다(API만). hybrid 기본 모드는 새 API를 아직 목으로 처리한다. `/viewer`는 production·`NUBI_AUTH=required`에서 폰 지도 탭이 열리지 않는다(T3 한계 그대로). 폰 앱은 이번 통합에서 에뮬레이터로 열어 보지 않았다(테스트·타입·린트와 서버 스모크로만 확인). 시군구 E2E는 23:38~24:00 KST 근처에 시작하면 B·C 트립 사이에 자정이 끼지 않아 숙박 단언이 실패한다(스크립트의 시각 계산 한계, 회귀 아님).

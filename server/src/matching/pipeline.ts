@@ -3,6 +3,7 @@ import type { Db } from '../db/index.js';
 import { findWays, nationalCoverage, roundPercent, type Roads } from '../roads/index.js';
 import type { RegionsResult } from '../regions/judge.js';
 import { haversineM } from '../routes/trips.js';
+import { tripDataState } from '../ext/settings.js';
 import { traceAttributes, type TraceDeps } from './valhalla.js';
 
 export const MIN_POINTS = 20;
@@ -119,6 +120,10 @@ export const runMatching = async (
     return done(emptyResult('suspect', 'odometer_mismatch', before));
 
   const trace = await traceAttributes(points, deps);
+  // Valhalla를 기다리는 동안 데이터 삭제(동의 철회)가 있었을 수 있다. 쓰기 직전(같은 틱)에 다시 확인한다: 지워진 트립은 아무것도 쓰지 않는다.
+  const live = tripDataState(db, tripId);
+  if (live === 'deleted') return emptyResult('skipped', 'trip_deleted', before);
+  if (live === 'withdrawn') return doneTx(emptyResult('skipped', 'consent_withdrawn', before));
   const totalPoints = trace.matchedPoints + trace.unmatchedPoints;
   const unmatchedRatio = totalPoints > 0 ? trace.unmatchedPoints / totalPoints : 1;
   const matchedKm = [...trace.wayLengthsM.values()].reduce((a, b) => a + b, 0) / 1000;

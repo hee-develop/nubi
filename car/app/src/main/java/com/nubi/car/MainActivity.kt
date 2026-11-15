@@ -160,6 +160,7 @@ class MainActivity : Activity() {
 
     /** 주행 중 위 한 줄의 시군구 이름은 바뀐 뒤 5초 동안 이전 값을 유지한다(경계에서 깜빡이지 않게). */
     private val regionHold = HoldLast(5_000L)
+    private var regionHoldTrip: String? = null
 
     override fun onResume() {
         super.onResume()
@@ -372,7 +373,9 @@ class MainActivity : Activity() {
         // 주행 중 지도: 위 한 줄(기록 중 · 지금 시군구)만. 문제가 있을 때만 상태 이상 문구를 덧붙인다. 숫자·버튼·카드·QR 없음
         if (mode == MapMode.DRIVING) {
             v.drivingMapState.text = state
-            val rawRegion = drivingRegionText(regionHold.update(currentRegionName(map.repository.live, place.info.place?.displayName), System.currentTimeMillis()))
+            // 트립이 바뀌면 지난 트립의 지역 이름을 붙들지 않는다
+            engine.recordingLocalId.let { id -> if (id != regionHoldTrip) { regionHoldTrip = id; regionHold.reset() } }
+            val rawRegion = drivingRegionText(regionHold.update(currentRegionName(map.repository.live, place.info.place?.displayName), engine.nowMillis()))
             // 주행 규제 중 문자열 길이 제한: 넘으면 중간에서 자르지 않고 줄을 숨긴다(지역 이름이 잘려 오해를 부르지 않게)
             val region = rawRegion?.let { limitText(it, distractionOptimized, maxStringLength, statusLine = false) }
             v.drivingMapRegion.visibility = if (region == null) View.GONE else View.VISIBLE

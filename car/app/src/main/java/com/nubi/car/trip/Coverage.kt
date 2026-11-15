@@ -243,10 +243,10 @@ class CoverageTracker(
 
     /** 트립 종료 뒤 매칭 폴링이 끝났다(결과가 없어도). 정차 화면의 '지금 있는 곳' 단계를 다시 받는 데 쓴다. 워커 스레드에서 불린다. */
     @Volatile
-    var onTripSettled: () -> Unit = {}
+    var onTripSettled: (String?) -> Unit = {}
 
     /** 서버가 트립 종료를 받았다. 가장 최근 트립의 결과만 반영한다. */
-    fun onTripEnded(serverTripId: String) {
+    fun onTripEnded(serverTripId: String, localId: String? = null) {
         val gen = ++generation
         matching = MatchingLine.None
         run {
@@ -257,7 +257,7 @@ class CoverageTracker(
                 // 방문·숙박은 이 트립의 Start 때 확정됐을 수 있으니(사양 03 4장) 매칭이 끝난 뒤 도감을 다시 받는다.
                 if (line != MatchingLine.None) vehicleId()?.let { fetchRegions(it) }
                 try {
-                    onTripSettled()
+                    onTripSettled(localId)
                 } catch (t: Throwable) {
                     Log.w("NubiCoverage", "트립 종료 알림 예외: ${t.javaClass.simpleName}")
                 }

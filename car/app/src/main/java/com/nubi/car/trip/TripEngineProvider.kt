@@ -117,7 +117,7 @@ object TripEngineProvider {
         }
         val mapWorkers = Executors.newFixedThreadPool(2) { r -> Thread(r, "nubi-map-worker").apply { isDaemon = true } }
         val repo = MapRepository(mapApi, mapWorkers, { vehicle.vehicleId }, mapSchedule)
-        val livePoller = LivePoller(mapApi, mapWorkers, { uploader.liveTripId }, mapSchedule, repo)
+        val livePoller = LivePoller(mapApi, mapWorkers, { uploader.liveTripId }, mapSchedule, repo, localTripId = { engine.recordingLocalId })
         val screen = MapScreen(repo, livePoller)
         mapScreen = screen
         uploader.onPointsUploaded = { livePoller.kick() }
@@ -127,9 +127,9 @@ object TripEngineProvider {
             coverageStarted()
             screen.onTripStarted()
         }
-        coverage.onTripSettled = {
+        coverage.onTripSettled = { settledLocalId ->
             place.refresh()
-            screen.onTripSettled()
+            screen.onTripSettled(settledLocalId, engine.recordingLocalId)
         }
         return engine
     }
