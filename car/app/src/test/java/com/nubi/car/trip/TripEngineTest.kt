@@ -42,6 +42,157 @@ class TripEngineTest {
     }
 
     @Test
+    fun 기록_멈춤이면_샘플을_버리고_새_트립을_시작하지_않는다() {
+        vehicle.vehicleId = "hash"
+        val e = engine()
+        e.recordingPaused = true
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.drive(6)
+        assertEquals(TripState.IDLE, e.status.state)
+        assertEquals(0, e.status.sampleCount)
+        assertNull(e.status.lastLocation)
+        assertEquals("기어는 계속 읽는다", Gear.D, e.status.gear)
+        scheduler.advance(120_000)
+        assertTrue(server.events.isEmpty())
+        // 풀리면 다시 기록한다
+        e.recordingPaused = false
+        e.drive(4, firstIndex = 10)
+        assertEquals(TripState.RECORDING, e.status.state)
+    }
+
+    @Test
+    fun 데이터_삭제_뒤에는_멈춤을_켜고_저장한_뒤_진행_중_트립과_큐를_모두_버린다() {
+        vehicle.vehicleId = "hash"
+        val failing = FakeServer().apply { onPoints = { _, _ -> throw HttpFailure(503, "down") } } // 업로드가 안 돼 큐가 쌓인다
+        val e = engine(uploader(failing))
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.drive(8)
+        assertEquals(TripState.RECORDING, e.status.state)
+        assertTrue(e.status.pendingPoints > 0)
+        assertNotNull(e.recordingLocalId)
+        e.purgeAfterDataDeletion()
+        assertTrue("멈춤은 즉시 켜진다", e.recordingPaused)
+        assertEquals("저장도 한다", "1", store.getString(TripEngine.KEY_PAUSED))
+        scheduler.runPosted()
+        assertEquals(0, e.status.pendingPoints)
+        assertEquals(TripState.IDLE, e.status.state)
+        assertNull(e.recordingLocalId)
+        assertEquals(0, e.status.sampleCount)
+        // 이후 위치 샘플은 버려져 새 트립이 시작되지 않는다
+        e.drive(6, firstIndex = 20)
+        assertEquals(TripState.IDLE, e.status.state)
+        assertTrue(failing.events.none { it.startsWith("end") })
+    }
+
+    @Test
+    fun 기록_멈춤을_켜면_진행_중_트립을_End로_먼저_끝내고_이후_샘플은_버린다() {
+        vehicle.vehicleId = "hash"
+        val e = engine()
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.drive(8)
+        assertEquals(TripState.RECORDING, e.status.state)
+        e.pauseRecording()
+        scheduler.runPosted()
+        scheduler.advance(5_000)
+        assertTrue(e.recordingPaused)
+        assertEquals("멈춤 켜기 순간 진행 중 트립이 End로 끝난다", 1, server.ended.size)
+        assertTrue(server.events.any { it.startsWith("end ") })
+        assertTrue(e.status.state != TripState.RECORDING)
+        // 이후 샘플은 버려져 새 트립이 시작되지 않는다
+        val creates = server.createCalls
+        e.drive(6, firstIndex = 30)
+        assertEquals(creates, server.createCalls)
+        assertTrue(e.status.state != TripState.RECORDING)
+    }
+
+    @Test
+    fun 멈춤으로_끝난_트립의_End_시각은_마지막_채택_샘플_시각이고_멈춤_뒤_점은_큐에_없다() {
+        vehicle.vehicleId = "hash"
+        val e = engine()
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.drive(8)
+        e.pauseRecording()
+        scheduler.runPosted()
+        scheduler.advance(5_000)
+        val before = server.pointsByTrip.values.flatMap { it.values }.map { it.sample.tsMillis }
+        assertTrue(before.isNotEmpty())
+        assertEquals("End 시각 = 마지막으로 채택한 샘플 시각", before.max(), server.ended.values.single())
+        // 멈춤 뒤 샘플은 큐에도 서버에도 없다
+        e.drive(6, firstIndex = 40)
+        scheduler.advance(120_000)
+        val after = server.pointsByTrip.values.flatMap { it.values }.map { it.sample.tsMillis }
+        assertEquals(before.size, after.size)
+        assertEquals(1, server.ended.size)
+        assertEquals(0, e.status.pendingPoints)
+    }
+
+    @Test
+    fun 서버가_버린_트립이_지금_기록_중이면_엔진이_그_트립을_끝낸다() {
+        vehicle.vehicleId = "hash"
+        val e = engine()
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.drive(8)
+        val id = e.recordingLocalId!!
+        e.endActiveTrip("다른-트립")
+        scheduler.runPosted()
+        assertEquals("다른 localId면 건드리지 않는다", TripState.RECORDING, e.status.state)
+        e.endActiveTrip(id)
+        scheduler.runPosted()
+        assertTrue(e.status.state != TripState.RECORDING)
+        assertNull(e.recordingLocalId)
+    }
+
+    @Test
+    fun 데이터_삭제_뒤_지연_콜백이_옛_트립으로_큐를_다시_채우지_않는다() {
+        vehicle.vehicleId = null // 차량 ID를 아직 몰라 Start가 재시도 대기 중
+        val e = engine()
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.drive(4)
+        e.purgeAfterDataDeletion()
+        scheduler.runPosted()
+        scheduler.advance(30_000) // VIN 대기가 지나 UUID로 대체되는 시각
+        assertEquals(0, server.createCalls)
+        assertEquals(0, e.status.pendingPoints)
+    }
+
+    @Test
+    fun 오도미터_응답이_삭제_뒤에_늦게_와도_큐가_비어_있다() {
+        vehicle.vehicleId = "hash"
+        vehicle.deferOdometer = true
+        val e = engine()
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.drive(4)
+        e.purgeAfterDataDeletion()
+        scheduler.runPosted()
+        vehicle.releaseOdometer()
+        scheduler.runPosted()
+        scheduler.advance(5_000)
+        assertEquals(0, server.createCalls)
+    }
+
+    @Test
+    fun 기어가_바뀌면_알린다() {
+        val e = engine()
+        val seen = ArrayList<Gear?>()
+        e.onGearChange = { seen.add(it) }
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        val viaListener = ArrayList<Gear?>()
+        e.addGearListener { viaListener.add(it) }
+        e.onGear(Gear.P)
+        scheduler.runPosted()
+        assertEquals(listOf<Gear?>(Gear.D, Gear.P), seen)
+        assertEquals(listOf<Gear?>(Gear.D, Gear.P), viaListener)
+    }
+
+    @Test
     fun 놀_때는_타이머가_하나도_돌지_않는다() {
         val e = engine()
         e.onServiceStart()

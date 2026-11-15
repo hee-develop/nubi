@@ -7,6 +7,17 @@ import java.util.concurrent.atomic.AtomicInteger
 
 enum class DrainKind { OK, RETRY, HELD }
 
+/**
+ * 데이터 삭제 세대값(평문 저장소). 삭제 때 [bump]로 올리고 큐 파일을 비운 것이 확인되면 [markFiles]로 파일 세대를 맞춘다.
+ * 로드 전에 삭제했거나 임시 키(memoryOnly)여서 파일을 못 지웠다면 파일 세대가 뒤처져, 다음 로드가 그 파일(큐·server-ids·dead-letter)을 폐기한다.
+ */
+interface PurgeEpochs {
+    fun purgeEpoch(): Long
+    fun filesEpoch(): Long
+    fun bump(): Long
+    fun markFiles(epoch: Long)
+}
+
 /** [HELD]는 서버가 요청 자체를 거절해(Start 4xx 등) 항목을 버리지 않고 보류한 트립이 남은 경우다. */
 data class DrainResult(val kind: DrainKind, val uploadedPoints: Int, val message: String, val endedTrips: Int = 0) {
     val ok: Boolean get() = kind == DrainKind.OK
@@ -41,6 +52,7 @@ class Uploader(
     private val compactEvery: Int = 1_000,
     private val deadLetterMax: Int = 5_000,
     private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 },
+    private val epochs: PurgeEpochs? = null,
 ) {
     /** 서버에 만든 트립의 서버 id와, 404일 때 다시 만들 Start, 마지막으로 올린 점의 시각. */
     private data class Registration(val serverId: String, val start: QueueEntry.Start, val lastPointTs: Long?)
@@ -93,6 +105,19 @@ class Uploader(
     var lastPointsUploadedAtMs = 0L
         private set
 
+    /** 서버가 기록 멈춤·동의 철회로 트립을 받지 않았다(PausedByServer). 화면 쪽이 서버 설정을 다시 읽어 로컬 멈춤을 맞춘다. 워커 스레드에서 불린다. */
+    @Volatile
+    var onPausedByServer: (localId: String?) -> Unit = {}
+
+    /** paused로 버린 트립의 localId(상한 [TOMBSTONE_MAX], 오래된 것부터 잊는다). 이후 같은 localId 항목은 dead-letter 없이 조용히 버린다. */
+    private val tombstones = object : LinkedHashSet<String>() {
+        override fun add(element: String): Boolean {
+            val r = super.add(element)
+            while (size > TOMBSTONE_MAX) remove(first())
+            return r
+        }
+    }
+
     /** 점 업로드가 성공할 때마다(주행 지도가 그 직후 잠정 색칠을 한 번 묻는다). 예외는 업로드에 영향을 주지 않는다. 워커 스레드에서 불린다. */
     @Volatile
     var onPointsUploaded: () -> Unit = {}
@@ -143,6 +168,15 @@ class Uploader(
             }
             memoryOnly = !setup.persistent
             discardedLines = setup.discardedLines
+            // 삭제 세대보다 오래된 파일(삭제 때 못 지운 큐·server-ids·dead-letter)은 읽지 않고 폐기한다
+            epochs?.let { ep ->
+                if (ep.filesEpoch() < ep.purgeEpoch()) {
+                    // 모두 지웠을 때만 세대를 맞춘다(하나라도 못 지우면 다음 로드가 다시 폐기한다)
+                    val all = listOf(queueFile, idsFile, deadLetterFile).map { deleteFile(it) }.all { it }
+                    if (all) ep.markFiles(ep.purgeEpoch())
+                    Log.i(TAG, "삭제 전 큐 파일 폐기(전부 지움=$all)")
+                }
+            }
             queue = TripQueue(queueFile, setup.cipher)
             ids = EncryptedLines(idsFile, setup.cipher)
             deadLetters = EncryptedLines(deadLetterFile, setup.cipher)
@@ -211,6 +245,12 @@ class Uploader(
      */
     fun enqueue(vararg added: QueueEntry): Boolean {
         if (added.isEmpty()) return true
+        // paused로 버린 트립의 뒤늦은 항목(점·End)은 dead-letter에 넣지 않고 버린다
+        val kept = synchronized(lock) { added.filter { it.localId !in tombstones } }
+        if (kept.size != added.size) {
+            if (kept.isEmpty()) return true
+            return enqueue(*kept.toTypedArray())
+        }
         var ok = true
         val canEncrypt = loaded && !memoryOnly
         val prepared = ArrayList<Pair<QueueEntry, String?>>(added.size)
@@ -296,7 +336,69 @@ class Uploader(
             early.any { it is QueueEntry.End && it.localId == localId } ||
             pending.any { it.first is QueueEntry.End && it.first.localId == localId }
 
-    fun clear() {
+    /** 한 트립의 큐 항목·서버 등록·보류 표시를 모두 버린다(서버가 paused로 거절했을 때). 버린 항목 수를 돌려준다. */
+    private fun dropTrip(localId: String): Int {
+        var n = 0
+        synchronized(lock) {
+            val it = entries.iterator()
+            while (it.hasNext()) {
+                val e = it.next()
+                if (e.localId == localId) {
+                    it.remove()
+                    n++
+                }
+            }
+            points.set(entries.count { it is QueueEntry.Point })
+            total.set(entries.size)
+            registrations.remove(localId)
+            held.remove(localId)
+            tombstones.add(localId)
+            structVersion++
+            dirty = true
+        }
+        saveRegistrations()
+        try {
+            onPausedByServer(localId)
+        } catch (t: Throwable) {
+            Log.w(TAG, "paused 알림 예외: ${t.javaClass.simpleName}")
+        }
+        return n
+    }
+
+    /**
+     * 사용자가 데이터를 지웠다(동의 철회): 큐·등록·dead-letter를 모두 지운다(tombstone도 비운다). 삭제 세대값을 먼저 올리고(평문), 파일을 비운 것이 확인되면 파일 세대를 맞춘다.
+     * 로드 전이거나 임시 키(memoryOnly)여서 파일을 못 지웠으면 세대가 뒤처져 다음 로드가 그 파일을 폐기한다. dead-letter가 아직 열리지 않았어도 파일을 직접 지운다.
+     */
+    fun clearAll() {
+        val epoch = epochs?.bump()
+        synchronized(lock) { tombstones.clear() }
+        var filesCleared = clear() // 로드 전·임시 키면 false
+        synchronized(deadLock) {
+            try {
+                if (::deadLetters.isInitialized && !memoryOnly) {
+                    deadLetters.rewrite(emptyList())
+                } else {
+                    filesCleared = false
+                }
+            } catch (t: Exception) {
+                filesCleared = false
+                Log.w(TAG, "dead-letter 비우기 실패: ${t.javaClass.simpleName}")
+            }
+        }
+        if (!filesCleared) {
+            // 아직 못 읽은(또는 못 읽는) 파일은 지울 수 있으면 지운다. 하나라도 못 지우면 세대를 맞추지 않아 다음 로드가 다시 폐기한다
+            filesCleared = listOf(queueFile, idsFile, deadLetterFile).map { deleteFile(it) }.all { it }
+        }
+        if (epoch != null && filesCleared) epochs?.markFiles(epoch)
+        Log.i(TAG, "큐 비움 pending=${pendingEntries}")
+    }
+
+    /** 파일을 지운다. 이미 없거나 지웠으면 true, 못 지웠으면 false. */
+    private fun deleteFile(f: File): Boolean = !f.exists() || (runCatching { f.delete() }.getOrDefault(false) && !f.exists())
+
+    /** 큐·등록을 비운다. 파일까지 비웠으면 true(로드 전이거나 쓰기가 실패하면 false). */
+    fun clear(): Boolean {
+        var ok = true
         synchronized(lock) {
             entries.clear()
             early.clear()
@@ -311,13 +413,15 @@ class Uploader(
                 try {
                     if (!memoryOnly) queue.rewrite(emptyList())
                 } catch (t: Exception) {
+                    ok = false
                     Log.w(TAG, "큐 비우기 실패: ${t.javaClass.simpleName}")
                 }
             } else {
                 clearAfterLoad = true
+                ok = false
             }
         }
-        saveRegistrations()
+        return saveRegistrations() && ok
     }
 
     /**
@@ -507,12 +611,15 @@ class Uploader(
                                 }
                             }
                             if (save) saveRegistrations()
-                            ended++
                             if (liveTripId == step.serverId) liveTripId = null
-                            try {
-                                onTripEnded(step.serverId, step.end.localId)
-                            } catch (t: Throwable) {
-                                Log.w(TAG, "종료 알림 예외: ${t.javaClass.simpleName}")
+                            // 그 사이 큐가 비워졌다면(데이터 삭제) 삭제된 트립을 폴링하지 않게 종료 알림을 부르지 않는다
+                            if (save) {
+                                ended++
+                                try {
+                                    onTripEnded(step.serverId, step.end.localId)
+                                } catch (t: Throwable) {
+                                    Log.w(TAG, "종료 알림 예외: ${t.javaClass.simpleName}")
+                                }
                             }
                         }
                         is Step.Orphan -> {
@@ -525,6 +632,17 @@ class Uploader(
                         compact()
                         removed = 0
                     }
+                } catch (e: PausedByServer) {
+                    val pausedAt = e.pausedAtMillis
+                    val startedAt = (step as? Step.Create)?.start?.startedAtMillis
+                    if (pausedAt != null && startedAt != null && startedAt < pausedAt) {
+                        // 멈춤 시각보다 앞에 시작한 트립이다(서버 응답이 시계·순서 경쟁으로 어긋난 경우): 버리지 않고 나중에 다시 시도한다
+                        Log.i(TAG, "paused 응답이지만 멈춤 전에 시작한 트립이라 재시도")
+                        return DrainResult(DrainKind.RETRY, uploaded, "RETRY paused-before-start")
+                    }
+                    // 멈춤 뒤에 시작한 트립이거나 동의 철회: 이 트립의 큐 항목·등록을 재시도 없이 버린다(다른 트립은 계속)
+                    Log.i(TAG, "서버가 기록을 받지 않아(paused) 트립을 버림")
+                    removed += dropTrip(step.firstEntry.localId)
                 } catch (e: HttpFailure) {
                     val action = try {
                         classify(step, e, recreated)
@@ -652,6 +770,8 @@ class Uploader(
                 else -> Action.Hold(id, "HELD HTTP $s")
             }
             is Step.Alias -> when {
+                // 401·403은 인증 문제라 다시 보내면 달라질 수 있다: 버리지 않고 보류한다
+                s == 401 || s == 403 -> Action.Hold(id, "HELD HTTP $s")
                 // 400·409 등은 다시 보내도 같으니 dead-letter로 격리한다(보류하면 영영 재시도한다). 404(서버가 아직 모름)는 보류.
                 s == 404 -> Action.Hold(id, "HELD HTTP $s")
                 else -> Action.Isolate
@@ -779,8 +899,8 @@ class Uploader(
     }
 
     /** lock 밖에서 부른다. lock 안에서 JSON만 만들고, 암호화·fsync·rename은 [idsLock]으로 순서만 지킨다. */
-    private fun saveRegistrations() {
-        if (memoryOnly) return
+    private fun saveRegistrations(): Boolean {
+        if (memoryOnly) return true
         val lines: List<String>
         val version: Long
         synchronized(lock) {
@@ -798,17 +918,20 @@ class Uploader(
             version = ++idsVersion
         }
         synchronized(idsLock) {
-            if (version < idsWritten) return // 더 새 스냅샷이 이미 저장됐다
-            try {
+            if (version < idsWritten) return true // 더 새 스냅샷이 이미 저장됐다
+            return try {
                 ids.rewrite(lines)
                 idsWritten = version
+                true
             } catch (t: Exception) {
                 Log.w(TAG, "server-ids 저장 실패: ${t.javaClass.simpleName}")
+                false
             }
         }
     }
 
     private companion object {
         const val TAG = "NubiUpload"
+        const val TOMBSTONE_MAX = 200
     }
 }

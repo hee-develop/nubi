@@ -57,8 +57,12 @@ env:
 - extendedWaitUntil:
     visible: '안 가 본 이웃'
     timeout: 30000
-- assertVisible: '예시 항목'
+# 지역 소개(서버 /regions/:code/intro)는 이웃 조회보다 조금 늦게 온다. 키가 없는 서버는 sample=true라 '예시' 표기와 출처가 붙는다
+- extendedWaitUntil:
+    visible: '예시 항목'
+    timeout: 30000
 - assertVisible: '자료: 한국관광공사\(예시\)'
+- assertVisible: '지금 여기: .+'
 - assertVisible: '길안내'
 - takeScreenshot: ${SHOT_DIR}/22-region-visit
 

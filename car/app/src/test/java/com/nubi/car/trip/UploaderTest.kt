@@ -2,6 +2,7 @@ package com.nubi.car.trip
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -766,6 +767,219 @@ class UploaderTest {
         u2.enqueue(QueueEntry.Alias("c", "d"))
         assertEquals(DrainKind.RETRY, u2.drain().kind)
         assertEquals(1, u2.pendingEntries)
+    }
+
+    @Test
+    fun 서버가_paused로_거절하면_그_트립만_재시도_없이_버린다() {
+        val server = FakeServer().apply { onCreate = { if (it.localId == "a") throw PausedByServer("paused") } }
+        val u = uploader(server)
+        u.enqueue(start("a"), *points("a", 0..2), QueueEntry.End("a", 3, null))
+        u.enqueue(start("b"), *points("b", 0..1), QueueEntry.End("b", 4, null))
+        val r = u.drain()
+        assertEquals(DrainKind.OK, r.kind)
+        assertEquals("b는 정상 업로드", listOf(0, 1), server.seqs("b"))
+        assertEquals("a의 Start 한 번만 시도하고 항목은 모두 버린다", 2, server.createCalls)
+        assertEquals(0, u.pendingEntries)
+        assertEquals(0, u.pendingPoints)
+        assertEquals("dead-letter로 보내지 않고 그냥 버린다", 0, u.readDeadLetters().size)
+        assertEquals(DrainKind.OK, u.drain().kind)
+        assertEquals(2, server.createCalls)
+    }
+
+    @Test
+    fun 종료_요청이_paused면_그_트립의_등록과_남은_항목을_버리고_종료_알림을_부르지_않는다() {
+        val server = FakeServer().apply { onEnd = { _, _ -> throw PausedByServer("paused") } }
+        val u = uploader(server)
+        var ended = 0
+        u.onTripEnded = { _, _ -> ended++ }
+        u.enqueue(start("a"), *points("a", 0..1), QueueEntry.End("a", 2, null))
+        assertEquals(DrainKind.OK, u.drain().kind)
+        assertEquals(0, u.pendingEntries)
+        assertEquals(0, ended)
+        assertEquals(1, server.createCalls)
+        assertEquals(DrainKind.OK, u.drain().kind)
+        assertEquals(1, server.createCalls)
+    }
+
+    private fun aliasHeld(code: Int) {
+        val server = FakeServer().apply { onAlias = { throw HttpFailure(code, "auth") } }
+        val u = uploader(server)
+        u.enqueue(QueueEntry.Alias("a", "b"))
+        u.drain()
+        assertEquals("HTTP $code: 항목이 남는다", 1, u.pendingEntries)
+        assertEquals("dead-letter로 가지 않는다", 0, u.readDeadLetters().size)
+    }
+
+    @Test
+    fun alias는_401이면_격리하지_않고_보류한다() = aliasHeld(401)
+
+    @Test
+    fun alias는_403이면_격리하지_않고_보류한다() = aliasHeld(403)
+
+    @Test
+    fun paused로_버린_트립의_뒤늦은_항목은_dead_letter_없이_버리고_멈춤_알림을_부른다() {
+        val server = FakeServer().apply { onCreate = { throw PausedByServer("paused") } }
+        val u = uploader(server)
+        var notified = 0
+        u.onPausedByServer = { notified++ }
+        u.enqueue(start("a"), *points("a", 0..1))
+        u.drain()
+        assertEquals(1, notified)
+        // 엔진이 같은 트립의 점·End를 뒤늦게 계속 넣는다
+        u.enqueue(*points("a", 2..5), QueueEntry.End("a", 9, null))
+        assertEquals(0, u.pendingEntries)
+        assertEquals(0, u.readDeadLetters().size)
+        u.drain()
+        assertEquals("다시 서버를 부르지 않는다", 1, server.createCalls)
+        // 다른 트립은 정상
+        server.onCreate = {}
+        u.enqueue(start("b"), *points("b", 0..1))
+        u.drain()
+        assertEquals(listOf(0, 1), server.seqs("b"))
+    }
+
+    @Test
+    fun paused_응답은_멈춤_뒤에_시작한_트립만_버리고_멈춤_전에_시작했으면_다시_시도한다() {
+        // 멈춤 시각(1000)보다 앞에 시작한 트립(start 0)이 paused를 받았다: 버리지 않고 재시도
+        val early = FakeServer().apply { onCreate = { throw PausedByServer("paused", pausedAtMillis = 1_000) } }
+        val u1 = uploader(early)
+        u1.enqueue(start("a", startedAt = 0), *points("a", 0..1))
+        assertEquals(DrainKind.RETRY, u1.drain().kind)
+        assertEquals("항목이 남는다", 3, u1.pendingEntries)
+        // 멈춤 뒤(2000)에 시작한 트립은 버린다
+        val late = FakeServer().apply { onCreate = { throw PausedByServer("paused", pausedAtMillis = 1_000) } }
+        val ids = ArrayList<String?>()
+        val u2 = newUploader(tmp.newFolder("late"), late, cipher)
+        u2.onPausedByServer = { ids.add(it) }
+        u2.enqueue(start("b", startedAt = 2_000), *points("b", 0..1))
+        assertEquals(DrainKind.OK, u2.drain().kind)
+        assertEquals(0, u2.pendingEntries)
+        assertEquals("버린 트립의 localId를 알린다", listOf<String?>("b"), ids)
+        // 멈춤 시각을 모르는(동의 철회) paused는 항상 버린다
+        val withdrawn = FakeServer().apply { onCreate = { throw PausedByServer("paused") } }
+        val u3 = newUploader(tmp.newFolder("wd"), withdrawn, cipher)
+        u3.enqueue(start("c", startedAt = 0))
+        u3.drain()
+        assertEquals(0, u3.pendingEntries)
+    }
+
+    @Test
+    fun 파일을_못_지우면_세대를_맞추지_않아_다음_로드에서_다시_폐기한다() {
+        val epochs = MemEpochs()
+        val dir = tmp.newFolder("undeletable")
+        // 큐 파일 자리에 비어 있지 않은 디렉터리: 지울 수 없다
+        val q = java.io.File(dir, "queue.jsonl").apply { mkdir() }
+        java.io.File(q, "x").writeText("x")
+        epochs.purge = 1
+        newUploader(dir, FakeServer(), cipher, epochs = epochs)
+        assertEquals("전부 지우지 못했으니 세대를 맞추지 않는다", 0L, epochs.files)
+        // 막던 것을 치우면 다음 로드가 폐기하고 세대를 맞춘다
+        q.listFiles()!!.forEach { it.delete() }
+        q.delete()
+        newUploader(dir, FakeServer(), cipher, epochs = epochs)
+        assertEquals(1L, epochs.files)
+    }
+
+    @Test
+    fun clearAll은_server_ids를_못_비우면_세대를_맞추지_않는다() {
+        val epochs = MemEpochs()
+        val dir = tmp.newFolder("ids-fail")
+        val ids = java.io.File(dir, "server-ids.jsonl").apply { mkdir() }
+        java.io.File(ids, "x").writeText("x") // 쓸 수도 지울 수도 없다
+        val u = newUploader(dir, FakeServer(), cipher, epochs = epochs)
+        u.enqueue(start("t"), *points("t", 0..1))
+        u.clearAll()
+        assertEquals(0, u.pendingEntries)
+        assertEquals("파일을 다 지우지 못했으니 다음 로드가 다시 폐기한다", 0L, epochs.files)
+        assertEquals(1L, epochs.purge)
+    }
+
+    @Test
+    fun tombstone은_상한을_넘으면_오래된_것부터_잊는다() {
+        val server = FakeServer().apply { onCreate = { throw PausedByServer("paused") } }
+        val u = uploader(server)
+        for (i in 0 until 205) {
+            u.enqueue(start("t$i"))
+            u.drain()
+        }
+        // 가장 오래된 localId는 잊혔다(새 항목으로 다시 받아들인다)
+        server.onCreate = {}
+        u.enqueue(start("t0"))
+        assertEquals(1, u.pendingEntries)
+        // 최근 것은 아직 tombstone
+        u.enqueue(start("t204"))
+        assertEquals(1, u.pendingEntries)
+    }
+
+    @Test
+    fun End_전송_사이에_큐가_비워지면_종료_알림을_부르지_않는다() {
+        val server = FakeServer()
+        val u = uploader(server)
+        var ended = 0
+        u.onTripEnded = { _, _ -> ended++ }
+        server.onEnd = { _, _ -> u.clear() } // 응답을 기다리는 사이 데이터 삭제로 큐가 비워졌다
+        u.enqueue(start("a"), QueueEntry.End("a", 3, null))
+        u.drain()
+        assertEquals("삭제된 트립을 폴링하지 않는다", 0, ended)
+    }
+
+    @Test
+    fun 로드_전에_삭제하면_삭제_이전_파일은_다음_로드에서_폐기된다() {
+        val epochs = MemEpochs()
+        val dir = tmp.newFolder("shared")
+        val a = newUploader(dir, FakeServer(), cipher, epochs = epochs)
+        a.enqueue(start("old"), *points("old", 0..3))
+        a.compact()
+        // 삭제 때 세대는 올라갔지만 파일은 못 지웠다(로드 전·임시 키 상황 대용)
+        epochs.purge += 1
+        val b = newUploader(dir, FakeServer(), cipher, epochs = epochs)
+        assertEquals("삭제 전 큐는 되살아나지 않는다", 0, b.pendingEntries)
+        assertEquals(epochs.purge, epochs.files)
+        assertTrue(b.readDeadLetters().isEmpty())
+    }
+
+    @Test
+    fun 파일_세대가_같으면_저장된_큐를_그대로_읽는다() {
+        val epochs = MemEpochs()
+        val dir = tmp.newFolder("same")
+        val a = newUploader(dir, FakeServer(), cipher, epochs = epochs)
+        a.enqueue(start("keep"), *points("keep", 0..2))
+        a.compact()
+        val b = newUploader(dir, FakeServer(), cipher, epochs = epochs)
+        assertEquals(4, b.pendingEntries)
+    }
+
+    @Test
+    fun clearAll은_dead_letter가_열리기_전에도_파일을_지우고_세대를_맞춘다() {
+        val epochs = MemEpochs()
+        val dir = tmp.newFolder("dl")
+        val server = FakeServer().apply { onAlias = { throw HttpFailure(409, "conflict") } }
+        val a = newUploader(dir, server, cipher, epochs = epochs)
+        a.enqueue(QueueEntry.Alias("x", "y"))
+        a.drain()
+        assertEquals(1, a.readDeadLetters().size)
+        val b = newUploader(dir, FakeServer(), cipher, load = false, epochs = epochs) // 로드 전
+        b.clearAll()
+        assertFalse("dead-letter 파일이 지워졌다", java.io.File(dir, "dead-letter.jsonl").exists())
+        assertEquals(epochs.purge, epochs.files)
+        val c = newUploader(dir, FakeServer(), cipher, epochs = epochs)
+        assertEquals(0, c.readDeadLetters().size)
+        assertEquals(0, c.pendingEntries)
+    }
+
+    @Test
+    fun clearAll은_큐와_dead_letter와_서버_등록을_모두_비운다() {
+        val server = FakeServer().apply { onAlias = { throw HttpFailure(409, "conflict") } }
+        val u = uploader(server)
+        u.enqueue(QueueEntry.Alias("a", "b"), start("t"), *points("t", 0..2))
+        u.drain()
+        assertEquals(1, u.readDeadLetters().size)
+        u.enqueue(start("t2"), *points("t2", 0..1))
+        u.clearAll()
+        assertEquals(0, u.pendingEntries)
+        assertEquals(0, u.pendingPoints)
+        assertEquals(0, u.readDeadLetters().size)
+        assertNull(u.liveTripId)
     }
 
     @Test

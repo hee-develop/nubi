@@ -109,6 +109,16 @@
 ## 테이블 (`schema-ext.ts`)
 `way_revived`(`cov` 열: 되살린 길이 = 유효 길이 x 커버리지, 같은 차량(alias 포함)의 이전 마지막 시각 기준 UPDATE·INSERT 트리거, 중복 방지 유니크), `coverage_snapshots`, `accounts`, `auth_tokens`(`scope`·`expires_at`·`revoked_at`), `link_codes`(`attempts`), `guest_sessions`, `guest_trip_ways`·`guest_trip_cache`, `vehicle_settings`, `share_cards`(`png`), `intro_cache`(`fetched_at`)·`intro_calls`, `courses`, `certificates`. 테이블·열 이름에 `vin` 부분 문자열이 들어가면 기존 'VIN 미저장' 테스트가 실패하므로 피한다(그래서 `drive_map`).
 
+## 기록 멈춤의 정의(2026-11-12 확정)
+**기록 멈춤 = 이후 기록만 멈춘다**(plan 11-2 '일시 중지 요구권'). 멈춤 판정은 요청이 **도착한 시각이 아니라 기록된 시각**(트립 `startedAt`, 점 `ts`)이 멈춤 구간 안인지로 한다. 멈춤 전에 기록됐지만 늦게(오프라인 백로그 등) 올라온 데이터는 받아 정산하고, 폰에서 멈췄다 켠 구간의 점은 올라오는 시점과 무관하게 제외한다. 이미 쌓인 기록은 그대로이며 지우는 일은 '데이터 지우기'(동의 철회)가 맡는다.
+- 구간 테이블 `recording_pauses(vehicle_id, paused_at, resumed_at)`(정본 차량 기준, `schema-ext.ts`). `PUT /vehicles/:id/settings`가 `recordingPaused`를 켜면 구간을 열고(열린 구간이 있으면 그대로) 끄면 닫는다. 데이터 삭제 때는 옛 구간을 지우고 새 구간을 연다.
+- **의도 시각**: `recordingPaused`를 바꾸는 요청은 `intentAt`(ISO, 그 기기 시계)을 실을 수 있다. 구간의 시작·끝은 `intentAt`이고(없으면 서버 시각), **마지막 멈춤 상태 변경 시각보다 오래된 `intentAt`은 무시하고 현재 값을 돌려준다**(다른 기기가 더 늦게 바꾼 상태를 되돌리지 않는다. 오래된 켜기를 보낸 차량은 `recordingPaused:false` 응답을 받으면 대기를 버리고 서버 값을 따른다). 기기 시계가 서로 다르면 기기 간 순서는 그 시계 차이만큼 어긋날 수 있다.
+- `POST /trips`(새 트립): 동의 철회면 항상 막고, 멈춤이면 `startedAt`이 열린·닫힌 구간 **안**일 때만 막는다(200 `{ paused:true, pausedAt }`, 행 없음). 멈춤 전에 시작한 트립은 받는다. 같은 `(vehicleId, localId)`가 **정본·alias 어느 ID로든 이미 있으면** 차단보다 멱등 응답(기존 tripId)이 먼저다(다른 ID로 만든 행이면 그 tripId를 그대로 돌려주고 중복 행을 만들지 않는다).
+- `POST /trips/:id/points`: 점마다 `ts`가 구간 안이면 그 점만 버리고 나머지는 저장한다. 응답은 `{ accepted, duplicated, dropped? }`, 전부 구간 안이면 `{ accepted:0, duplicated:0, paused:true, dropped }`. 동의 철회면 전부 버린다(`paused:true`).
+- `POST /trips/:id/end`: **동의 철회일 때만** 막는다(200 `{ paused:true }`). 단순 멈춤이면 End를 받아 정산(매칭 큐)한다.
+- 차량 업로더는 `POST /trips`가 `paused`면 그 트립이 **멈춤 뒤에 시작한 경우에만**(`startedAt >= pausedAt` 또는 `pausedAt` 없음=철회) 큐에서 버리고, 점 응답이 `paused`·`dropped > 0`이면 차량도 즉시 멈춘다(서버 설정을 다시 읽는다).
+- 구현은 `routes/account.ts`의 사전 미들웨어이고(`/trips`보다 앞) 라우트(`trips.ts`)는 그대로다(점 필터는 같은 본문 객체를 걸러서 넘긴다).
+
 ## 한계
 - 기록 멈춤은 서버에서 **점 업로드를 저장하지 않는 것**까지만 한다(트립 시작·종료는 받는다). 차량이 설정을 읽어 멈추는 쪽은 T4.
 - 게스트 도로는 '차량이 인정한 way ∩ 겹친 점 30m 이내'라서 차량이 그 way를 인정하지 않았으면(매칭 실패 등) 게스트도 못 받는다. 점 간격이 200m를 넘는 구간은 이어 보지 않는다.

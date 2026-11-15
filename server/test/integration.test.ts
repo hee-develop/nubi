@@ -95,16 +95,17 @@ describe('T1 trip_live* × T2 데이터 삭제·기록 멈춤', () => {
     const fetchFn = fakeValhalla(() => fixture);
     const e = extApp({ liveMatching: true, valhalla: { fetchFn } });
     const t = await startTrip(e, 'v-pause');
-    await call(e, '/vehicles/v-pause/settings', put({ recordingPaused: true }));
+    // 멈춤 판정은 기록된 시각 기준: 점 시각(2026-11-09 00:00~)이 멈춤 구간 안이면 버린다
+    await call(e, '/vehicles/v-pause/settings', put({ recordingPaused: true, intentAt: '2026-11-09T00:00:00Z' }));
     const up = await call(e, `/trips/${t}/points`, post('', { points: makePoints(30) }));
-    expect(up.body).toEqual({ accepted: 0, duplicated: 0, paused: true });
+    expect(up.body).toEqual({ accepted: 0, duplicated: 0, paused: true, dropped: 30 });
     await e.app.live.idle();
     expect(fetchFn.calls.length).toBe(0);
     expect((await call(e, `/trips/${t}/live`)).body).toEqual({ status: 'idle', upToSeq: -1, ways: [], paused: true });
     expect(e.db.prepare('SELECT COUNT(*) AS n FROM trip_live_ways').get()).toEqual({ n: 0 });
     // 동의 철회(데이터 삭제)도 같은 차단
-    await call(e, '/vehicles/v-pause/settings', put({ recordingPaused: false }));
-    await call(e, `/trips/${t}/points`, post('', { points: makePoints(30) }));
+    await call(e, '/vehicles/v-pause/settings', put({ recordingPaused: false, intentAt: '2026-11-09T01:00:00Z' }));
+    await call(e, `/trips/${t}/points`, post('', { points: makePoints(30, 25, 37.5665, 126.978, 10) }));
     await e.app.live.idle();
     expect(fetchFn.calls.length).toBeGreaterThan(0);
     const live = await call(e, `/trips/${t}/live`);

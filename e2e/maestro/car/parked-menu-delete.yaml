@@ -1,0 +1,53 @@
+# 정차 메뉴 E2E 2부(사양 05d): 데이터 지우기 2단계 확인과 삭제 뒤 상태. parked-menu 다음에 돈다(그 flow가 만든 트립은 서버 검증 뒤 이 flow가 지운다).
+appId: com.nubi.car
+name: 정차 메뉴(데이터 지우기)
+env:
+  SHOT_DIR: e2e/output/car
+---
+- launchApp
+- openLink: nubi-debug://signal?reset=1&vin=${APP_VIN}
+- extendedWaitUntil:
+    visible: '대기'
+    timeout: 20000
+- openLink: nubi-debug://signal?gear=P
+- extendedWaitUntil:
+    visible: '정차 중 · P'
+    timeout: 10000
+
+# 10. 데이터 지우기 2단계 확인: 1단계에서 취소 → 2단계에서 취소 → 끝까지 진행
+- tapOn: '설정'
+- tapOn: '데이터 지우기'
+- extendedWaitUntil:
+    visible: '위치정보 이용 동의를 철회하고.*'
+    timeout: 10000
+- assertVisible: '계속'
+- takeScreenshot: ${SHOT_DIR}/39-delete-confirm1
+- tapOn: '취소'
+- assertNotVisible: '위치정보 이용 동의를 철회하고.*'
+- tapOn: '데이터 지우기'
+- tapOn: '계속'
+- extendedWaitUntil:
+    visible: '정말 지울까요.*'
+    timeout: 10000
+- takeScreenshot: ${SHOT_DIR}/40-delete-confirm2
+- tapOn: '취소'
+- assertNotVisible: '정말 지울까요.*'
+- tapOn: '데이터 지우기'
+- tapOn: '계속'
+- tapOn: '지우기'
+- extendedWaitUntil:
+    visible: '지웠어요. 위치정보 동의가 철회됐어요'
+    timeout: 30000
+- takeScreenshot: ${SHOT_DIR}/41-delete-done
+# 삭제 뒤: 로컬 기록 멈춤이 켜졌고(상태 문구), 도감은 0/229로 비었다
+- assertVisible: '기록 멈춤'
+- tapOn: '도감'
+- extendedWaitUntil:
+    visible: '시군구 0/229 · 인구감소지역 0/92'
+    timeout: 20000
+- tapOn: '지도'
+- extendedWaitUntil:
+    visible: '시군구 0/229'
+    timeout: 20000
+- assertVisible: '기록 멈춤'
+- takeScreenshot: ${SHOT_DIR}/42-after-delete-map

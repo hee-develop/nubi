@@ -26,6 +26,22 @@ import com.nubi.car.map.drivingRegionText
 import com.nubi.car.map.mapInteractive
 import com.nubi.car.map.mapMode
 import com.nubi.car.map.uploadIntervalFor
+import com.nubi.car.screens.CodeError
+import com.nubi.car.screens.CodeKind
+import com.nubi.car.screens.CodeState
+import com.nubi.car.screens.ExtrasController
+import com.nubi.car.screens.IntroItem
+import com.nubi.car.screens.IntroTracker
+import com.nubi.car.screens.SummaryCard
+import com.nubi.car.screens.TripSummaryState
+import com.nubi.car.screens.ParkedMenu
+import com.nubi.car.screens.UxState
+import com.nubi.car.screens.formatRemaining
+import com.nubi.car.screens.menuAllowed
+import com.nubi.car.screens.qrAllowed
+import com.nubi.car.screens.qrBitmap
+import com.nubi.car.screens.remainingMs
+import com.nubi.car.trip.Auth
 import com.nubi.car.trip.CoverageTracker
 import com.nubi.car.trip.Gear
 import com.nubi.car.trip.MatchingLine
@@ -66,6 +82,11 @@ class MainActivity : Activity() {
     private lateinit var place: PlaceTracker
     private lateinit var navi: NaviLauncher
     private lateinit var map: MapScreen
+    private lateinit var extras: ExtrasController
+    private lateinit var introTracker: IntroTracker
+    private lateinit var summary: TripSummaryState
+    private lateinit var summaryCard: SummaryCard
+    private lateinit var menu: ParkedMenu
     private lateinit var v: Views
     private val handler = Handler(Looper.getMainLooper())
 
@@ -78,6 +99,12 @@ class MainActivity : Activity() {
      */
     private var distractionOptimized = true
     private var maxStringLength = 0
+
+    /** 주행 규제 중 `UX_RESTRICTIONS_NO_SETUP` 비트가 켜져 있는지(설정·입력 금지). 모르면 true. QR·설정·삭제·메뉴 판정에 DO와 함께 쓴다. */
+    private var setupBlocked = true
+
+    /** 메뉴·QR·요약 카드를 쓰면 안 되는 상태(DO 또는 설정 금지). */
+    private val uiBlocked: Boolean get() = distractionOptimized || setupBlocked
 
     /** 요청 뒤에도 거부됐고 시스템이 더는 묻지 않는 상태(영구 거부). 이때 '설정 열기'를 보인다. */
     private var permanentlyDenied = false
@@ -117,15 +144,33 @@ class MainActivity : Activity() {
         coverage = TripEngineProvider.coverage(this)
         place = TripEngineProvider.place(this)
         map = TripEngineProvider.map(this)
+        extras = TripEngineProvider.extras(this)
+        introTracker = TripEngineProvider.intro(this)
+        summary = TripEngineProvider.summary(this)
         navi = NaviLauncher(this)
         setContentView(R.layout.activity_main)
         v = Views(findViewById(R.id.root))
+        menu = ParkedMenu(
+            activity = this,
+            parkedView = v.parkedView as LinearLayout,
+            header = v.parkedHeader,
+            body = v.body,
+            extras = extras,
+            nowMs = { engine.nowMillis() },
+            allowedNow = { val st = engine.status; menuAllowed(FeatureFlags.parkedMenu, st.gear, st.state, uiBlocked) },
+            voiceOn = { FeatureFlags.voice },
+            onVoiceToggle = { on -> TripEngineProvider.setVoicePref(this, on) },
+            onChange = { handler.post { render() } },
+        )
+        summaryCard = SummaryCard(this, v.root as android.widget.FrameLayout, TripEngineProvider.thumbRepository(this), { engine.nowMillis() }) { summary.dismiss(); render() }
+        v.guestAdd.setOnClickListener { if (guestAllowed()) { extras.requestGuestCode(); extras.refreshGuestCount() } }
+        v.guestEndAll.setOnClickListener { if (guestAllowed()) extras.endAllGuests() }
         v.restartButton.setOnClickListener { startService() }
         v.permissionConfirm.setOnClickListener { requestPermissions() }
         v.permissionSettings.setOnClickListener { openAppSettings() }
-        v.naviSight.setOnClickListener { navigate() }
-        v.naviFestival.setOnClickListener { navigate() }
-        v.naviCompact.setOnClickListener { navigate() }
+        v.naviSight.setOnClickListener { shownSight?.let { navigateTo(KEY_SIGHT, it.title, it.lat, it.lon) } }
+        v.naviFestival.setOnClickListener { shownFestival?.let { navigateTo(KEY_FESTIVAL, it.title, it.lat, it.lon) } }
+        v.naviCompact.setOnClickListener { shownNeighbor?.let { navigateTo(it.code, it.displayName, it.lat, it.lon) } }
         // 정차 지도 버튼. 주행 규제(DO)·정차 아님이면 버튼이 안 보이지만 한 번 더 막는다(fail-closed).
         v.mapBtnZoomIn.setOnClickListener { if (mapTouchAllowed()) map.zoomIn() }
         v.mapBtnZoomOut.setOnClickListener { if (mapTouchAllowed()) map.zoomOut() }
@@ -147,6 +192,12 @@ class MainActivity : Activity() {
         }
     }
 
+    /** 게스트 QR을 만들거나 모두 내려도 되는 상태인지(기어 P, DO 아님, 플래그). 눌림이 들어와도 한 번 더 막는다. */
+    private fun guestAllowed(): Boolean {
+        val s = engine.status
+        return qrAllowed(FeatureFlags.guest, s.gear, s.state, uiBlocked)
+    }
+
     private fun applyUploadInterval(visible: Boolean) {
         engine.uploadIntervalMillis = uploadIntervalFor(
             FeatureFlags.drivingMap, FeatureFlags.liveColoring, visible, TripEngine.UPLOAD_INTERVAL_MILLIS, TripEngine.MAP_UPLOAD_INTERVAL_MILLIS,
@@ -165,6 +216,8 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         registerUxRestrictions()
+        engine.onGearChange = { handler.post { render() } } // 기어가 바뀌면 QR·메뉴를 1초 틱을 기다리지 않고 바로 닫는다
+        extras.refreshSettings()
         map.bind(v.mapDriving, v.mapParked) { engine.nowMillis() }
         // 지도 화면이 실제로 보이는 동안만 업로드를 20초 간격으로 당긴다(백그라운드에서는 60초)
         applyUploadInterval(visible = true)
@@ -175,6 +228,10 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         handler.removeCallbacks(refresh)
+        engine.onGearChange = {}
+        extras.closeCodes()
+        UxState.distractionOptimized = true // 화면이 없는 동안은 fail-closed
+        UxState.setupBlocked = true
         map.unbind()
         applyUploadInterval(visible = false)
         unregisterUxRestrictions()
@@ -185,7 +242,14 @@ class MainActivity : Activity() {
     /** 최상위 화면에서 Back은 앱을 닫지 않고 뒤로 보낸다(포그라운드 서비스는 계속 돈다). */
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
+        // 하위 상태(내 지역 목록·데이터 지우기 확인·QR·다른 탭)에서는 한 단계만 되돌리고, 최상위에서만 뒤로 보낸다
+        if (menu.handleBack()) return
         moveTaskToBack(true)
+    }
+
+    override fun onDestroy() {
+        summaryCard.release()
+        super.onDestroy()
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -230,6 +294,9 @@ class MainActivity : Activity() {
     private fun registerUxRestrictions() {
         // 등록이 끝나 실제 값을 받을 때까지는 제한된 것으로 본다.
         distractionOptimized = true
+        setupBlocked = true
+        UxState.distractionOptimized = true
+        UxState.setupBlocked = true
         try {
             val c = Car.createCar(this) ?: return failClosed("Car 없음")
             car = c
@@ -245,6 +312,9 @@ class MainActivity : Activity() {
 
     private fun failClosed(reason: String) {
         distractionOptimized = true
+        setupBlocked = true
+        UxState.distractionOptimized = true
+        UxState.setupBlocked = true
         Log.w("NubiMain", "주행 규제 등록 실패, DO로 간주: $reason")
     }
 
@@ -261,6 +331,10 @@ class MainActivity : Activity() {
 
     private fun applyRestrictions(r: CarUxRestrictions) {
         distractionOptimized = r.isRequiresDistractionOptimization
+        // 활성 제한 비트에서 설정 금지를 따로 본다(DO가 아니어도 설정·입력은 막힐 수 있다)
+        setupBlocked = (r.activeRestrictions and CarUxRestrictions.UX_RESTRICTIONS_NO_SETUP) != 0
+        UxState.distractionOptimized = distractionOptimized
+        UxState.setupBlocked = setupBlocked
         maxStringLength = r.maxRestrictedStringLength
     }
 
@@ -300,7 +374,9 @@ class MainActivity : Activity() {
             return column.measuredHeight
         }
         // 샘플·거리는 한 줄에 놓이므로 높이는 샘플 쪽에만 센다.
-        val ordered = listOf(v.healthText, v.storageText, v.uploadText, v.roadText, v.regionsText, v.depopText, v.newRegionsText, v.eventText, v.nationalText, v.samplesText, v.distanceText, v.guestCard)
+        val lines = listOf(v.healthText, v.storageText, v.uploadText, v.roadText, v.regionsText, v.depopText, v.newRegionsText, v.eventText, v.nationalText, v.samplesText, v.distanceText)
+        // QR이 떠 있는 동안에는 게스트 카드가 먼저 접히지 않는다(상태 줄 다음 순위)
+        val ordered = if (shownGuest != null) lines.take(3) + v.guestCard + lines.drop(3) else lines + v.guestCard
         val total = measure()
         val heights = ordered.map { if (it.visibility == View.VISIBLE && it !== v.distanceText) it.measuredHeight else 0 }
         val fixed = total - heights.sum()
@@ -329,6 +405,7 @@ class MainActivity : Activity() {
             when {
                 needsPermission -> getString(R.string.state_permission)
                 s.loading -> getString(R.string.state_loading)
+                engine.recordingPaused && s.state != TripState.RECORDING -> getString(R.string.state_paused)
                 s.state == TripState.IDLE -> getString(R.string.state_idle)
                 s.state == TripState.RECORDING -> getString(R.string.state_recording)
                 else -> getString(R.string.state_ended)
@@ -339,7 +416,8 @@ class MainActivity : Activity() {
             RecorderHealth.UNSUPPORTED -> getString(R.string.health_unsupported)
             RecorderHealth.OK -> null
         }
-        val health = healthMessage?.let(::limited)
+        // 서버 인증이 거절돼 재등록도 안 된 상태는 상태 문구로 알린다(업로드 큐는 그대로 남아 있다)
+        val health = listOfNotNull(healthMessage, if (Auth.failed) getString(R.string.auth_failed) else null).takeIf { it.isNotEmpty() }?.joinToString(" · ")?.let(::limited)
         val storage = listOfNotNull(
             if (s.storageHeld) getString(R.string.storage_held_key_error) else null,
             if (s.saveFailures > 0) getString(R.string.storage_save_failed, s.saveFailures) else null,
@@ -387,8 +465,65 @@ class MainActivity : Activity() {
             setStatus(v.drivingMapHealth, warn?.takeIf { v.drivingMapHealth.paint.measureText(it) + 24f + used <= room })
         }
 
+        // 정차 메뉴·QR: 기어가 P를 벗어나거나 DO가 걸리면 바로 닫는다(plan 9-2). 메뉴 탭은 P일 때만 보인다
+        val menuOk = parked && menuAllowed(FeatureFlags.parkedMenu, s.gear, s.state, uiBlocked)
+        if (!(parked && qrAllowed(true, s.gear, s.state, uiBlocked))) extras.closeCodes()
+        extras.expireCodes()
+        // 로컬 기록 멈춤이 서버에 아직 안 닿았다면 30초마다 다시 보낸다
+        val nowElapsed = android.os.SystemClock.elapsedRealtime()
+        if (nowElapsed - lastPauseSyncAt >= 30_000L) {
+            lastPauseSyncAt = nowElapsed
+            extras.syncPendingPause()
+        }
+        menu.update(menuOk)
+        // 하차 요약 카드: 정차 P(DO 아님)에서만, 정산 뒤 30초 또는 탭할 때까지
+        summaryCard.update(if (menuAllowed(true, s.gear, s.state, uiBlocked) && parked) summary.current(android.os.SystemClock.elapsedRealtime()) else null)
         if (parked) renderParked(s, state, health, storage, uploadLine, showNumbers, needsPermission, canAct, mode)
         map.update(mode, s.state == TripState.RECORDING, s.lastLocation, mapInteractive(mode, distractionOptimized))
+    }
+
+    private var lastPauseSyncAt = 0L
+    private var shownGuest: CodeState? = null
+    private var lastGuestCountAt = 0L
+
+    /** 게스트 카드: 평소에는 `같이 탄 사람 추가` 버튼, 누르면 QR·6자리 코드·남은 시간(1초 갱신)을 보인다. 인원이 있으면 `같이 탄 사람 n명`과 `모두 내리기`. */
+    private fun renderGuest(visibleWanted: Boolean, setupOk: Boolean) {
+        val visible = visibleWanted && setupOk // 설정 금지 중에는 카드(버튼)를 숨긴다
+        v.guestCard.visibility = if (visible) View.VISIBLE else View.GONE
+        if (!visible) {
+            shownGuest = null
+            v.guestQrImage.setImageDrawable(null)
+            return
+        }
+        val g = extras.guest
+        if (g !== shownGuest) {
+            shownGuest = g
+            if (g?.matrix != null) v.guestQrImage.setImageBitmap(qrBitmap(g.matrix)) else v.guestQrImage.setImageDrawable(null)
+        }
+        v.guestQrImage.visibility = if (g?.matrix != null) View.VISIBLE else View.GONE
+        if (g != null) {
+            val left = formatRemaining(remainingMs(g.receivedElapsedMs, android.os.SystemClock.elapsedRealtime()))
+            v.guestCode.visibility = View.VISIBLE
+            // 코드와 남은 시간은 두 줄로 나눈다(좁은 카드에서 단어 중간 줄바꿈 방지)
+            v.guestCode.text = getString(R.string.guest_code_format, g.code ?: "")
+            v.guestTime.visibility = View.VISIBLE
+            v.guestTime.text = getString(R.string.guest_time_format, left)
+        } else {
+            v.guestCode.visibility = View.GONE
+            v.guestTime.visibility = View.GONE
+        }
+        val err = extras.codeError?.takeIf { it.first == CodeKind.GUEST }?.second
+        v.guestDesc.text = getString(if (err == null) R.string.guest_qr_desc else com.nubi.car.screens.codeErrorRes(err))
+        val n = extras.guestCount ?: 0
+        v.guestCount.visibility = if (n > 0) View.VISIBLE else View.GONE
+        v.guestCount.text = getString(R.string.guest_count, n)
+        v.guestEndAll.visibility = if (n > 0) View.VISIBLE else View.GONE
+        // 같이 탄 사람 수는 처음 보일 때와 15초마다 다시 받는다
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (lastGuestCountAt == 0L || now - lastGuestCountAt > 15_000L) {
+            lastGuestCountAt = now
+            extras.refreshGuestCount()
+        }
     }
 
     private fun setStatus(view: TextView, text: String?) {
@@ -418,7 +553,8 @@ class MainActivity : Activity() {
         // 현재 시군구를 모르면 제목 자리에 기존 상태 문구(대기·기록 중·종료됨 등)를 보인다.
         v.placeTitle.text = placeName ?: state
         v.nowLabel.visibility = if (placeName != null) View.VISIBLE else View.GONE
-        v.stateText.visibility = if (placeName != null) View.VISIBLE else View.GONE
+        // 지도가 아닌 탭에서는 제목 자리(지금 시군구)가 가려지므로 상태 문구(기록 멈춤 등)를 헤더에 보인다
+        v.stateText.visibility = if (placeName != null || menu.selected != com.nubi.car.screens.MenuTab.MAP) View.VISIBLE else View.GONE
         v.stateText.text = state
         // 단계 배지와 마지막 이벤트(24시간 내 방문·숙박)
         if (placeName != null && here != null) {
@@ -468,8 +604,8 @@ class MainActivity : Activity() {
         v.permissionSettings.visibility = if (permanentlyDenied) View.VISIBLE else View.GONE
 
         // 부가 요소(게스트 QR·이웃 카드·길안내 버튼): 기어 P이고 DO가 없을 때만. 앱 영역이 좁으면(두 앱을 나란히 연 경우 등) 이웃 카드는 축약형이다.
-        val extras = extrasVisible(showNumbers, distractionOptimized)
-        v.guestCard.visibility = if (extras) View.VISIBLE else View.GONE
+        val extrasOk = extrasVisible(showNumbers, distractionOptimized)
+        renderGuest(extrasOk && FeatureFlags.guest, !setupBlocked)
         val density = resources.displayMetrics.density
         val widthDp = (v.root.width / density).toInt()
         val minWidthDp = resources.getInteger(R.integer.neighbor_card_min_width_dp)
@@ -486,13 +622,15 @@ class MainActivity : Activity() {
         val cardLayout = if (mapOn) {
             // 전체형 카드가 들어가는 너비: 03 원형의 기준(neighbor_card_min_width_dp)에서 왼쪽 열·여백을 뺀 값
             val fullCardMinDp = minWidthDp - ((2 * resources.getDimension(R.dimen.page_pad) + resources.getDimension(R.dimen.left_column_width) + resources.getDimension(R.dimen.column_gap)) / density).toInt()
-            neighborLayoutInMap(extras, narrow, (v.panel.width / density).toInt(), fullCardMinDp)
+            neighborLayoutInMap(extrasOk, narrow, (v.panel.width / density).toInt(), fullCardMinDp)
         } else {
-            neighborLayout(extras, widthDp, minWidthDp)
+            neighborLayout(extrasOk, widthDp, minWidthDp)
         }
         v.neighborCard.visibility = if (cardLayout == NeighborLayout.HIDDEN) View.GONE else View.VISIBLE
         shownNeighbor = null
-        if (cardLayout != NeighborLayout.HIDDEN) renderNeighbor(info?.neighbor, info?.neighborsAllVisited == true, cardLayout)
+        shownSight = null
+        shownFestival = null
+        if (cardLayout != NeighborLayout.HIDDEN) renderNeighbor(info?.neighbor, info?.neighborsAllVisited == true, cardLayout, here?.code, here?.displayName)
         foldToFit()
     }
 
@@ -549,7 +687,9 @@ class MainActivity : Activity() {
         // 이웃 카드의 위아래 여백도 줄여 왼쪽 열(샘플·거리·업로드 줄)이 접히지 않을 높이를 만든다
         val padH = resources.getDimensionPixelSize(R.dimen.card_pad_h)
         val padV = if (shrink) (14 * resources.displayMetrics.density).toInt() else resources.getDimensionPixelSize(R.dimen.card_pad_v)
-        v.neighborCard.setPadding(padH, padV, padH, padV)
+        v.introCard.setPadding(padH, padV, padH, padV)
+        val innerV = if (shrink) (12 * resources.displayMetrics.density).toInt() else (20 * resources.displayMetrics.density).toInt()
+        v.neighborInner.setPadding(padH, innerV, padH, innerV)
         // 숫자 줄 묶음 위 여백과 본문 위 여백도 줄인다(정차 지도에서 03 요소를 한 화면에 담으려고)
         (v.linesBlock.layoutParams as LinearLayout.LayoutParams).topMargin = if (shrink) (12 * resources.displayMetrics.density).toInt() else (36 * resources.displayMetrics.density).toInt()
         v.linesBlock.requestLayout()
@@ -561,36 +701,73 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun renderNeighbor(n: Neighbor?, allVisited: Boolean, layout: NeighborLayout) {
+    /** 이번 렌더에서 카드에 보인 지역 소개 항목(관광지·축제). 카드가 안 보이면 null. */
+    private var shownSight: IntroItem? = null
+    private var shownFestival: IntroItem? = null
+
+    /**
+     * 이웃 카드(이웃 이름·인구감소 태그·이웃 길안내 1개)와 그 아래 지금 시군구의 지역 소개 카드(관광지·축제, `/regions/:code/intro`).
+     * 소개는 서버 응답이 오면 보이고(응답이 `sample`이면 '예시' 표기), 없으면(받는 중·실패·플래그 꺼짐) 숨긴다. 길안내는 각각 그 항목의 좌표로 보낸다.
+     */
+    private fun renderNeighbor(n: Neighbor?, allVisited: Boolean, layout: NeighborLayout, hereCode: String?, hereName: String?) {
         v.neighborName.text = n?.displayName ?: getString(if (allVisited) R.string.neighbor_all_visited else R.string.neighbor_unknown)
         v.depopTag.visibility = if (n?.depop92 == true) View.VISIBLE else View.GONE
-        // 목적지(이웃 중심점)를 모르거나 안 가 본 이웃이 없으면 항목 카드·길안내 버튼은 숨긴다.
         val hasNeighbor = n != null
         val full = layout == NeighborLayout.FULL
-        v.poiRow.visibility = if (hasNeighbor && full) View.VISIBLE else View.GONE
-        v.poiSource.visibility = if (hasNeighbor && full) View.VISIBLE else View.GONE
-        v.naviCompact.visibility = if (hasNeighbor && !full) View.VISIBLE else View.GONE
+        // 이웃 길안내는 전체형·축약형 모두 하나 남긴다
+        v.naviCompact.visibility = if (hasNeighbor) View.VISIBLE else View.GONE
         shownNeighbor = n
-        if (naviMessageFor != n?.code) naviMessage = null
-        v.naviStatus.text = if (hasNeighbor) naviMessage ?: "" else ""
-        v.naviStatus.visibility = if (hasNeighbor && naviMessage != null) View.VISIBLE else View.GONE
+        // 지역 소개: 지금 시군구의 것만(옛 시군구의 소개를 남기지 않는다). 좁은 축약형에서는 접는다
+        if (FeatureFlags.intro && !engine.recordingPaused) introTracker.ensure(hereCode, engine.status.lastLocation)
+        val intro = if (FeatureFlags.intro && full) introTracker.intro?.takeIf { it.code == hereCode } else null
+        val sight = intro?.first("attraction")
+        val festival = intro?.first("festival")
+        shownSight = sight
+        shownFestival = festival
+        val showPoi = intro != null && (sight != null || festival != null)
+        v.introCard.visibility = if (showPoi) View.VISIBLE else View.GONE
+        v.poiRow.visibility = if (showPoi) View.VISIBLE else View.GONE
+        v.poiLabel.visibility = if (showPoi && hereName != null) View.VISIBLE else View.GONE
+        v.poiLabel.text = getString(R.string.poi_label, hereName?.let { limitText(it, distractionOptimized, maxStringLength, statusLine = false) } ?: "")
+        v.poiSource.visibility = if (showPoi) View.VISIBLE else View.GONE
+        if (showPoi && intro != null) {
+            bindPoi(v.poiSightTitle, v.poiSightSub, v.naviSight, sight, intro.sample)
+            bindPoi(v.poiFestivalTitle, v.poiFestivalSub, v.naviFestival, festival, intro.sample)
+            v.poiSource.text = getString(if (intro.sample) R.string.poi_source else R.string.poi_source_real)
+        }
+        val keys = listOfNotNull(n?.code, if (sight != null) KEY_SIGHT else null, if (festival != null) KEY_FESTIVAL else null)
+        if (naviMessageFor !in keys) naviMessage = null
+        val anyTarget = keys.isNotEmpty()
+        v.naviStatus.text = if (anyTarget) naviMessage ?: "" else ""
+        v.naviStatus.visibility = if (anyTarget && naviMessage != null) View.VISIBLE else View.GONE
     }
 
-    /** 길안내 버튼: 화면에 보인 이웃의 시군구 중심점까지 NaviHelper로 경로를 요청한다. 버튼이 안 보이는 상태(DO·기어 P 아님)에서는 한 번 더 막는다. */
-    private fun navigate() {
+    private fun bindPoi(title: TextView, sub: TextView, button: TextView, item: IntroItem?, sample: Boolean) {
+        val shown = item != null
+        title.text = item?.title?.let { limitText(it, distractionOptimized, maxStringLength, statusLine = false) } ?: ""
+        // 샘플이면 '예시 항목', 실데이터면 주소(없으면 비움)
+        sub.text = if (sample) getString(R.string.poi_example) else item?.addr ?: ""
+        sub.visibility = if (shown && sub.text.isNotEmpty()) View.VISIBLE else View.GONE
+        button.visibility = if (shown) View.VISIBLE else View.GONE
+        (title.parent as View).visibility = if (shown) View.VISIBLE else View.INVISIBLE
+    }
+
+    /** 길안내 버튼: 보인 항목(이웃 중심점·관광지·축제)의 좌표로 NaviHelper 경로를 요청한다. 버튼이 안 보이는 상태(DO·기어 P 아님)에서는 한 번 더 막는다. */
+    private fun navigateTo(key: String, name: String, lat: Double, lon: Double) {
         val s = engine.status
         if (!extrasVisible(numbersVisible(s.gear, s.state), distractionOptimized)) return
-        val n = shownNeighbor ?: return
-        naviMessageFor = n.code
-        navi.request(n.displayName, n.lat, n.lon) { ok ->
+        naviMessageFor = key
+        navi.request(name, lat, lon) { ok ->
             naviMessage = getString(if (ok) R.string.navigate_sent else R.string.navigate_failed)
-            naviMessageFor = n.code
+            naviMessageFor = key
             render()
         }
     }
 
     private companion object {
         const val REQUEST_CODE = 1
+        const val KEY_SIGHT = "poi:sight"
+        const val KEY_FESTIVAL = "poi:festival"
         const val FUSED_LOCATION = "pleos.car.permission.FUSED_LOCATION"
         const val COARSE = "android.permission.ACCESS_COARSE_LOCATION"
         val REQUIRED = listOf(FUSED_LOCATION, COARSE)

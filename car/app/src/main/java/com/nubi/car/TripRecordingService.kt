@@ -55,6 +55,7 @@ class TripRecordingService : Service() {
             return
         }
         started = true
+        TripEngineProvider.voiceOpen(this)
         engine.onServiceStart()
         // 대기 화면의 전국 완료율은 서비스 시작 때 1회만 받는다(실패하면 생략).
         TripEngineProvider.coverage(this).apply {
@@ -70,6 +71,7 @@ class TripRecordingService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         // 앱이 최근 목록에서 지워졌다. 기록 중이던 트립을 마지막 채택 샘플 시각으로 끝내고 서비스도 접는다.
+        TripEngineProvider.voiceRelease() // 재생 중단 → 포커스 반납 → 해제, 이후 새 재생 금지
         if (started) {
             started = false
             stopSources()
@@ -82,6 +84,7 @@ class TripRecordingService : Service() {
     override fun onDestroy() {
         // Suspend(IGN OFF)는 Pleos SDK에 별도 콜백이 없다. 프로세스가 죽기 전 onDestroy가 오면 여기서 트립을 끝내고 차량 SDK를 해제한다.
         // 오지 않고 프로세스가 죽는 경우는 다음 서비스 시작 때 미종료 트립 복구(Uploader.recoverUnfinished)가 End를 넣는다.
+        TripEngineProvider.voiceRelease()
         if (started) {
             started = false
             stopSources()

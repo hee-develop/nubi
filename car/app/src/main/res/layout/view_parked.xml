@@ -448,7 +448,7 @@
                 android:layout_height="0dp"
                 android:layout_weight="1" />
 
-            <!-- 게스트 QR: 자리표시(준비 중). 터치 동작 없음 -->
+            <!-- 게스트 QR: '같이 탄 사람 추가'를 누르면 서버 코드로 QR·6자리 코드·남은 시간을 보인다(기어 P에서만, P를 벗어나거나 DO면 바로 닫힘) -->
             <LinearLayout
                 android:id="@+id/guest_card"
                 android:layout_width="match_parent"
@@ -462,13 +462,13 @@
                     android:id="@+id/guest_qr_image"
                     android:layout_width="@dimen/qr_size"
                     android:layout_height="@dimen/qr_size"
-                    android:contentDescription="@string/guest_qr_desc"
-                    android:src="@drawable/guest_qr" />
+                    android:layout_marginEnd="32dp"
+                    android:contentDescription="@string/guest_qr_title"
+                    android:visibility="gone" />
 
                 <LinearLayout
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
-                    android:layout_marginStart="32dp"
                     android:layout_weight="1"
                     android:orientation="vertical">
 
@@ -481,6 +481,7 @@
                         android:textStyle="bold" />
 
                     <TextView
+                        android:id="@+id/guest_desc"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="6dp"
@@ -489,34 +490,94 @@
                         android:textSize="@dimen/text_sub" />
 
                     <TextView
+                        android:id="@+id/guest_code"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:textColor="@color/accent"
+                        android:textSize="@dimen/text_body"
+                        android:textStyle="bold"
+                        android:visibility="gone" />
+
+                    <TextView
+                        android:id="@+id/guest_time"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textColor="@color/accent"
+                        android:textSize="@dimen/text_sub"
+                        android:textStyle="bold"
+                        android:visibility="gone" />
+
+                    <TextView
+                        android:id="@+id/guest_count"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:textColor="@color/muted"
+                        android:textSize="@dimen/text_sub"
+                        android:visibility="gone" />
+
+                    <LinearLayout
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="12dp"
-                        android:background="@drawable/bg_chip"
-                        android:paddingStart="24dp"
-                        android:paddingTop="2dp"
-                        android:paddingEnd="24dp"
-                        android:paddingBottom="2dp"
-                        android:text="@string/guest_qr_soon"
-                        android:textColor="@color/muted"
-                        android:textSize="@dimen/text_small" />
+                        android:orientation="horizontal">
+
+                        <TextView
+                            android:id="@+id/guest_add"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:background="@drawable/bg_map_btn_on"
+                            android:clickable="true"
+                            android:focusable="true"
+                            android:paddingStart="24dp"
+                            android:paddingTop="10dp"
+                            android:paddingEnd="24dp"
+                            android:paddingBottom="10dp"
+                            android:text="@string/guest_add"
+                            android:textColor="@color/text"
+                            android:textSize="@dimen/text_sub" />
+
+                        <TextView
+                            android:id="@+id/guest_end_all"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="12dp"
+                            android:background="@drawable/bg_map_btn"
+                            android:clickable="true"
+                            android:focusable="true"
+                            android:paddingStart="24dp"
+                            android:paddingTop="10dp"
+                            android:paddingEnd="24dp"
+                            android:paddingBottom="10dp"
+                            android:text="@string/guest_end_all"
+                            android:textColor="@color/text"
+                            android:textSize="@dimen/text_sub"
+                            android:visibility="gone" />
+                    </LinearLayout>
                 </LinearLayout>
             </LinearLayout>
         </LinearLayout>
 
-        <!-- 오른쪽 이웃 카드 -->
+        <!-- 오른쪽 열: 위는 이웃 카드(안 가 본 이웃 + 길안내 1개), 아래는 지금 여기 소개 카드(관광지·축제 + 길안내) -->
         <LinearLayout
             android:id="@+id/neighbor_card"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_marginStart="@dimen/column_gap"
             android:layout_weight="1"
+            android:orientation="vertical">
+
+        <LinearLayout
+            android:id="@+id/neighbor_inner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
             android:background="@drawable/bg_card"
             android:orientation="vertical"
             android:paddingStart="@dimen/card_pad_h"
-            android:paddingTop="@dimen/card_pad_v"
+            android:paddingTop="20dp"
             android:paddingEnd="@dimen/card_pad_h"
-            android:paddingBottom="@dimen/card_pad_v">
+            android:paddingBottom="20dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -543,7 +604,7 @@
                         android:maxLines="1"
                         android:ellipsize="end"
                         android:textColor="@color/text"
-                        android:textSize="@dimen/text_big"
+                        android:textSize="@dimen/text_poi"
                         android:textStyle="bold" />
                 </LinearLayout>
 
@@ -561,29 +622,57 @@
                     android:textColor="@color/depop"
                     android:textSize="@dimen/text_sub"
                     android:textStyle="bold" />
+
+                <!-- 이웃 길안내(전체형·축약형 모두 하나): 이웃 시군구 중심점으로 요청한다 -->
+                <TextView
+                    android:id="@+id/navi_compact"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="20dp"
+                    android:background="@drawable/bg_button"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:gravity="center"
+                    android:paddingStart="32dp"
+                    android:paddingTop="12dp"
+                    android:paddingEnd="32dp"
+                    android:paddingBottom="12dp"
+                    android:text="@string/navigate"
+                    android:textColor="@color/on_accent"
+                    android:textSize="@dimen/text_body"
+                    android:textStyle="bold"
+                    android:visibility="gone" />
             </LinearLayout>
 
-            <!-- 축약형(좁은 앱 영역): 이웃 이름 + 태그 + 길안내 1개만 보인다 -->
-            <TextView
-                android:id="@+id/navi_compact"
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/intro_card"
                 android:layout_width="match_parent"
-                android:layout_height="@dimen/button_height"
-                android:layout_marginTop="20dp"
-                android:background="@drawable/bg_button"
-                android:clickable="true"
-                android:focusable="true"
-                android:gravity="center"
-                android:text="@string/navigate"
-                android:textColor="@color/on_accent"
-                android:textSize="@dimen/text_logo"
+                android:layout_height="0dp"
+                android:layout_marginTop="8dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_card"
+                android:orientation="vertical"
+                android:paddingStart="@dimen/card_pad_h"
+                android:paddingTop="@dimen/card_pad_v"
+                android:paddingEnd="@dimen/card_pad_h"
+                android:paddingBottom="@dimen/card_pad_v">
+
+            <TextView
+                android:id="@+id/poi_label"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
                 android:textStyle="bold"
-                android:visibility="gone" />
+                android:layout_marginTop="0dp"
+                android:textColor="@color/muted"
+                android:textSize="@dimen/text_sub" />
 
             <LinearLayout
                 android:id="@+id/poi_row"
                 android:layout_width="match_parent"
                 android:layout_height="0dp"
-                android:layout_marginTop="32dp"
+                android:layout_marginTop="8dp"
                 android:layout_weight="1"
                 android:orientation="horizontal">
 
@@ -596,6 +685,7 @@
                     android:padding="@dimen/poi_pad">
 
                     <TextView
+                        android:id="@+id/poi_sight_kind"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="@string/poi_kind_sight"
@@ -604,6 +694,7 @@
                         android:textStyle="bold" />
 
                     <TextView
+                        android:id="@+id/poi_sight_title"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
@@ -615,6 +706,7 @@
                         android:textStyle="bold" />
 
                     <TextView
+                        android:id="@+id/poi_sight_sub"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
@@ -630,14 +722,14 @@
                     <TextView
                         android:id="@+id/navi_sight"
                         android:layout_width="match_parent"
-                        android:layout_height="@dimen/button_height"
+                        android:layout_height="80dp"
                         android:background="@drawable/bg_button"
                         android:clickable="true"
                         android:focusable="true"
                         android:gravity="center"
                         android:text="@string/navigate"
                         android:textColor="@color/on_accent"
-                        android:textSize="@dimen/text_logo"
+                        android:textSize="@dimen/text_body"
                         android:textStyle="bold" />
                 </LinearLayout>
 
@@ -651,6 +743,7 @@
                     android:padding="@dimen/poi_pad">
 
                     <TextView
+                        android:id="@+id/poi_festival_kind"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="@string/poi_kind_festival"
@@ -659,6 +752,7 @@
                         android:textStyle="bold" />
 
                     <TextView
+                        android:id="@+id/poi_festival_title"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
@@ -670,6 +764,7 @@
                         android:textStyle="bold" />
 
                     <TextView
+                        android:id="@+id/poi_festival_sub"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
@@ -685,14 +780,14 @@
                     <TextView
                         android:id="@+id/navi_festival"
                         android:layout_width="match_parent"
-                        android:layout_height="@dimen/button_height"
+                        android:layout_height="80dp"
                         android:background="@drawable/bg_button"
                         android:clickable="true"
                         android:focusable="true"
                         android:gravity="center"
                         android:text="@string/navigate"
                         android:textColor="@color/on_accent"
-                        android:textSize="@dimen/text_logo"
+                        android:textSize="@dimen/text_body"
                         android:textStyle="bold" />
                 </LinearLayout>
             </LinearLayout>
@@ -705,11 +800,13 @@
                 android:text="@string/poi_source"
                 android:textColor="@color/muted"
                 android:textSize="@dimen/text_sub" />
+            </LinearLayout>
 
             <TextView
                 android:id="@+id/navi_status"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
                 android:textColor="@color/accent"
                 android:textSize="@dimen/text_sub" />
         </LinearLayout>

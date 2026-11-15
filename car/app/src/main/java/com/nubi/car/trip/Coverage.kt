@@ -85,13 +85,13 @@ internal fun getText(baseUrl: String, path: String, bearerToken: String? = null)
     val conn = URL(baseUrl + path).openConnection() as HttpURLConnection
     try {
         conn.requestMethod = "GET"
-        if (bearerToken != null) conn.setRequestProperty("Authorization", "Bearer $bearerToken")
+        val token = bearerToken ?: Auth.token
+        if (token != null) conn.setRequestProperty("Authorization", "Bearer $token")
         conn.connectTimeout = 5_000
         conn.readTimeout = 10_000
         val code = conn.responseCode
         val text = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() } ?: ""
-        if (code in 200..299) return text
-        throw HttpFailure(code, "HTTP $code ${path.substringBefore('?')}") // 쿼리스트링(좌표·차량 ID)은 메시지에 남기지 않는다
+        return finishResponse(code, text, path, token)
     } finally {
         conn.disconnect()
     }
@@ -321,6 +321,19 @@ class CoverageTracker(
             cache?.putString(KEY_NATIONAL, percent.toString())
         } catch (t: Throwable) {
             Log.w("NubiCoverage", "전국 완료율 저장 실패: ${t.javaClass.simpleName}")
+        }
+    }
+
+    /** 데이터 삭제 뒤: 보이던 줄과 저장해 둔 전국 완료율·도감 요약까지 모두 비운다(옛 숫자가 다시 보이지 않게). */
+    fun clearAll() {
+        clear()
+        nationalPercent = null
+        regions = null
+        try {
+            cache?.putString(KEY_NATIONAL, "")
+            cache?.putString(KEY_REGIONS, "")
+        } catch (t: Throwable) {
+            Log.w("NubiCoverage", "요약 캐시 비우기 실패: ${t.javaClass.simpleName}")
         }
     }
 

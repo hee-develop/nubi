@@ -11,7 +11,10 @@ import java.net.URL
 class PermanentFailure(message: String) : IOException(message)
 
 /** 서버가 2xx가 아닌 응답을 줬다. 어떻게 다룰지는 [Uploader]가 상태 코드로 분류한다. */
-class HttpFailure(val status: Int, message: String) : IOException(message)
+class HttpFailure(val status: Int, message: String, /** 서버 응답의 `{ error: '<code>' }`(없으면 null). 401·403의 의미를 가르는 데 쓴다. */ val code: String? = null) : IOException(message)
+
+/** 서버가 기록 멈춤·동의 철회로 이 요청을 받지 않았다(200 `{ paused: true }`). 다시 보내도 소용없으니 그 트립을 재시도 없이 버린다. */
+class PausedByServer(message: String, /** 서버가 알려 준 멈춤 시작 시각(epoch ms). 동의 철회면 null. */ val pausedAtMillis: Long? = null) : IOException(message)
 
 interface TripApi {
     /** 같은 [QueueEntry.Start.localId]로 다시 부르면 서버는 기존 tripId를 돌려준다(멱등). */
@@ -23,7 +26,14 @@ interface TripApi {
     fun aliasVehicle(e: QueueEntry.Alias)
 }
 
+/** 등록 응답: 서버 발급 차량 ID와 (서버 인증이 켜져 있을 때만 오는) 차량 토큰. */
+data class Registration(val vehicleId: String, val token: String?)
+
 class HttpTripApi(private val baseUrl: String) : TripApi {
+    /** 점 업로드 응답이 `paused`이거나 `dropped > 0`이다(서버가 멈춤 구간의 점을 버렸다). 업로드 스레드에서 불린다. */
+    @Volatile
+    var onPointsPaused: () -> Unit = {}
+
     override fun createTrip(e: QueueEntry.Start): String {
         val body = JSONObject()
             .put("localId", e.localId)
@@ -32,6 +42,7 @@ class HttpTripApi(private val baseUrl: String) : TripApi {
             .put("startedAt", isoOf(e.startedAtMillis))
             .put("odometerStartKm", e.odometerStartKm ?: JSONObject.NULL)
         val text = post("/trips", body)
+        pausedAtOf(text)?.let { (paused, at) -> if (paused) throw PausedByServer("기록 멈춤 /trips", at) }
         // 2xx인데 JSON이 아닌 응답(프록시·캡티브 포털 등)은 성공으로 치지 않는다.
         return try {
             JSONObject(text).getString("tripId")
@@ -55,11 +66,18 @@ class HttpTripApi(private val baseUrl: String) : TripApi {
                     .put("gear", s.gear?.name ?: JSONObject.NULL),
             )
         }
-        post("/trips/$tripId/points", JSONObject().put("points", arr))
+        val text = post("/trips/$tripId/points", JSONObject().put("points", arr))
+        // 서버가 멈춤 구간의 점을 버렸다(paused 또는 dropped > 0): 차량도 즉시 멈추게 알린다
+        try {
+            val o = JSONObject(text)
+            if (o.optBoolean("paused", false) || o.optInt("dropped", 0) > 0) onPointsPaused()
+        } catch (e: Exception) {
+        }
     }
 
     override fun endTrip(tripId: String, e: QueueEntry.End) {
-        post("/trips/$tripId/end", JSONObject().put("endedAt", isoOf(e.endedAtMillis)).put("odometerEndKm", e.odometerEndKm ?: JSONObject.NULL))
+        val text = post("/trips/$tripId/end", JSONObject().put("endedAt", isoOf(e.endedAtMillis)).put("odometerEndKm", e.odometerEndKm ?: JSONObject.NULL))
+        if (isPaused(text)) throw PausedByServer("기록 멈춤 /end")
     }
 
     override fun aliasVehicle(e: QueueEntry.Alias) {
@@ -67,41 +85,98 @@ class HttpTripApi(private val baseUrl: String) : TripApi {
     }
 
     private fun post(path: String, body: JSONObject): String = postJson(baseUrl, path, body)
+
+    private fun isPaused(text: String): Boolean = try {
+        JSONObject(text).optBoolean("paused", false)
+    } catch (e: Exception) {
+        false
+    }
+
+    /** `{ paused: true, pausedAt? }` 응답이면 (true, 멈춤 시작 ms)를, 아니면 null. */
+    private fun pausedAtOf(text: String): Pair<Boolean, Long?>? = try {
+        val o = JSONObject(text)
+        if (o.optBoolean("paused", false)) true to o.optString("pausedAt", "").takeIf { it.isNotEmpty() }?.let { parseIso(it) } else null
+    } catch (e: Exception) {
+        null
+    }
+
+    private fun parseIso(s: String): Long? = try {
+        java.time.Instant.parse(s).toEpochMilli()
+    } catch (e: Exception) {
+        null
+    }
 }
 
 /** 서버가 차량 ID를 발급한다. VIN은 이 요청 본문에만 실리고 서버는 저장·로그하지 않는다. */
 interface VehicleApi {
     /** VIN을 보내 서버가 발급한 차량 ID(HMAC-SHA256 hex)를 받는다. */
     fun register(vin: String): String
+
+    /** [register]와 같되 차량 토큰도 받는다(서버가 인증을 안 쓰면 null). 기본 구현은 토큰 없이 [register]로 위임한다. */
+    fun registerWithToken(vin: String): Registration = Registration(register(vin), null)
 }
 
 class HttpVehicleApi(private val baseUrl: String) : VehicleApi {
-    override fun register(vin: String): String {
+    override fun register(vin: String): String = registerWithToken(vin).vehicleId
+
+    override fun registerWithToken(vin: String): Registration {
         // VIN은 개인정보에 준하므로 release에서는 TLS(https)가 아니면 보내지 않는다. debug는 에뮬레이터 로컬 서버(평문)를 허용한다.
         if (!BuildConfig.DEBUG && !baseUrl.startsWith("https://")) throw PermanentFailure("TLS 필요")
-        val text = postJson(baseUrl, "/vehicles/register", JSONObject().put("vin", vin))
+        val text = postJson(baseUrl, "/vehicles/register", JSONObject().put("vin", vin), authorize = false)
         return try {
-            JSONObject(text).getString("vehicleId").also { require(it.isNotBlank()) }
+            val o = JSONObject(text)
+            Registration(o.getString("vehicleId").also { require(it.isNotBlank()) }, o.optString("vehicleToken", "").takeIf { it.isNotBlank() })
         } catch (ex: Exception) {
             throw IOException("응답 형식 오류 /vehicles/register")
         }
     }
 }
 
-internal fun postJson(baseUrl: String, path: String, body: JSONObject): String {
+internal fun postJson(baseUrl: String, path: String, body: JSONObject, authorize: Boolean = true): String =
+    sendJson(baseUrl, "POST", path, body, authorize)
+
+internal fun putJson(baseUrl: String, path: String, body: JSONObject): String = sendJson(baseUrl, "PUT", path, body, true)
+
+internal fun deleteRequest(baseUrl: String, path: String): String = sendJson(baseUrl, "DELETE", path, null, true)
+
+/** 본문이 있는 요청(POST·PUT)과 DELETE. 토큰이 있으면 `Authorization: Bearer`를 붙이고 401·403이면 [Auth.onUnauthorized]를 부른다. */
+private fun sendJson(baseUrl: String, method: String, path: String, body: JSONObject?, authorize: Boolean): String {
     val conn = URL(baseUrl + path).openConnection() as HttpURLConnection
     try {
-        conn.requestMethod = "POST"
+        conn.requestMethod = method
         conn.connectTimeout = 5_000
         conn.readTimeout = 10_000
-        conn.doOutput = true
-        conn.setRequestProperty("Content-Type", "application/json")
-        conn.outputStream.use { it.write(body.toString().toByteArray()) }
+        val token = if (authorize) Auth.token else null
+        if (token != null) conn.setRequestProperty("Authorization", "Bearer $token")
+        if (body != null) {
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.outputStream.use { it.write(body.toString().toByteArray()) }
+        }
         val code = conn.responseCode
         val text = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() } ?: ""
-        if (code in 200..299) return text
-        throw HttpFailure(code, "HTTP $code $path")
+        return finishResponse(code, text, path, token)
     } finally {
         conn.disconnect()
     }
+}
+
+/** 응답 공통 처리: 2xx면 본문, 아니면 [HttpFailure]. 401·403은 재등록 훅을 부른다. 쿼리스트링(좌표·차량 ID)은 메시지에 남기지 않는다. */
+internal fun finishResponse(code: Int, text: String, path: String, sentToken: String?): String {
+    if (code in 200..299) {
+        Auth.onAuthorized() // 토큰이 없는 모드에서도 성공 응답이면 인증 실패 표시를 푼다
+        return text
+    }
+    val errorCode = Regex("\"error\"\\s*:\\s*\"([A-Za-z_]+)\"").find(text)?.groupValues?.get(1)
+    // 재등록은 401 또는 `unauthorized`일 때만. forbidden(다른 차량)·local_only·not_parked 같은 403은 인증 실패가 아니다
+    // 재등록이 끝난 뒤 옛 토큰으로 보낸 요청의 401이 늦게 와도 새 토큰을 탓하지 않는다(보낸 토큰이 지금 토큰과 다르면 무시)
+    val stale = sentToken != null && sentToken != Auth.token
+    if ((code == 401 || errorCode == "unauthorized") && !stale) {
+        try {
+            Auth.onUnauthorized()
+        } catch (t: Throwable) {
+            // 재등록 훅의 예외가 응답 처리를 막지 않는다
+        }
+    }
+    throw HttpFailure(code, "HTTP $code ${path.substringBefore('?')}", errorCode)
 }
