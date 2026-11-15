@@ -143,8 +143,8 @@ const readJson = async (req: Request): Promise<unknown> => {
   }
 };
 
-/** 시군구 판정 훅(사양 03 4장). [onStarted]: 새 트립 Start를 받았을 때, [onPoints]: 점을 받았을 때(차량 ID). */
-export type RegionHooks = { onStarted?: (vehicleId: string) => void; onPoints?: (vehicleId: string) => void };
+/** 시군구 판정 훅(사양 03 4장). [onStarted]: 새 트립 Start를 받았을 때, [onPoints]: 점을 받았을 때(차량 ID, 트립 ID). */
+export type RegionHooks = { onStarted?: (vehicleId: string) => void; onPoints?: (vehicleId: string, tripId: string) => void };
 
 /** [onEnded]: 트립이 처음 끝나 맵매칭 작업이 새로 큐에 들어갔을 때 부른다. */
 export const tripsRoutes = (db: Db, onEnded: (tripId: string) => void = () => {}, hooks: RegionHooks = {}) =>
@@ -202,7 +202,7 @@ export const tripsRoutes = (db: Db, onEnded: (tripId: string) => void = () => {}
       }
       if (accepted > 0) {
         const t = db.prepare('SELECT vehicle_id FROM trips WHERE id = ?').get(tripId) as { vehicle_id: string };
-        hooks.onPoints?.(t.vehicle_id);
+        hooks.onPoints?.(t.vehicle_id, tripId);
       }
       return c.json({ accepted, duplicated: parsed.data.points.length - accepted }, 200);
     })

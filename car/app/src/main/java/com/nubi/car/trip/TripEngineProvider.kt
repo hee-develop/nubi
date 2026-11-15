@@ -5,9 +5,15 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import com.nubi.car.BuildConfig
+import com.nubi.car.map.HttpMapApi
+import com.nubi.car.map.LivePoller
+import com.nubi.car.map.MapRepository
+import com.nubi.car.map.MapScreen
 import com.nubi.car.signals.VehicleInfo
 import java.io.File
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 
 /** 프로세스에 하나뿐인 [TripEngine]에 실제 Android 의존성을 꽂는다. */
 object TripEngineProvider {
@@ -22,6 +28,9 @@ object TripEngineProvider {
 
     @Volatile
     private var resolver: VehicleIdResolver? = null
+
+    @Volatile
+    private var mapScreen: MapScreen? = null
 
     fun get(context: Context): TripEngine =
         instance ?: synchronized(this) { instance ?: create(context.applicationContext).also { instance = it } }
@@ -42,6 +51,12 @@ object TripEngineProvider {
     fun place(context: Context): PlaceTracker {
         get(context)
         return placeTracker!!
+    }
+
+    /** 지도 화면 상태(저장소·잠정 색칠 폴링·로컬 궤적). 엔진과 같은 수명이다. */
+    fun map(context: Context): MapScreen {
+        get(context)
+        return mapScreen!!
     }
 
     private fun create(context: Context): TripEngine {
@@ -93,7 +108,29 @@ object TripEngineProvider {
         val place = PlaceTracker(HttpPlaceApi(BuildConfig.SERVER_URL), Executors.newSingleThreadExecutor(), { vehicle.vehicleId }, { engine.status.lastLocation })
         placeTracker = place
         engine.onParked = place::refresh
-        coverage.onTripSettled = place::refresh
+        // 지도: 서버 칸·잠정 색칠은 워커 2개에서, 지연 예약은 데몬 스케줄러 하나에서 돈다. 주행 중 지도를 켠 경우 업로드를 20초 간격으로 당긴다(계약서 05 3장).
+        val mapApi = HttpMapApi(BuildConfig.SERVER_URL)
+        val mapTimer: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "nubi-map-timer").apply { isDaemon = true } }
+        val mapSchedule: (Long, () -> Unit) -> Cancellable = { delay, block ->
+            val f = mapTimer.schedule(block, delay, TimeUnit.MILLISECONDS)
+            Cancellable { f.cancel(false) }
+        }
+        val mapWorkers = Executors.newFixedThreadPool(2) { r -> Thread(r, "nubi-map-worker").apply { isDaemon = true } }
+        val repo = MapRepository(mapApi, mapWorkers, { vehicle.vehicleId }, mapSchedule)
+        val livePoller = LivePoller(mapApi, mapWorkers, { uploader.liveTripId }, mapSchedule, repo)
+        val screen = MapScreen(repo, livePoller)
+        mapScreen = screen
+        uploader.onPointsUploaded = { livePoller.kick() }
+        engine.onLocationSample = { lat, lon, ts, recording -> screen.onLocationSample(lat, lon, ts, recording) }
+        val coverageStarted = engine.onTripStarted
+        engine.onTripStarted = {
+            coverageStarted()
+            screen.onTripStarted()
+        }
+        coverage.onTripSettled = {
+            place.refresh()
+            screen.onTripSettled()
+        }
         return engine
     }
 }

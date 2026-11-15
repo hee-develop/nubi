@@ -81,10 +81,11 @@ class HttpCoverageApi(private val baseUrl: String) : CoverageApi {
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
 }
 
-internal fun getText(baseUrl: String, path: String): String {
+internal fun getText(baseUrl: String, path: String, bearerToken: String? = null): String {
     val conn = URL(baseUrl + path).openConnection() as HttpURLConnection
     try {
         conn.requestMethod = "GET"
+        if (bearerToken != null) conn.setRequestProperty("Authorization", "Bearer $bearerToken")
         conn.connectTimeout = 5_000
         conn.readTimeout = 10_000
         val code = conn.responseCode

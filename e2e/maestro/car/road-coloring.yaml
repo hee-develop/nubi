@@ -27,6 +27,15 @@ env:
 - assertNotVisible: '새 도로 .*'
 - assertNotVisible: '게스트 QR'
 - takeScreenshot: ${SHOT_DIR}/11-road-recording
+# 주행 중 지도(사양 05a): 위 한 줄만 있고 버튼은 없다. 서버 잠정 매칭이 칠한 새 길(live)이 지도에 들어온다(점 업로드 20초 간격 → 잠정 매칭 → 20초 폴링)
+- assertVisible: '지도 way=.*'
+- assertNotVisible: '내 위치'
+- assertNotVisible: '전국'
+- extendedWaitUntil:
+    visible: '지도 .* live=[1-9][0-9]* new=[1-9][0-9]* .*'
+    timeout: 75000
+- assertNotVisible: '샘플.*'
+- takeScreenshot: ${SHOT_DIR}/11-road-live-colored
 - extendedWaitUntil:
     visible: '샘플 60'
     timeout: 90000

@@ -528,4 +528,34 @@ class TripEngineTest {
         scheduler.runPosted()
         assertNull(e.status.lastLocation)
     }
+
+    @Test
+    fun 업로드_타이머는_기본_60초이고_주행_중_지도를_켜면_20초다() {
+        vehicle.vehicleId = "v"
+        val slow = engine()
+        assertEquals(60_000L, slow.uploadIntervalMillis)
+        slow.onServiceStart()
+        slow.onGear(Gear.D)
+        slow.drive(5)
+        scheduler.advance(20_000)
+        assertTrue(server.events.none { it.startsWith("points") })
+        scheduler.advance(50_000)
+        assertTrue(server.events.any { it.startsWith("points") })
+    }
+
+    @Test
+    fun 주행_중_지도를_켜면_20초_뒤에_점이_올라가고_점_100개_기준은_그대로다() {
+        vehicle.vehicleId = "v"
+        val e = engine()
+        e.uploadIntervalMillis = TripEngine.MAP_UPLOAD_INTERVAL_MILLIS
+        assertEquals(20_000L, e.uploadIntervalMillis)
+        assertEquals(100, TripEngine.UPLOAD_BATCH_POINTS)
+        e.onServiceStart()
+        e.onGear(Gear.D)
+        e.drive(5)
+        scheduler.advance(10_000)
+        assertTrue(server.events.none { it.startsWith("points") })
+        scheduler.advance(15_000)
+        assertTrue(server.events.any { it.startsWith("points") })
+    }
 }
