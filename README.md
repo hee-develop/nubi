@@ -13,6 +13,11 @@ Pleos Connect(현대차그룹 AAOS 기반 인포테인먼트) 차량 앱 프로�
 
 - 설치(루트): `pnpm install`
 - 서버: `pnpm server:dev` / `pnpm server:test`
+- 서버 배포 단위: `server/`(`pnpm --filter @nubi/server build` → `server/dist/`)만 있으면 돈다. 시군구 판정 모듈 `server/src/shared/geo-utils.mjs`는 빌드가 `dist/shared/`로 복사하고, `scripts/`의 빌드·검증 스크립트가 같은 파일을 import 한다(루트 `scripts/`는 런타임에 필요 없음).
 - 폰 앱: `pnpm phone:start` / `pnpm phone:test`
 - 타입체크: `pnpm typecheck`
 - 차량 앱: `cd car && ./gradlew :app:assembleDebug` / `pnpm car:test`
+
+## 공개 배포 전 필수 (보안)
+
+서버에는 아직 인증·인가가 없습니다. `/regions/*`·`/coverage/*`·`/trips`(그리고 `/vehicles/*`)는 `vehicleId`만 알면 누구나 읽을 수 있으므로 **공개 배포 전에 인증(기기·계정 토큰)과 소유권 확인, rate limit, TLS 종단을 반드시 붙여야** 합니다(사양 01·03). 현재 조치는 `GET /trips`의 전체 열거 차단(`vehicleId` 없으면 400)뿐입니다.

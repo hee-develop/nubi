@@ -143,8 +143,11 @@ const readJson = async (req: Request): Promise<unknown> => {
   }
 };
 
+/** 시군구 판정 훅(사양 03 4장). [onStarted]: 새 트립 Start를 받았을 때, [onPoints]: 점을 받았을 때(차량 ID). */
+export type RegionHooks = { onStarted?: (vehicleId: string) => void; onPoints?: (vehicleId: string) => void };
+
 /** [onEnded]: 트립이 처음 끝나 맵매칭 작업이 새로 큐에 들어갔을 때 부른다. */
-export const tripsRoutes = (db: Db, onEnded: (tripId: string) => void = () => {}) =>
+export const tripsRoutes = (db: Db, onEnded: (tripId: string) => void = () => {}, hooks: RegionHooks = {}) =>
   new Hono()
     .use(
       bodyLimit({
@@ -163,6 +166,7 @@ export const tripsRoutes = (db: Db, onEnded: (tripId: string) => void = () => {}
         )
         .run(randomUUID(), b.localId, b.vehicleId, b.driverId, toUtc(b.startedAt), b.odometerStartKm ?? null, new Date().toISOString());
       const row = db.prepare('SELECT id FROM trips WHERE vehicle_id = ? AND local_id = ?').get(b.vehicleId, b.localId) as { id: string };
+      hooks.onStarted?.(b.vehicleId);
       return c.json({ tripId: row.id }, Number(r.changes) > 0 ? 201 : 200);
     })
     .post('/:tripId/points', async (c) => {
@@ -196,6 +200,10 @@ export const tripsRoutes = (db: Db, onEnded: (tripId: string) => void = () => {}
         db.exec('ROLLBACK');
         throw e;
       }
+      if (accepted > 0) {
+        const t = db.prepare('SELECT vehicle_id FROM trips WHERE id = ?').get(tripId) as { vehicle_id: string };
+        hooks.onPoints?.(t.vehicle_id);
+      }
       return c.json({ accepted, duplicated: parsed.data.points.length - accepted }, 200);
     })
     .post('/:tripId/end', async (c) => {
@@ -227,21 +235,19 @@ export const tripsRoutes = (db: Db, onEnded: (tripId: string) => void = () => {}
       return c.json({ ...summary, points }, 200);
     })
     .get('/', (c) => {
+      // 전체 열거 차단: 차량 ID 없이 목록을 주지 않는다(공개 배포 전 인증·소유권 확인 필수 — 사양 03 10장).
       const vehicleId = c.req.query('vehicleId');
+      if (!vehicleId) return c.json({ error: 'vehicleId_required' as const }, 400);
       const limitRaw = Number(c.req.query('limit') ?? 50);
       const limit = Number.isInteger(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
-      const rows = (
-        vehicleId
-          ? // alias(UUID로 대체해 올린 트립)로 연결된 트립도 함께 돌려준다.
-            db
-              .prepare(
-                summaryQuery(
-                  `SELECT * FROM trips WHERE vehicle_id = ? OR vehicle_id IN (SELECT alias_id FROM vehicle_alias WHERE vehicle_id = ?)
-                   ORDER BY started_at DESC, created_at DESC LIMIT ?`,
-                ),
-              )
-              .all(vehicleId, vehicleId, limit)
-          : db.prepare(summaryQuery('SELECT * FROM trips ORDER BY started_at DESC, created_at DESC LIMIT ?')).all(limit)
-      ) as TripRow[];
+      // alias(UUID로 대체해 올린 트립)로 연결된 트립도 함께 돌려준다.
+      const rows = db
+        .prepare(
+          summaryQuery(
+            `SELECT * FROM trips WHERE vehicle_id = ? OR vehicle_id IN (SELECT alias_id FROM vehicle_alias WHERE vehicle_id = ?)
+             ORDER BY started_at DESC, created_at DESC LIMIT ?`,
+          ),
+        )
+        .all(vehicleId, vehicleId, limit) as TripRow[];
       return c.json({ trips: rows.map(toSummary) }, 200);
     });

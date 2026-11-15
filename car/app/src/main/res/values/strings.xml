@@ -31,4 +31,8 @@
     <string name="matching_not_counted">이번 주행은 집계되지 않았어요</string>
     <string name="matching_not_counted_reason">이번 주행은 집계되지 않았어요 (%1$s)</string>
     <string name="national_percent">전국 %1$s%% 달렸어요</string>
+    <string name="regions_line">시군구 %1$d/%2$d · 인구감소지역 %3$d/%4$d</string>
+    <string name="regions_new">처음 지난 곳: %1$s</string>
+    <string name="region_event_visit">%1$s 방문</string>
+    <string name="region_event_stay">%1$s에서 하룻밤</string>
 </resources>

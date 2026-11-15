@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // 도로 DB 빌드(사양 3-2): osmium tags-filter → osmium export(GeoJSONSeq) → SQLite.
-// 사용: node scripts/build-road-db.mjs <pbf> <YYYYMM> [--bbox minlon,minlat,maxlon,maxlat] [--out <path>] [--stats-json <path>]
+// 사용: node scripts/build-road-db.mjs <pbf> <YYYYMM> [--bbox minlon,minlat,maxlon,maxlat] [--out <path>] [--stats-json <path>] [--regions <regions.sqlite>]
+//  --regions: 시군구 DB(사양 03). way 중간 정점의 시군구로 도로 키에 지역 접두를 붙인다(`nm:{sgg}:{name}`, `lr:{sido}:{ref}`). 전국 빌드에서는 필수(--bbox 소형 빌드만 생략 가능, 옛 키). snapshot.regions_month에 지역 DB 월을 기록한다.
 //  --bbox : 이 범위와 겹치는 way만 담는다(테스트용 소형 DB). osmium extract(complete_ways)로 먼저 자른다.
 //  --out  : 기본 server/data/roads-<YYYYMM>.sqlite
 // 외부 npm 의존성 없음(Node 22 node:sqlite). osmium-tool 필요(brew install osmium-tool).
@@ -12,7 +13,8 @@ import { mkdirSync, mkdtempSync, rmSync, existsSync, statSync, renameSync, write
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { HIGHWAYS, RoadAccumulator, SCHEMA_SQL, haversine, wayRecord, wayRowValues } from './road-rules.mjs';
+import { HIGHWAYS, RoadAccumulator, SCHEMA_SQL, haversine, locateWay, normalize, wayRecord, wayRowValues } from './road-rules.mjs';
+import { SIDO_SHORT, makeLocator } from '../server/src/shared/geo-utils.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -24,6 +26,7 @@ const opt = (name) => {
 const bboxArg = opt('--bbox');
 const outArg = opt('--out');
 const statsJson = opt('--stats-json');
+const regionsArg = opt('--regions');
 const [pbfArg, month] = args;
 if (!pbfArg || !/^\d{6}$/.test(month ?? '')) {
   console.error('사용: build-road-db.mjs <pbf> <YYYYMM> [--bbox minlon,minlat,maxlon,maxlat] [--out path]');
@@ -32,7 +35,24 @@ if (!pbfArg || !/^\d{6}$/.test(month ?? '')) {
 const pbf = resolve(pbfArg);
 const out = resolve(outArg ?? join(ROOT, 'server/data', `roads-${month}.sqlite`));
 const bbox = bboxArg ? bboxArg.split(',').map(Number) : null;
+if (!bbox && !regionsArg) {
+  console.error('전국 빌드(--bbox 없음)에는 --regions <regions.sqlite>가 필수입니다(도로 키 지역 접두, 사양 03).');
+  process.exit(2);
+}
 if (bbox && (bbox.length !== 4 || bbox.some(Number.isNaN))) throw new Error('--bbox 형식 오류');
+
+// 시군구 판정기(server/src/shared/geo-utils.mjs 공용): 폴리곤 안 → 50m 이내 가장 가까운 시군구. 전국 빌드는 --regions 필수.
+let locate;
+let regionsMonth = null;
+if (regionsArg) {
+  const rdb = new DatabaseSync(resolve(regionsArg), { readOnly: true });
+  regionsMonth = rdb.prepare('SELECT month FROM snapshot ORDER BY month DESC LIMIT 1').get()?.month ?? null;
+  const loc = makeLocator(rdb);
+  locate = (lon, lat) => {
+    const r = loc.locate(lon, lat);
+    return r ? { sgg: r.code, sggDisplay: r.display_name, sido: r.sido_code, sidoShort: SIDO_SHORT[r.sido_code] ?? r.sido_name } : null;
+  };
+}
 
 const t0 = Date.now();
 const work = mkdtempSync(join(tmpdir(), 'nubi-roads-'));
@@ -59,6 +79,9 @@ const insWay = db.prepare('INSERT OR REPLACE INTO ways VALUES (?,?,?,?,?,?,?,?,?
 const insRtree = db.prepare('INSERT OR REPLACE INTO ways_rtree VALUES (?,?,?,?,?)');
 
 const acc = new RoadAccumulator();
+// 지역 접두 효과 측정용: 옛 키(접두 없음)별 중심점 범위와 쪼개진 새 키 집합
+const legacy = new Map();
+const regionStats = { located: 0, unlocated: 0 };
 const byClass = {};
 let totalAll = 0,
   totalNamed = 0,
@@ -85,7 +108,22 @@ for await (const raw of createInterface({ input: exp.stdout, crlfDelay: Infinity
     skipped++;
     continue;
   }
-  const w = wayRecord(id, tags, coords);
+  const region = locate ? locateWay(coords, locate) : undefined;
+  const w = wayRecord(id, tags, coords, undefined, region);
+  if (locate) {
+    regionStats[region ? 'located' : 'unlocated']++;
+    if (w.key.startsWith('nm:') || w.key.startsWith('lr:')) {
+      const lk =
+        (w.key.startsWith('nm:') ? 'nm:' : 'lr:') + normalize((w.key.startsWith('nm:') ? tags.name : tags.ref.split(';')[0]).trim());
+      const cx = (w.minlon + w.maxlon) / 2,
+        cy = (w.minlat + w.maxlat) / 2;
+      let c = legacy.get(lk);
+      if (!c) legacy.set(lk, (c = { c: [181, 91, -181, -91], keys: new Set(), n: 0 }));
+      c.c = [Math.min(c.c[0], cx), Math.min(c.c[1], cy), Math.max(c.c[2], cx), Math.max(c.c[3], cy)];
+      c.keys.add(w.key);
+      c.n++;
+    }
+  }
   insWay.run(...wayRowValues(w));
   insRtree.run(id, w.minlon, w.maxlon, w.minlat, w.maxlat);
   wayCount++;
@@ -116,7 +154,7 @@ for (const r of acc.rows()) {
     }
   }
 }
-db.prepare('INSERT INTO snapshot VALUES (?,?,?,?,?,?,?)').run(
+db.prepare('INSERT INTO snapshot VALUES (?,?,?,?,?,?,?,?)').run(
   month,
   new Date().toISOString(),
   basename(pbf),
@@ -124,6 +162,7 @@ db.prepare('INSERT INTO snapshot VALUES (?,?,?,?,?,?,?)').run(
   totalNamed,
   totalAll,
   JSON.stringify(byClass),
+  regionsMonth,
 );
 db.exec('COMMIT');
 db.exec('ANALYZE');
@@ -132,8 +171,36 @@ rmSync(out, { force: true });
 renameSync(tmpOut, out);
 rmSync(work, { recursive: true, force: true });
 
+// 동명이로 해소: 옛 nm: 키 중 중심점 범위 대각선 > 50km인 것(같은 이름의 먼 도로가 한 도로로 묶였던 것)이 새 키로 몇 개로 쪼개졌는지
+let legacyNm = 0,
+  legacyFar = 0,
+  legacyFarSplit = 0,
+  newKeysFromFar = 0;
+for (const [k, v] of legacy) {
+  if (!k.startsWith('nm:')) continue;
+  legacyNm++;
+  if (haversine([v.c[0], v.c[1]], [v.c[2], v.c[3]]) > 50_000) {
+    legacyFar++;
+    newKeysFromFar += v.keys.size;
+    if (v.keys.size > 1) legacyFarSplit++;
+  }
+}
+const regionKeyStats = regionsArg
+  ? {
+      regionsDb: resolve(regionsArg),
+      waysLocated: regionStats.located,
+      waysUnlocated: regionStats.unlocated,
+      legacyNmKeys: legacyNm,
+      legacyNmKeysFarApart_gt50km: legacyFar,
+      legacyFarKeysSplit: legacyFarSplit,
+      legacyFarSplitRatio: legacyFar ? legacyFarSplit / legacyFar : 0,
+      newKeysFromFarKeys: newKeysFromFar,
+    }
+  : null;
 const stats = {
   out,
+  regionKeys: regionKeyStats,
+  regionsMonth,
   bbox,
   month,
   pbfTimestamp,

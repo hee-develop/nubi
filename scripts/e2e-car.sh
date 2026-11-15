@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # 차량 앱 E2E(Maestro + 서버 검증): debug 앱을 설치하고 서버를 띄운 뒤 flow를 돌리고, 서버에 저장된 트립을 검증한다.
 # 사용: pnpm e2e:car   (Pleos 에뮬레이터 emulator-5554만 쓴다. 꺼져 있으면 실행 전에 띄워 두세요)
-# flow 2개를 순서대로 돈다: 주행 기록(trip-recording, GPX e2e-north) → 도로 색칠(road-coloring, GPX e2e-sejong). 도로 색칠은 실제 Valhalla(nubi-valhalla, 포트 8002)를 쓴다.
+# flow 3개를 순서대로 돈다: 주행 기록(trip-recording, GPX e2e-north) → 도로 색칠(road-coloring, GPX e2e-sejong) → 시군구 색칠(region-coloring, GPX e2e-junggu 2회). 도로 색칠은 실제 Valhalla(nubi-valhalla, 포트 8002)를 쓴다.
 # 환경 변수: E2E_OUT은 산출물 루트(기본 e2e/output/car), PORT는 서버 포트(기본 8787), VALHALLA_PORT는 Valhalla 포트(기본 8002),
+#            NUBI_REGIONS_DB는 지역(시군구) DB(기본 server/data/regions/regions.sqlite, 없으면 테스트 픽스처를 명시해 넘김),
 #            NUBI_ROADS_DB는 도로 DB(기본: server/data/roads-*.sqlite 중 최신, 없으면 server/test/fixtures/roads-test.sqlite를 이 스크립트가 **명시**해 서버에 넘긴다. 서버 자체는 조용히 대체하지 않는다).
 # 실행마다 $E2E_OUT/<시각>/ 폴더를 새로 만들고 스크린샷(shots/)과 로그는 그 안에만 둔다.
 # 앞 실행의 앱 데이터(미종료 트립·큐·저장된 차량 ID)가 남지 않도록 설치 뒤 pm clear 한다.
@@ -45,7 +46,13 @@ if [ -z "${NUBI_ROADS_DB:-}" ]; then
   [ -n "$NUBI_ROADS_DB" ] || NUBI_ROADS_DB="$ROOT/server/test/fixtures/roads-test.sqlite"
 fi
 export NUBI_ROADS_DB
-echo "== Valhalla 확인 (포트 $VALHALLA_PORT), 도로 DB: $NUBI_ROADS_DB"
+# 지역(시군구) DB: 전국이 있으면 그것, 없으면 테스트 픽스처를 명시해 넘긴다. 도감 분모(229) 단언은 전국 DB가 아니면 verify-trip이 중단한다.
+if [ -z "${NUBI_REGIONS_DB:-}" ]; then
+  NUBI_REGIONS_DB="$ROOT/server/data/regions/regions.sqlite"
+  [ -f "$NUBI_REGIONS_DB" ] || NUBI_REGIONS_DB="$ROOT/server/test/fixtures/regions-test.sqlite"
+fi
+export NUBI_REGIONS_DB
+echo "== Valhalla 확인 (포트 $VALHALLA_PORT), 도로 DB: $NUBI_ROADS_DB, 지역 DB: $NUBI_REGIONS_DB"
 VALHALLA_PORT="$VALHALLA_PORT" bash "$ROOT/scripts/valhalla-up.sh"
 for _ in $(seq 1 60); do
   [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$VALHALLA_PORT/status" || true)" = "200" ] && break
@@ -92,10 +99,13 @@ HMAC_KEY="e2e-vehicle-hmac-key"
 PROBE_VIN="E2EPROBEVIN0001"
 # 앱에 주입하는 VIN(debug 전용 vin= 신호). pm clear 뒤에도 서버가 발급한 차량 ID를 쓰게 한다. verify-trip이 HMAC(키, 이 VIN)과 트립의 vehicleId가 같은지 본다
 APP_VIN="E2EAPPVIN0000001"
+# 서버는 vehicleId 없는 GET /trips(전체 열거)를 400으로 막는다. 앱이 쓰는 차량 ID = HMAC-SHA256(키, 주입 VIN)으로 목록을 조회한다.
+E2E_VEHICLE_ID="$(node -e "console.log(require('node:crypto').createHmac('sha256', process.argv[1]).update(process.argv[2]).digest('hex'))" "$HMAC_KEY" "$APP_VIN")"
+export E2E_VEHICLE_ID
 echo "== 서버 시작 (포트 $PORT, 메모리 DB)"
 mkdir -p "$RUN_DIR"
 # watch 없이 한 번만 띄운다. 서브셸이 곧 프로세스 그룹 리더라 그룹 전체(tsx와 자식 node)를 함께 종료한다.
-(cd "$ROOT/server" && NUBI_DB=:memory: NUBI_VEHICLE_HMAC_KEY="$HMAC_KEY" PORT="$PORT" NUBI_VALHALLA_URL="http://127.0.0.1:$VALHALLA_PORT" NUBI_ROADS_DB="$NUBI_ROADS_DB" exec ./node_modules/.bin/tsx src/index.ts >"$RUN_DIR/server.log" 2>&1) &
+(cd "$ROOT/server" && NUBI_DB=:memory: NUBI_VEHICLE_HMAC_KEY="$HMAC_KEY" PORT="$PORT" NUBI_VALHALLA_URL="http://127.0.0.1:$VALHALLA_PORT" NUBI_ROADS_DB="$NUBI_ROADS_DB" NUBI_REGIONS_DB="$NUBI_REGIONS_DB" exec ./node_modules/.bin/tsx src/index.ts >"$RUN_DIR/server.log" 2>&1) &
 SERVER_PGID=$!
 for _ in $(seq 1 30); do
   curl -fs "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
@@ -116,9 +126,16 @@ run_flow() {
     [ "$attempt" -eq 1 ] || out="$RUN_DIR/maestro/$name-attempt$attempt"
     # 기어 P 5분 종료 조건을 시계로 건너뛰려고 flow 시작 직전의 "지금 + 6분"(epoch ms)을 넘긴다
     plus6=$(( $(date +%s) * 1000 + 6 * 60 * 1000 ))
+    # 시군구 flow용 절대 시각(epoch ms): B 시작·B 종료(+7분)·C 시작(= B 종료 + 정확히 10시간)·C 종료(+6분).
+    # B 시작 = max(지금 + 15분, 오늘(KST) 22:30). 그래서 B 종료는 같은 KST 날짜 안(22:37~23:53)이고, C 시작은 항상 다음 날이라 자정을 지난다.
+    # B의 서버 종료 시각은 마지막 샘플 시각(= B 시작 + 12초, 12점 1초 간격 실측)이라 C 시작 = B 시작 + 10시간 + 12초로 B 종료 → C 시작이 정확히 10시간이 된다.
+    # 세종대로 종료 → B 시작은 10분 이상이고 자정을 넘기지 않아(방문만) 실행 시각과 무관하게 같은 결과다. 23:38~24:00 KST에는 B 종료가 자정을 넘으므로 실행을 거부한다.
+    local clocks cB0 cB1 cC0 cC1
+    clocks="$(node -e 'const K=9*36e5,n=Date.now(),k=new Date(n+K),d0=Date.UTC(k.getUTCFullYear(),k.getUTCMonth(),k.getUTCDate())-K;const b0=Math.max(n+15*6e4,d0+22.5*36e5),b1=b0+7*6e4;if(Math.floor((b1+K)/864e5)!==Math.floor((b0+K)/864e5)){console.error("23:38~24:00 KST에는 시군구 flow를 실행할 수 없습니다(B 종료가 자정을 넘음). 잠시 뒤 다시 실행하세요.");process.exit(3)}const c0=b0+10*36e5+12e3;console.log([b0,b1,c0,c0+6*6e4].join(" "))')" || return 3
+    read -r cB0 cB1 cC0 cC1 <<<"$clocks"
     "${ADB[@]}" logcat -c || true
     set +e
-    "$MAESTRO" test "$yaml" --device "$SERIAL" -e SHOT_DIR="$SHOTS" -e CLOCK_PLUS_6MIN="$plus6" -e APP_VIN="$APP_VIN" --test-output-dir "$out"
+    "$MAESTRO" test "$yaml" --device "$SERIAL" -e SHOT_DIR="$SHOTS" -e CLOCK_PLUS_6MIN="$plus6" -e CLOCK_B_START="$cB0" -e CLOCK_B_END="$cB1" -e CLOCK_C_START="$cC0" -e CLOCK_C_END="$cC1" -e APP_VIN="$APP_VIN" --test-output-dir "$out"
     rc=$?
     set -e
     "${ADB[@]}" logcat -d -s "${LOGTAGS[@]}" >"$RUN_DIR/app-logcat-$name-attempt$attempt.txt" 2>&1 || true
@@ -147,12 +164,12 @@ run_flow trip-recording "e2e/maestro/car/trip-recording.yaml" "$ROOT/car/app/src
 echo "== 서버 검증"
 # 이번 실행의 e2e-north GPX(점 30개, 첫/끝 좌표 일치)와 맞는 종료된 트립을 찾는다. 종료 업로드가 끝날 때까지 잠시 기다린다
 TRIP_ID="$(node "$ROOT/scripts/verify-trip.mjs" --pick "$BASE_URL" "$ROOT/car/app/src/debug/assets/e2e-north.gpx" 30)"
-curl -fs "$BASE_URL/trips?limit=200" >"$RUN_DIR/trips.json" || true
+curl -fs "$BASE_URL/trips?vehicleId=$E2E_VEHICLE_ID&limit=200" >"$RUN_DIR/trips.json" || true
 [ -n "$TRIP_ID" ] || { echo "이번 실행의 e2e-north 트립(점 30개·좌표 일치·종료됨)이 서버에 없습니다. $RUN_DIR/trips.json 을 확인하세요." >&2; exit 1; }
 curl -fs "$BASE_URL/trips/$TRIP_ID" >"$RUN_DIR/trip-detail.json"
 # 차량 ID 발급 API: 탐침 VIN을 직접 등록해 응답을 남긴다(앱이 쓴 VIN과는 별개). 서버가 VIN을 저장·응답하지 않는지 verify-trip이 확인한다
 curl -fs -X POST -H 'content-type: application/json' -d "{\"vin\":\"$PROBE_VIN\"}" "$BASE_URL/vehicles/register" >"$RUN_DIR/register.json"
-curl -fs "$BASE_URL/trips?limit=200" >"$RUN_DIR/trips-after-register.json"
+curl -fs "$BASE_URL/trips?vehicleId=$E2E_VEHICLE_ID&limit=200" >"$RUN_DIR/trips-after-register.json"
 NUBI_VEHICLE_HMAC_KEY="$HMAC_KEY" E2E_PROBE_VIN="$PROBE_VIN" E2E_APP_VIN="$APP_VIN" node "$ROOT/scripts/verify-trip.mjs" "$RUN_DIR/trip-detail.json" "$ROOT/car/app/src/debug/assets/e2e-north.gpx" "$RUN_DIR/trips-after-register.json" "$ROOT/server/src/db/schema.ts" "$RUN_DIR/register.json"
 echo "== 주행 기록 통과"
 
@@ -161,6 +178,11 @@ run_flow road-coloring "e2e/maestro/car/road-coloring.yaml" "$ROOT/car/app/src/d
 
 echo "== 서버 검증: 도로 색칠"
 E2E_BASE_URL="$BASE_URL" node "$ROOT/scripts/verify-trip.mjs" --road-coloring "$ROOT/car/app/src/debug/assets/e2e-north.gpx" "$ROOT/car/app/src/debug/assets/e2e-sejong.gpx" | tee "$RUN_DIR/road-coloring-verify.txt"
-curl -fs "$BASE_URL/trips?limit=200" >"$RUN_DIR/trips-final.json" || true
+curl -fs "$BASE_URL/trips?vehicleId=$E2E_VEHICLE_ID&limit=200" >"$RUN_DIR/trips-final.json" || true
+echo "== Maestro 실행: 시군구 색칠 (스크린샷: $SHOTS)"
+run_flow region-coloring "e2e/maestro/car/region-coloring.yaml" "$ROOT/car/app/src/debug/assets/e2e-junggu.gpx" 12 || { echo "Maestro(시군구 색칠) 실패" >&2; exit 1; }
+
+echo "== 서버 검증: 시군구 색칠"
+E2E_BASE_URL="$BASE_URL" node "$ROOT/scripts/verify-trip.mjs" --regions "$ROOT/car/app/src/debug/assets/e2e-sejong.gpx" "$ROOT/car/app/src/debug/assets/e2e-junggu.gpx" | tee "$RUN_DIR/region-coloring-verify.txt"
 write_summary
 echo "== 통과. 산출물: $RUN_DIR"

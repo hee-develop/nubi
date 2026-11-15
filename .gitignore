@@ -28,8 +28,11 @@ e2e/output/
 # Claude Code 작업 폴더
 .claude/worktrees/
 
-# 서버 DB 파일
-server/data/
+# 서버 DB 파일. 단 인구감소지역 목록(출처 URL·기준일 포함, 빌드 입력)은 추적한다(기존 `git add -f`를 예외 규칙으로 명시)
+server/data/*
+!server/data/regions/
+server/data/regions/*
+!server/data/regions/depopulation.json
 
 # Pleos 가이드 원문 사본(재배포 허용 미확인, 로컬 전용. pleos-guide-checker가 참고)
 .claude/pleos-guide-snapshot/

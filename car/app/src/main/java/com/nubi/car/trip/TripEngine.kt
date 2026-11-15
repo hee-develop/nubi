@@ -122,6 +122,9 @@ class TripEngine(
         publish()
     }
 
+    /** 엔진이 쓰는 현재 시각(epoch ms). debug `now=` 주입을 따른다(화면의 24시간 판정이 트립 시각과 같은 시계를 쓰도록). */
+    fun nowMillis(): Long = wall()
+
     private fun elapsed() = clock.elapsedMs() + clockOffsetMillis
     private fun wall() = clock.wallMs() + clockOffsetMillis
 

@@ -1,6 +1,7 @@
 /** 맵매칭 결과 처리(사양 02 4장): 합산 → 도로 DB 조회 → 오도미터 대조 → low_confidence → 인정 → driven_ways upsert → result_json. */
 import type { Db } from '../db/index.js';
 import { findWays, nationalCoverage, roundPercent, type Roads } from '../roads/index.js';
+import type { RegionsResult } from '../regions/judge.js';
 import { haversineM } from '../routes/trips.js';
 import { traceAttributes, type TraceDeps } from './valhalla.js';
 
@@ -33,6 +34,8 @@ export type MatchResult = {
   ignoredUnnamed: number;
   matchedKm?: number;
   unmatchedRatio?: number;
+  /** 시군구 판정(사양 03 4장). 매칭과 분리된 작업이라 매칭이 끝난 시점에는 `'pending'`이고 워커가 완료 시 결과로 갱신한다. 지역 판정을 안 쓰거나 의심(suspect) 트립이면 없다. */
+  regions?: RegionsResult | 'pending' | 'failed';
 };
 
 type TripRow = {
@@ -92,6 +95,18 @@ export const runMatching = async (
     finish(r);
     return r;
   };
+  /** 트랜잭션 밖에서 끝나는 결과(짧은 트립·low_confidence)도 finish(done 표시 + 지역 작업 등록)를 한 트랜잭션에 묶는다. */
+  const doneTx = (r: MatchResult) => {
+    db.exec('BEGIN');
+    try {
+      finish(r);
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
+    return r;
+  };
   const trip = db.prepare('SELECT * FROM trips WHERE id = ?').get(tripId) as TripRow | undefined;
   if (!trip) throw new Error('trip 없음');
   const vehicle = canonicalVehicleId(db, trip.vehicle_id);
@@ -99,7 +114,7 @@ export const runMatching = async (
   const before = roundPercent(nationalCoverage(db, roads, vehicle).percent);
   const distanceM = pathLengthM(points);
 
-  if (points.length < MIN_POINTS || distanceM < MIN_DISTANCE_M) return done(emptyResult('skipped', 'too_short', before));
+  if (points.length < MIN_POINTS || distanceM < MIN_DISTANCE_M) return doneTx(emptyResult('skipped', 'too_short', before));
   if (isOdometerMismatch(distanceM, trip.odometer_start_km, trip.odometer_end_km))
     return done(emptyResult('suspect', 'odometer_mismatch', before));
 
@@ -108,7 +123,7 @@ export const runMatching = async (
   const unmatchedRatio = totalPoints > 0 ? trace.unmatchedPoints / totalPoints : 1;
   const matchedKm = [...trace.wayLengthsM.values()].reduce((a, b) => a + b, 0) / 1000;
   if (unmatchedRatio > MAX_UNMATCHED_RATIO) {
-    return done({ ...emptyResult('low_confidence', 'low_confidence', before), matchedKm, unmatchedRatio });
+    return doneTx({ ...emptyResult('low_confidence', 'low_confidence', before), matchedKm, unmatchedRatio });
   }
 
   const ways = findWays(db, [...trace.wayLengthsM.keys()]);

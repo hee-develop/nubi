@@ -8,6 +8,7 @@ import {
   classify,
   effLength,
   isSplitWay,
+  locateWay,
   MAX_STORED_NAMES,
   normalize,
   onewayValue,
@@ -39,6 +40,72 @@ describe('classify (사양 6-1)', () => {
     expect(normalize('ＡＢＣ １２')).toBe('ABC12');
     expect(c({ highway: 'residential', name: '세종 대로' }).key).toBe('nm:세종대로');
     expect(c({ highway: 'residential' }, 77)).toEqual({ key: 'unnamed:77', display: null });
+  });
+});
+
+describe('지역 접두 (사양 03 1·3장)', () => {
+  const jung = { sgg: '11140', sggDisplay: '서울 중구', sido: '11', sidoShort: '서울' };
+  const c = (tags: Record<string, string>, region?: typeof jung | null) => classify(tags, 1, region);
+
+  it('도로명은 nm:{시군구}:{이름}, 표시는 "{시군구 표시 이름} {도로명}"', () => {
+    expect(c({ highway: 'primary', name: '세종대로' }, jung)).toEqual({ key: 'nm:11140:세종대로', display: '서울 중구 세종대로' });
+    expect(c({ highway: 'residential', name: '세종 대로' }, jung).key).toBe('nm:11140:세종대로');
+    // 같은 이름이라도 시군구가 다르면 다른 도로(동명이로 해소)
+    expect(
+      c({ highway: 'residential', name: '중앙로' }, { ...jung, sgg: '27110', sggDisplay: '대구 중구', sido: '27', sidoShort: '대구' }).key,
+    ).toBe('nm:27110:중앙로');
+  });
+
+  it('지방도는 lr:{시도}:{ref}, 표시는 "{시도 단축명} 지방도 {ref}호선"', () => {
+    expect(c({ highway: 'secondary', ref: '7' }, jung)).toEqual({ key: 'lr:11:7', display: '서울 지방도 7호선' });
+    expect(c({ highway: 'tertiary', ref: '7' }, { ...jung, sido: '41', sidoShort: '경기' }).key).toBe('lr:41:7');
+  });
+
+  it('고속도로(mw:)·국도(nr:)·unnamed는 지역과 무관하다', () => {
+    expect(c({ highway: 'motorway', ref: '1', name: '경부고속도로' }, jung)).toEqual({ key: 'mw:1', display: '경부고속도로' });
+    expect(c({ highway: 'trunk', ref: '31' }, jung)).toEqual({ key: 'nr:31', display: '국도 31호선' });
+    expect(c({ highway: 'residential' }, jung)).toEqual({ key: 'unnamed:1', display: null });
+  });
+
+  it('지역을 못 찾으면(null) 접두 00, 접두 규칙을 안 쓰면(undefined) 옛 키', () => {
+    expect(c({ highway: 'residential', name: '중앙로' }, null)).toEqual({ key: 'nm:00:중앙로', display: '중앙로' });
+    expect(c({ highway: 'secondary', ref: '7' }, null)).toEqual({ key: 'lr:00:7', display: '지방도 7호선' });
+    expect(c({ highway: 'residential', name: '중앙로' })).toEqual({ key: 'nm:중앙로', display: '중앙로' });
+  });
+
+  it('wayRecord에 지역을 넘기면 키·표시 이름에 반영되고, way 위치는 중간 정점→처음→끝 순으로 찾는다', () => {
+    const w = wayRecord(
+      5,
+      { highway: 'residential', name: '세종대로' },
+      [
+        [126.97, 37.56],
+        [126.98, 37.57],
+      ],
+      undefined,
+      jung,
+    );
+    expect(w.key).toBe('nm:11140:세종대로');
+    expect(w.display).toBe('서울 중구 세종대로');
+    const seen: number[][] = [];
+    const locate = (lon: number, lat: number) => {
+      seen.push([lon, lat]);
+      return seen.length === 3 ? jung : null;
+    };
+    expect(
+      locateWay(
+        [
+          [1, 1],
+          [2, 2],
+          [3, 3],
+        ],
+        locate,
+      ),
+    ).toEqual(jung);
+    expect(seen).toEqual([
+      [2, 2],
+      [1, 1],
+      [3, 3],
+    ]);
   });
 });
 

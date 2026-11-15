@@ -1,0 +1,76 @@
+# 시군구 색칠 E2E(사양 03 7장). trip-recording → road-coloring 다음에 돈다. 같은 서버·같은 차량이라 road-coloring의 세종대로 트립(종로구 → 중구, 중구에서 종료)이 '앞 트립'이다.
+# 1) debug now를 B 시작 절대 시각(CLOCK_B_START)으로 주입하고 새 트립(e2e-junggu: 중구 안 12점 242m) 시작 → 앞 트립 종료와의 간격 ≥ 10분(자정은 안 지남)이라 중구 방문(level 2), 종료 화면에 '서울 중구 방문'(표시 이름 규칙: 구는 시도 단축명 접두).
+# 2) now를 C 시작(= B 서버 종료 + 정확히 10시간, 자정 통과)으로 주입하고 중구에서 다시 시작 → 간격 ≥ 6시간 + 자정 통과 + 같은 시군구 시작이라 중구 숙박(level 3), 화면에 '서울 중구에서 하룻밤'. 최종 중구 visits=2·stays=1.
+# 시각 env(스크립트가 flow 시작 직전에 계산해 넘기는 절대 epoch ms): CLOCK_B_START, CLOCK_B_END(= B 시작 + 7분, P 5분 + 여유),
+# CLOCK_C_START(= B 시작 + 10시간 + 12초 = B 서버 종료 시각 + 정확히 10시간, 항상 자정을 지남) / CLOCK_C_END(= +6분). 글자 검증은 정규식(전체 일치)이다.
+appId: com.nubi.car
+name: 시군구 색칠
+env:
+  SHOT_DIR: e2e/output/car
+---
+# 1. 상태를 비운다(서버에는 앞 flow의 트립이 남아 있다) → 대기
+- launchApp
+- openLink: nubi-debug://signal?reset=1&vin=${APP_VIN}
+- extendedWaitUntil:
+    visible: '대기'
+    timeout: 20000
+- takeScreenshot: ${SHOT_DIR}/20-region-idle
+
+# 2. 시계를 +15분으로 옮기고 새 트립: 기어 D → e2e-junggu 12점 재생(park=1). 기어 D인 동안 시군구 줄은 숨는다
+- openLink: nubi-debug://signal?now=${CLOCK_B_START}
+- openLink: nubi-debug://signal?gear=D
+- openLink: nubi-debug://signal?gpx=e2e-junggu.gpx&park=1
+- extendedWaitUntil:
+    visible: '기록 중'
+    timeout: 30000
+- assertNotVisible: '시군구 .*'
+- takeScreenshot: ${SHOT_DIR}/21-region-recording
+- extendedWaitUntil:
+    visible: '샘플 12'
+    timeout: 60000
+
+# 3. 기어 P 뒤 시계를 B 종료 시각(CLOCK_B_END)으로 → 종료됨. 매칭(too_short)이 끝나면 도감 한 줄과 마지막 이벤트 '서울 중구 방문'이 보인다
+- openLink: nubi-debug://signal?gear=P&now=${CLOCK_B_END}&flush=1
+- extendedWaitUntil:
+    visible: '종료됨'
+    timeout: 20000
+- extendedWaitUntil:
+    visible: '마지막 업로드: (성공.*|종료 전송 완료)'
+    timeout: 30000
+- extendedWaitUntil:
+    visible: '시군구 [0-9]+/229 · 인구감소지역 [0-9]+/92'
+    timeout: 70000
+- extendedWaitUntil:
+    visible: '서울 중구 방문'
+    timeout: 70000
+- takeScreenshot: ${SHOT_DIR}/22-region-visit
+
+# 4. 기어 D로 바꾸면 도감 줄·이벤트 줄이 다시 숨는다
+- openLink: nubi-debug://signal?gear=D
+- extendedWaitUntil:
+    notVisible: '시군구 .*'
+    timeout: 10000
+- assertNotVisible: '서울 중구 방문'
+- takeScreenshot: ${SHOT_DIR}/23-region-gear-d
+
+# 5. 시계를 C 시작(B 종료 + 10시간)으로 옮기고 중구에서 다시 시작 → 숙박
+- openLink: nubi-debug://signal?now=${CLOCK_C_START}
+- openLink: nubi-debug://signal?gpx=e2e-junggu.gpx&park=1
+- extendedWaitUntil:
+    visible: '기록 중'
+    timeout: 30000
+- extendedWaitUntil:
+    visible: '샘플 12'
+    timeout: 60000
+- openLink: nubi-debug://signal?gear=P&now=${CLOCK_C_END}&flush=1
+- extendedWaitUntil:
+    visible: '종료됨'
+    timeout: 20000
+- extendedWaitUntil:
+    visible: '마지막 업로드: (성공.*|종료 전송 완료)'
+    timeout: 30000
+- extendedWaitUntil:
+    visible: '서울 중구에서 하룻밤'
+    timeout: 70000
+- assertVisible: '시군구 [0-9]+/229 · 인구감소지역 [0-9]+/92'
+- takeScreenshot: ${SHOT_DIR}/24-region-stay

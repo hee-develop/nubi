@@ -7,6 +7,7 @@ import { openDb } from '../src/db/index.js';
 import { effLength, RoadAccumulator, SCHEMA_SQL, wayRecord, wayRowValues } from '../../scripts/road-rules.mjs';
 
 export const ROADS_TEST_DB = fileURLToPath(new URL('./fixtures/roads-test.sqlite', import.meta.url));
+export const REGIONS_TEST_DB = fileURLToPath(new URL('./fixtures/regions-test.sqlite', import.meta.url));
 export const FIXTURE_NORTH = fileURLToPath(new URL('./fixtures/valhalla-e2e-north.json', import.meta.url));
 
 export const json = (body: unknown) => ({ method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
@@ -38,13 +39,14 @@ export const matchedResponse = (edges: FakeEdge[], pointCount: number, unmatched
   matched_points: Array.from({ length: pointCount }, (_, i) => ({ type: i < unmatched ? 'unmatched' : 'matched', edge_index: 0 })),
 });
 
-/** 테스트 앱. 도로 DB는 항상 명시한다(기본은 테스트 픽스처). 로컬 전국 DB를 몰래 붙이지 않도록 `roadsPath: undefined`도 픽스처로 본다. */
+/** 테스트 앱. 지역 DB도 도로 DB처럼 픽스처를 명시해 넘긴다(`regionsPath: null`이면 지역 DB 없음). 도로 DB는 항상 명시한다(기본은 테스트 픽스처). 로컬 전국 DB를 몰래 붙이지 않도록 `roadsPath: undefined`도 픽스처로 본다. */
 export const newApp = (options: AppOptions = {}) =>
   createApp(openDb(':memory:'), {
     vehicleHmacKey: 'test-key',
     retryDelayMs: 5,
     ...options,
     roadsPath: options.roadsPath === undefined ? ROADS_TEST_DB : options.roadsPath,
+    regionsPath: options.regionsPath === undefined ? REGIONS_TEST_DB : options.regionsPath,
   });
 export type TestApp = ReturnType<typeof newApp>;
 
@@ -143,7 +145,7 @@ export const makeRoadsDb = async (path: string, ways: SynthWay[], month = '20990
     );
   }
   db.exec('COMMIT');
-  db.prepare('INSERT INTO snapshot VALUES (?,?,?,?,?,?,?)').run(
+  db.prepare('INSERT INTO snapshot VALUES (?,?,?,?,?,?,?,?)').run(
     month,
     new Date().toISOString(),
     'synthetic.pbf',
@@ -151,6 +153,7 @@ export const makeRoadsDb = async (path: string, ways: SynthWay[], month = '20990
     totalNamed,
     totalNamed,
     '{}',
+    null,
   );
   db.close();
   return path;

@@ -69,6 +69,10 @@
       <div id="detail" class="muted"></div>
       <h1 style="margin-top: 12px">달린 도로 상위 10</h1>
       <ol id="roads"></ol>
+      <label style="display: block; margin-top: 10px"
+        ><input type="checkbox" id="regionToggle" /> 시군구 레이어 (통과·방문·숙박 농도)</label
+      >
+      <div id="regionSummary" class="muted"></div>
       <div id="notice" class="muted"></div>
       <div class="muted" id="attribution"></div>
     </div>
@@ -111,10 +115,71 @@
             'line-color': ['interpolate', ['linear'], ['get', 'coverage'], 0.7, '#ffb703', 1, '#d00000'],
           },
         });
+        // 시군구 레이어(사양 03 5장): level 0~3 농도. 도로 위에 얹지 않고 도로 아래에 둔다.
+        map.addSource('regions', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+        const levelFill = ['match', ['get', 'level'], 1, 0.18, 2, 0.35, 3, 0.55, 0.02];
+        map.addLayer(
+          {
+            id: 'regions-fill',
+            type: 'fill',
+            source: 'regions',
+            layout: { visibility: 'none' },
+            paint: { 'fill-color': '#2a9d8f', 'fill-opacity': levelFill },
+          },
+          'segments',
+        );
+        map.addLayer(
+          {
+            id: 'regions-line',
+            type: 'line',
+            source: 'regions',
+            layout: { visibility: 'none' },
+            paint: { 'line-color': '#1d6f66', 'line-width': 1 },
+          },
+          'segments',
+        );
         loadSegments();
         loadSummary();
       });
-      map.on('moveend', () => map.isStyleLoaded() && map.getSource('segments') && loadSegments());
+      map.on('moveend', () => {
+        if (!map.isStyleLoaded() || !map.getSource('segments')) return;
+        loadSegments();
+        if ($('regionToggle').checked) loadRegions();
+      });
+      $('regionToggle').addEventListener('change', () => {
+        const on = $('regionToggle').checked;
+        for (const id of ['regions-fill', 'regions-line']) map.setLayoutProperty(id, 'visibility', on ? 'visible' : 'none');
+        if (on) loadRegions();
+        else {
+          regionSeq++; // 늦게 도착하는 응답이 꺼진 레이어를 다시 채우지 않게 한다
+          $('regionSummary').textContent = '';
+        }
+      });
+
+      // 요청 순서 보장: 지도를 빠르게 움직이면 응답이 뒤바뀔 수 있어 마지막 요청의 응답만 반영한다.
+      let regionSeq = 0;
+      async function loadRegions() {
+        const seq = ++regionSeq;
+        const b = map.getBounds();
+        const bbox = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
+        const tooWide = bbox[2] - bbox[0] > 3 || bbox[3] - bbox[1] > 3;
+        const empty = { type: 'FeatureCollection', features: [] };
+        if (tooWide) {
+          // 3° 초과: 서버가 400을 주므로 요청하지 않고 이전 레이어를 비운다
+          map.getSource('regions').setData(empty);
+          $('regionSummary').textContent = '지도를 더 확대하면 시군구가 보여요.';
+          return;
+        }
+        const [fc, s] = await Promise.all([q('/regions/geo', { bbox: bbox.join(',') }), q('/regions/summary')]);
+        if (seq !== regionSeq) return;
+        if (s.error) {
+          $('regionSummary').textContent = '시군구를 불러오지 못했어요: ' + s.error;
+          return;
+        }
+        $('regionSummary').textContent =
+          '시군구 ' + s.colored + '/' + s.total + ' · 인구감소지역 ' + s.depop.colored + '/' + s.depop.total + ' · ' + s.attribution;
+        map.getSource('regions').setData(fc && !fc.error ? fc : empty);
+      }
 
       async function loadSummary() {
         const [s, r] = await Promise.all([q('/coverage/summary'), q('/coverage/roads', { sort: 'length', limit: '10' })]);

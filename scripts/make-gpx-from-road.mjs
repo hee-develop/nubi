@@ -18,7 +18,8 @@ const JITTER_M = 3;
 const SEED = 20261109;
 // 광화문 북쪽 시작 way(국도 48호선 하행)부터 이어 간다. 이 구간은 nr:48 → nr:31 → nm:세종대로로 이름이 바뀐다.
 const START_WAY = 516417601;
-const ROAD_KEYS = new Set(['nr:48', 'nr:31', 'nm:세종대로']);
+// 지역 접두(사양 03): 세종대로는 종로구·중구 두 키로 갈린다
+const ROAD_KEYS = new Set(['nr:48', 'nr:31', 'nm:11110:세종대로', 'nm:11140:세종대로']);
 
 const R = 6371008.8;
 const rad = Math.PI / 180;

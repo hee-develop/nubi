@@ -67,7 +67,7 @@ describe('vehicles', () => {
       ).toBe(false);
       expect(JSON.stringify(db.prepare(`SELECT * FROM ${t}`).all())).not.toContain(VIN);
     }
-    const list = await (await app.request('/trips')).text();
+    const list = await (await app.request(`/trips?vehicleId=${reg.vehicleId}`)).text();
     expect(list).not.toContain(VIN);
     for (const s of spies) expect(JSON.stringify(s.mock.calls)).not.toContain(VIN);
     spies.forEach((s) => s.mockRestore());
@@ -172,7 +172,8 @@ describe('local_id 복합 UNIQUE', () => {
     const ida = ((await a1.json()) as { tripId: string }).tripId;
     expect(((await a2.json()) as { tripId: string }).tripId).toBe(ida);
     expect(((await b1.json()) as { tripId: string }).tripId).not.toBe(ida);
-    expect(((await (await app.request('/trips')).json()) as { trips: unknown[] }).trips).toHaveLength(2);
+    expect(((await (await app.request('/trips?vehicleId=va')).json()) as { trips: unknown[] }).trips).toHaveLength(1);
+    expect(((await (await app.request('/trips?vehicleId=vb')).json()) as { trips: unknown[] }).trips).toHaveLength(1);
   });
 
   it('local_id 단독 UNIQUE였던 기존 DB를 열면 복합 UNIQUE로 마이그레이션하고 기존 행은 보존한다', () => {

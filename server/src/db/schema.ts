@@ -59,6 +59,52 @@ CREATE TABLE IF NOT EXISTS driven_ways (
   snapshot_month TEXT NOT NULL,
   PRIMARY KEY (vehicle_id, way_id)
 );
+-- 시군구 3단계 색칠(사양 03 4장). code는 새 체계(region_alias 적용 후) 시군구 코드. vehicle_id는 트립이 올라온 ID 그대로고 조회는 alias를 합친다(driven_ways와 같다).
+-- level: 1 통과 / 2 방문 / 3 숙박(내려가지 않는다).
+CREATE TABLE IF NOT EXISTS visited_regions (
+  vehicle_id TEXT NOT NULL,
+  code TEXT NOT NULL,
+  level INTEGER NOT NULL,
+  first_at TEXT NOT NULL,
+  last_at TEXT NOT NULL,
+  passes INTEGER NOT NULL DEFAULT 0,
+  visits INTEGER NOT NULL DEFAULT 0,
+  stays INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (vehicle_id, code)
+);
+
+-- 트립 종료 지점 시군구. 다음 트립 Start·점·배치에서 방문/숙박으로 판정한다. 확정(삭제)은 다음 트립 판정이 끝났을 때 또는 종료 + 7일.
+-- visit_done: 방문은 이미 반영했다(Start로 확정했거나 24시간 배치가 잠정 확정). 이 뒤에도 늦게 온 Start·점으로 숙박 승격·방문 취소가 가능해서 7일간 남겨 둔다.
+CREATE TABLE IF NOT EXISTS region_pending (
+  trip_id TEXT PRIMARY KEY,
+  vehicle_id TEXT NOT NULL,
+  code TEXT NOT NULL,
+  ended_at TEXT NOT NULL,
+  visit_done INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_region_pending_vehicle ON region_pending (vehicle_id);
+
+-- 지역 판정 작업 큐(사양 03 4장). 매칭(done)과 분리해서 지역 DB가 없어도 도로 매칭은 끝나고, 판정은 5분 간격으로 최대 7일 재시도한다.
+-- status: queued | done | failed(7일 초과). result_json.regions는 판정 전 'pending', 완료 시 결과로 갱신.
+CREATE TABLE IF NOT EXISTS region_jobs (
+  trip_id TEXT PRIMARY KEY,
+  status TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  queued_at TEXT NOT NULL,
+  finished_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS region_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  vehicle_id TEXT NOT NULL,
+  code TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  at TEXT NOT NULL,
+  trip_id TEXT NOT NULL,
+  UNIQUE (vehicle_id, code, kind, trip_id)
+);
 `;
 
 /** local_id 열이 없던 기존 DB를 위한 후속 DDL. SQLite의 UNIQUE 인덱스는 NULL을 여러 개 허용한다. */

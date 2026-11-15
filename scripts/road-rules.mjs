@@ -25,17 +25,39 @@ export const MAX_STORED_NAMES = 200;
 export const majorOf = (highway) => highway.replace(/_link$/, '');
 export const normalize = (s) => s.normalize('NFKC').replace(/\s+/g, '');
 
-/** 도로 키·표시 이름(사양 6-1). */
-export function classify(tags, wayId) {
+/**
+ * 도로 키·표시 이름(사양 02 6-1, 사양 03 1·3장 지역 접두).
+ * [region]: `undefined`면 지역 접두를 쓰지 않는 옛 규칙(`nm:{name}`, `lr:{ref}`), `null`이면 지역을 알 수 없어 접두 `00`,
+ * `{ sgg, sggDisplay, sido, sidoShort }`이면 `nm:{sgg}:{name}`(표시 "{시군구 표시 이름} {도로명}", 예 "서울 중구 세종대로")·`lr:{sido}:{ref}`(표시 "{시도 단축명} 지방도 {ref}호선").
+ * 고속도로(`mw:`)·국도(`nr:`)는 전국 단일 키라 지역과 무관하다.
+ */
+export function classify(tags, wayId, region) {
   const major = majorOf(tags.highway);
   const ref = tags.ref ? tags.ref.split(';')[0].trim() : '';
   const name = tags.name ? tags.name.trim() : '';
   if (ref && major === 'motorway') return { key: `mw:${normalize(ref)}`, display: name || `고속도로 ${ref}` };
   if (ref && (major === 'trunk' || major === 'primary')) return { key: `nr:${normalize(ref)}`, display: `국도 ${ref}호선` };
-  if (ref && (major === 'secondary' || major === 'tertiary')) return { key: `lr:${normalize(ref)}`, display: `지방도 ${ref}호선` };
+  if (ref && (major === 'secondary' || major === 'tertiary')) {
+    if (region === undefined) return { key: `lr:${normalize(ref)}`, display: `지방도 ${ref}호선` };
+    if (region === null) return { key: `lr:${NO_REGION}:${normalize(ref)}`, display: `지방도 ${ref}호선` };
+    return { key: `lr:${region.sido}:${normalize(ref)}`, display: `${region.sidoShort} 지방도 ${ref}호선` };
+  }
   // ref가 있어도 위 등급이 아니면(unclassified·residential) 이름 규칙으로 넘어간다
-  if (name) return { key: `nm:${normalize(name)}`, display: name };
+  if (name) {
+    if (region === undefined) return { key: `nm:${normalize(name)}`, display: name };
+    if (region === null) return { key: `nm:${NO_REGION}:${normalize(name)}`, display: name };
+    return { key: `nm:${region.sgg}:${normalize(name)}`, display: `${region.sggDisplay} ${name}` };
+  }
   return { key: `unnamed:${wayId}`, display: null };
+}
+
+/** 시군구를 못 찾은 way(바다·경계 밖)의 접두. */
+export const NO_REGION = '00';
+
+/** way의 시군구를 찾는 점: 중간 정점 → 처음 → 끝 순으로 [locate](lon, lat) → 지역|null 을 시도한다. */
+export function locateWay(coords, locate) {
+  const mid = coords[Math.floor(coords.length / 2)];
+  return locate(mid[0], mid[1]) ?? locate(coords[0][0], coords[0][1]) ?? locate(coords.at(-1)[0], coords.at(-1)[1]) ?? null;
 }
 
 /**
@@ -68,8 +90,8 @@ export function haversine(a, b) {
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
-/** way 하나의 DB 행 값. [coords]는 [lon, lat] 열. [keyOverride]는 테스트가 도로 키를 직접 정할 때만 쓴다. */
-export function wayRecord(id, tags, coords, keyOverride) {
+/** way 하나의 DB 행 값. [coords]는 [lon, lat] 열. [keyOverride]는 테스트가 도로 키를 직접 정할 때만 쓴다. [region]은 [classify] 참고. */
+export function wayRecord(id, tags, coords, keyOverride, region) {
   let len = 0,
     minlon = 181,
     minlat = 91,
@@ -83,7 +105,7 @@ export function wayRecord(id, tags, coords, keyOverride) {
     if (y > maxlat) maxlat = y;
     if (i) len += haversine(coords[i - 1], coords[i]);
   }
-  const c = classify(tags, id);
+  const c = classify(tags, id, region);
   const key = keyOverride ?? c.key;
   const display = keyOverride ? (keyOverride.startsWith('unnamed:') ? null : keyOverride.replace(/^\w+:/, '')) : c.display;
   const eff = effLength(tags, len);
@@ -115,7 +137,7 @@ CREATE VIRTUAL TABLE ways_rtree USING rtree(way_id, minlon, maxlon, minlat, maxl
 CREATE TABLE roads(road_key TEXT PRIMARY KEY, display_name TEXT NOT NULL, highway_major TEXT NOT NULL,
   total_length_m REAL NOT NULL, split_length_m REAL NOT NULL, way_count INTEGER NOT NULL, names_json TEXT NOT NULL DEFAULT '[]');
 CREATE TABLE snapshot(month TEXT PRIMARY KEY, built_at TEXT NOT NULL, pbf_name TEXT NOT NULL, pbf_timestamp TEXT,
-  total_named_length_m REAL NOT NULL, total_all_length_m REAL NOT NULL, by_class_json TEXT NOT NULL);
+  total_named_length_m REAL NOT NULL, total_all_length_m REAL NOT NULL, by_class_json TEXT NOT NULL, regions_month TEXT);
 `;
 
 /** way 행 삽입 쿼리의 열 순서에 맞는 값 배열. */
